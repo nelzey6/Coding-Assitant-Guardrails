@@ -1,176 +1,179 @@
-<p>
-  <a href="https://www.aihero.dev/s/skills-newsletter">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://res.cloudinary.com/total-typescript/image/upload/v1777382277/skills-repo-dark_2x.png">
-      <source media="(prefers-color-scheme: light)" srcset="https://res.cloudinary.com/total-typescript/image/upload/v1777382277/skill-repo-light_2x.png">
-      <img alt="Skills" src="https://res.cloudinary.com/total-typescript/image/upload/v1777382277/skill-repo-light_2x.png" width="369">
-    </picture>
-  </a>
-</p>
+# Claude and Codex Skills
 
-# Skills For Real Engineers
+Shared AI-agent skills and repo templates for Claude Code and Codex.
 
-[![skills.sh](https://skills.sh/b/mattpocock/skills)](https://skills.sh/mattpocock/skills)
+This repository is based on `mattpocock/skills` and adds:
 
-My agent skills that I use every day to do real engineering - not vibe coding.
+- a machine-level installer for Codex, Claude, or both
+- reusable repo templates for `AGENTS.md`, `CLAUDE.md`, `PROJECT.md`, and `CONTEXT.md`
+- an `update-project-md` skill for keeping `PROJECT.md` aligned with repository reality
+- trigger-based default routing for skills such as `grill-with-docs`, `diagnose`, `tdd`, and `zoom-out`
 
-Developing real applications is hard. Approaches like GSD, BMAD, and Spec-Kit try to help by owning the process. But while doing so, they take away your control and make bugs in the process hard to resolve.
+## Table Of Contents
 
-These skills are designed to be small, easy to adapt, and composable. They work with any model. They're based on decades of engineering experience. Hack around with them. Make them your own. Enjoy.
+- [Quick Start](#quick-start)
+- [What The Installer Does](#what-the-installer-does)
+- [Product Repo Files](#product-repo-files)
+- [Agent Orchestration](#agent-orchestration)
+- [Using Skills](#using-skills)
+- [Available Skill Groups](#available-skill-groups)
+- [Ralph Harness](#ralph-harness)
+- [Updating From Upstream](#updating-from-upstream)
 
-If you want to keep up with changes to these skills, and any new ones I create, you can join ~60,000 other devs on my newsletter:
+## Quick Start
 
-[Sign Up To The Newsletter](https://www.aihero.dev/s/skills-newsletter)
+Run from this repository folder. The installer updates this checkout from its configured git remote by default, then re-runs itself so the latest scripts are used.
 
-## Quickstart (30-second setup)
+Windows PowerShell:
 
-1. Run the skills.sh installer:
-
-```bash
-npx skills@latest add mattpocock/skills
+```powershell
+.\scripts\bootstrap\setup-ai-skills.ps1 -Destination D:\Repos\MyProduct
 ```
 
-2. Pick the skills you want, and which coding agents you want to install them on. **Make sure you select `/setup-matt-pocock-skills`**.
+macOS/Linux Bash:
 
-3. Run `/setup-matt-pocock-skills` in your agent. It will:
-   - Ask you which issue tracker you want to use (GitHub, Linear, or local files)
-   - Ask you what labels you apply to tickets when you triage them (`/triage` uses labels)
-   - Ask you where you want to save any docs we create
+```bash
+./scripts/bootstrap/setup-ai-skills.sh --destination "$HOME/src/my-product"
+```
 
-4. Bam - you're ready to go.
+That installs both Codex and Claude skills by default and copies repo templates into the product repo.
 
-## Why These Skills Exist
+For less common options such as installing only one tool, skipping update, or using a different skills repo path, run the scripts with `--help` / PowerShell parameter completion.
 
-I built these skills as a way to fix common failure modes I see with Claude Code, Codex, and other coding agents.
+## What The Installer Does
 
-### #1: The Agent Didn't Do What I Want
+By default, the installer:
 
-> "No-one knows exactly what they want"
->
-> David Thomas & Andrew Hunt, [The Pragmatic Programmer](https://www.amazon.co.uk/Pragmatic-Programmer-Anniversary-Journey-Mastery/dp/B0833F1T3V)
+1. Updates this skills repo checkout with `git fetch --prune` and `git pull --ff-only`.
+2. Re-runs itself so updated installer code is used.
+3. Installs all active skills into both Codex and Claude skill directories.
+4. Installs the Ralph harness under the installed `ralph-prd` skill folder and creates a user-level `ralph` shim.
+5. If `-Destination` / `--destination` is provided, copies repo templates into that product repo.
+6. Adds `.agent-runs/` to the product repo `.gitignore`.
 
-**The Problem**. The most common failure mode in software development is misalignment. You think the dev knows what you want. Then you see what they've built - and you realize it didn't understand you at all.
+Codex skills install to `~/.codex/skills` (or `%USERPROFILE%\.codex\skills` on Windows). Claude skills install to `~/.claude/skills` (or `%USERPROFILE%\.claude\skills` on Windows).
 
-This is just the same in the AI age. There is a communication gap between you and the agent. The fix for this is a **grilling session** - getting the agent to ask you detailed questions about what you're building.
+## Product Repo Files
 
-**The Fix** is to use:
+When `-Destination` / `--destination` is provided:
 
-- [`/grill-me`](./skills/productivity/grill-me/SKILL.md) - for non-code uses
-- [`/grill-with-docs`](./skills/engineering/grill-with-docs/SKILL.md) - same as [`/grill-me`](./skills/productivity/grill-me/SKILL.md), but adds more goodies (see below)
+- `AGENTS.md` is overwritten for Codex guidance.
+- `CLAUDE.md` is overwritten for Claude guidance.
+- `PROJECT.md` is created only if missing.
+- `CONTEXT.md` is created only if missing.
+- `.agent-runs/` is added to `.gitignore`.
 
-These are my most popular skills. They help you align with the agent before you get started, and think deeply about the change you're making. Use them _every_ time you want to make a change.
+File roles:
 
-### #2: The Agent Is Way Too Verbose
+```text
+AGENTS.md  = always-on Codex behavior for a product repo
+CLAUDE.md  = always-on Claude behavior for a product repo
+PROJECT.md = technical repo map: commands, architecture, validation, debugging
+CONTEXT.md = domain language and product/business meaning
+SKILL.md   = reusable workflow loaded when triggered or requested
+```
 
-> With a ubiquitous language, conversations among developers and expressions of the code are all derived from the same domain model.
->
-> Eric Evans, [Domain-Driven-Design](https://www.amazon.co.uk/Domain-Driven-Design-Tackling-Complexity-Software/dp/0321125215)
+## Agent Orchestration
 
-**The Problem**: At the start of a project, devs and the people they're building the software for (the domain experts) are usually speaking different languages.
+[`templates/AGENTS.md`](./templates/AGENTS.md) and [`templates/CLAUDE.md`](./templates/CLAUDE.md) are the main orchestrators.
 
-I felt the same tension with my agents. Agents are usually dropped into a project and asked to figure out the jargon as they go. So they use 20 words where 1 will do.
+- `AGENTS.md` is for Codex.
+- `CLAUDE.md` is for Claude Code.
+- They define default behavior, validation expectations, scratch-state rules, ADR handling, and when to invoke installed skills.
+- They route work automatically to skills such as `grill-with-docs`, `diagnose`, `tdd`, `zoom-out`, `improve-codebase-architecture`, `update-project-md`, and `handoff` based on task triggers.
 
-**The Fix** for this is a shared language. It's a document that helps agents decode the jargon used in the project.
+The individual `SKILL.md` files stay reusable and upstream-friendly. Put repo-specific orchestration in `AGENTS.md` / `CLAUDE.md` instead of editing upstream skills when possible.
 
-<details>
-<summary>
-Example
-</summary>
+## Using Skills
 
-Here's an example [`CONTEXT.md`](https://github.com/mattpocock/course-video-manager/blob/076a5a7a182db0fe1e62971dd7a68bcadf010f1c/CONTEXT.md), from my `course-video-manager` repo. Which one is easier to read?
+Skills are triggered by asking the agent to use them by name or by giving a task that matches their description and the routing rules in `AGENTS.md` or `CLAUDE.md`.
 
-- **BEFORE**: "There's a problem when a lesson inside a section of a course is made 'real' (i.e. given a spot in the file system)"
-- **AFTER**: "There's a problem with the materialization cascade"
+Examples:
 
-This concision pays off session after session.
+```text
+Use update-project-md to inspect this repo and fill PROJECT.md.
+```
 
-</details>
+```text
+Use grill-with-docs before we implement this feature.
+```
 
-This is built into [`/grill-with-docs`](./skills/engineering/grill-with-docs/SKILL.md). It's a grilling session, but that helps you build a shared language with the AI, and document hard-to-explain decisions in ADR's.
+```text
+Use diagnose to investigate this failing integration test.
+```
 
-It's hard to explain how powerful this is. It might be the single coolest technique in this repo. Try it, and see.
+```text
+Use tdd for this bug fix.
+```
 
-> [!TIP]
-> A shared language has many other benefits than reducing verbosity:
->
-> - **Variables, functions and files are named consistently**, using the shared language
-> - As a result, the **codebase is easier to navigate** for the agent
-> - The agent also **spends fewer tokens on thinking**, because it has access to a more concise language
+## Available Skill Groups
 
-### #3: The Code Doesn't Work
+Skills are organized under:
 
-> "Always take small, deliberate steps. The rate of feedback is your speed limit. Never take on a task that’s too big."
->
-> David Thomas & Andrew Hunt, [The Pragmatic Programmer](https://www.amazon.co.uk/Pragmatic-Programmer-Anniversary-Journey-Mastery/dp/B0833F1T3V)
+- `skills/engineering`
+- `skills/productivity`
+- `skills/misc`
 
-**The Problem**: Let's say that you and the agent are aligned on what to build. What happens when the agent _still_ produces crap?
+Useful starting points:
 
-It's time to look at your feedback loops. Without feedback on how the code it produces actually runs, the agent will be flying blind.
+- `update-project-md`: create or refresh `PROJECT.md` with durable repository facts
+- `grill-with-docs`: clarify requirements and update domain context
+- `diagnose`: disciplined debugging loop
+- `tdd`: red-green-refactor development workflow
+- `zoom-out`: understand code in broader system context
+- `improve-codebase-architecture`: identify architecture improvement opportunities
+- `handoff`: create a compact handoff for another agent or session
+- `ralph-prd`: interview until decisions are clear, then create a human-readable PRD and Ralph-compatible `prd.json`
 
-**The Fix**: You need the usual tranche of feedback loops: static types, browser access, and automated tests.
+Check individual `SKILL.md` files for exact behavior.
 
-For automated tests, a red-green-refactor loop is critical. This is where the agent writes a failing test first, then fixes the test. This helps give the agent a consistent level of feedback that results in far better code.
+## Ralph Harness
 
-I've built a **[`/tdd`](./skills/engineering/tdd/SKILL.md) skill** you can slot into any project. It encourages red-green-refactor and gives the agent plenty of guidance on what makes good and bad tests.
+[`scripts/ralph/ralph.ps1`](./scripts/ralph/ralph.ps1) runs a fresh-agent loop over a Ralph-compatible [`prd.json`](./skills/engineering/ralph-prd/SKILL.md). The setup script installs this harness under the installed `ralph-prd` skill folder and creates a user-level `ralph` shim, so product repos do not need a copy of the script.
 
-For debugging, I've also built a **[`/diagnose`](./skills/engineering/diagnose/SKILL.md)** skill that wraps best debugging practices into a simple loop.
+Ralph loop logic:
 
-### #4: We Built A Ball Of Mud
+1. Start only from a clean git working tree, unless `--allow-dirty` is passed.
+2. Read `prd.json`, using `userStories` or a top-level story array as the state source.
+3. Pick the next unfinished story (`passes != true`), sorted by `priority` and then `id`.
+4. Generate a one-story prompt under `.agent-runs/ralph-<timestamp>-<story-id>/prompt.md`.
+5. Launch a fresh agent with the configured adapter: `--tool claude`, `--tool pi`, or `--tool custom --command '... {prompt} ...'`.
+6. Run every configured `--checks` command after the agent exits successfully. If no checks are configured, agent exit success is treated as validation.
+7. If validation passes and the working tree changed, set that story's `passes` field to `true` in `prd.json`.
+8. Append a concise iteration entry to `progress.txt`.
+9. Commit the iteration as `ralph: complete <story-id>`, unless `--no-commit` is set.
+10. Repeat until all stories pass, then print `<promise>COMPLETE</promise>`, or stop when the max iteration budget is reached.
 
-> "Invest in the design of the system _every day_."
->
-> Kent Beck, [Extreme Programming Explained](https://www.amazon.co.uk/Extreme-Programming-Explained-Embrace-Change/dp/0321278658)
+Use [`ralph-prd`](./skills/engineering/ralph-prd/SKILL.md) to create the PRD package. Its most important job is **good story slicing**: small vertical stories with observable acceptance criteria. Ralph succeeds on architecture work only when the redesign is sliced into safe migration steps, not broad rewrite tasks.
 
-> "The best modules are deep. They allow a lot of functionality to be accessed through a simple interface."
->
-> John Ousterhout, [A Philosophy Of Software Design](https://www.amazon.co.uk/Philosophy-Software-Design-2nd/dp/173210221X)
+Typical run:
 
-**The Problem**: Most apps built with agents are complex and hard to change. Because agents can radically speed up coding, they also accelerate software entropy. Codebases get more complex at an unprecedented rate.
+```powershell
+ralph --tool claude --checks "npm test"
+ralph --tool pi --checks "npm test"
+```
 
-**The Fix** for this is a radical new approach to AI-powered development: caring about the design of the code.
+`prd.json.maxIterations` defines the default iteration budget. `--max-iterations` overrides it. Ralph stops early when all stories pass; the max is only a safety cap. For complex redesigns, set `maxIterations` to story count plus buffer, and prefer multiple phased PRDs when human review checkpoints are needed.
 
-This is built in to every layer of these skills:
+See [`scripts/ralph/README.md`](./scripts/ralph/README.md) for the compact harness reference and [`tests/ralph/smoke.ps1`](./tests/ralph/smoke.ps1) for a five-iteration fake-agent smoke test.
 
-- [`/to-prd`](./skills/engineering/to-prd/SKILL.md) quizzes you about which modules you're touching before creating a PRD
-- [`/zoom-out`](./skills/engineering/zoom-out/SKILL.md) tells the agent to explain code in the context of the whole system
+## Updating From Upstream
 
-And crucially, [`/improve-codebase-architecture`](./skills/engineering/improve-codebase-architecture/SKILL.md) helps you rescue a codebase that has become a ball of mud. I recommend running it on your codebase once every few days.
+Keep custom orchestration in [`templates/AGENTS.md`](./templates/AGENTS.md) / [`templates/CLAUDE.md`](./templates/CLAUDE.md) where possible, not inside upstream skill files. This keeps syncs from `mattpocock/skills` easier.
 
-### Summary
+To bring in upstream changes:
 
-Software engineering fundamentals matter more than ever. These skills are my best effort at condensing these fundamentals into repeatable practices, to help you ship the best apps of your career. Enjoy.
+```bash
+git fetch upstream
+git merge upstream/main
+```
 
-## Reference
+Resolve conflicts deliberately. Keep custom skills and templates isolated where possible so upstream merges stay manageable.
 
-### Engineering
+## References
 
-Skills I use daily for code work.
+This repository is based on [`mattpocock/skills`](https://github.com/mattpocock/skills).
 
-- **[diagnose](./skills/engineering/diagnose/SKILL.md)** — Disciplined diagnosis loop for hard bugs and performance regressions: reproduce → minimise → hypothesise → instrument → fix → regression-test.
-- **[grill-with-docs](./skills/engineering/grill-with-docs/SKILL.md)** — Grilling session that challenges your plan against the existing domain model, sharpens terminology, and updates `CONTEXT.md` and ADRs inline.
-- **[triage](./skills/engineering/triage/SKILL.md)** — Triage issues through a state machine of triage roles.
-- **[improve-codebase-architecture](./skills/engineering/improve-codebase-architecture/SKILL.md)** — Find deepening opportunities in a codebase, informed by the domain language in `CONTEXT.md` and the decisions in `docs/adr/`.
-- **[setup-matt-pocock-skills](./skills/engineering/setup-matt-pocock-skills/SKILL.md)** — Scaffold the per-repo config (issue tracker, triage label vocabulary, domain doc layout) that the other engineering skills consume. Run once per repo before using `to-issues`, `to-prd`, `triage`, `diagnose`, `tdd`, `improve-codebase-architecture`, or `zoom-out`.
-- **[tdd](./skills/engineering/tdd/SKILL.md)** — Test-driven development with a red-green-refactor loop. Builds features or fixes bugs one vertical slice at a time.
-- **[to-issues](./skills/engineering/to-issues/SKILL.md)** — Break any plan, spec, or PRD into independently-grabbable GitHub issues using vertical slices.
-- **[to-prd](./skills/engineering/to-prd/SKILL.md)** — Turn the current conversation context into a PRD and submit it as a GitHub issue. No interview — just synthesizes what you've already discussed.
-- **[zoom-out](./skills/engineering/zoom-out/SKILL.md)** — Tell the agent to zoom out and give broader context or a higher-level perspective on an unfamiliar section of code.
-- **[prototype](./skills/engineering/prototype/SKILL.md)** — Build a throwaway prototype to flesh out a design — either a runnable terminal app for state/business-logic questions, or several radically different UI variations toggleable from one route.
+The Operating Principles in [`templates/AGENTS.md`](./templates/AGENTS.md) and [`templates/CLAUDE.md`](./templates/CLAUDE.md) are adapted from [`multica-ai/andrej-karpathy-skills`](https://github.com/multica-ai/andrej-karpathy-skills/tree/main).
 
-### Productivity
-
-General workflow tools, not code-specific.
-
-- **[caveman](./skills/productivity/caveman/SKILL.md)** — Ultra-compressed communication mode. Cuts token usage ~75% by dropping filler while keeping full technical accuracy.
-- **[grill-me](./skills/productivity/grill-me/SKILL.md)** — Get relentlessly interviewed about a plan or design until every branch of the decision tree is resolved.
-- **[handoff](./skills/productivity/handoff/SKILL.md)** — Compact the current conversation into a handoff document so another agent can continue the work.
-- **[write-a-skill](./skills/productivity/write-a-skill/SKILL.md)** — Create new skills with proper structure, progressive disclosure, and bundled resources.
-
-### Misc
-
-Tools I keep around but rarely use.
-
-- **[git-guardrails-claude-code](./skills/misc/git-guardrails-claude-code/SKILL.md)** — Set up Claude Code hooks to block dangerous git commands (push, reset --hard, clean, etc.) before they execute.
-- **[migrate-to-shoehorn](./skills/misc/migrate-to-shoehorn/SKILL.md)** — Migrate test files from `as` type assertions to @total-typescript/shoehorn.
-- **[scaffold-exercises](./skills/misc/scaffold-exercises/SKILL.md)** — Create exercise directory structures with sections, problems, solutions, and explainers.
-- **[setup-pre-commit](./skills/misc/setup-pre-commit/SKILL.md)** — Set up Husky pre-commit hooks with lint-staged, Prettier, type checking, and tests.
+The Ralph loop is implemented locally in [`scripts/ralph/ralph.ps1`](./scripts/ralph/ralph.ps1), documented in [`scripts/ralph/README.md`](./scripts/ralph/README.md), and paired with the [`ralph-prd`](./skills/engineering/ralph-prd/SKILL.md) skill for producing story-sliced `prd.json` input.
