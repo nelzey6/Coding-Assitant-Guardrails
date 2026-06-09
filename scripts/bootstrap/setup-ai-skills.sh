@@ -122,6 +122,9 @@ copy_repo_templates() {
 
   copy_template_if_missing "$template_root/PROJECT.md" "$destination_root/PROJECT.md"
   copy_template_if_missing "$template_root/CONTEXT.md" "$destination_root/CONTEXT.md"
+
+  mkdir -p "$destination_root/.agent-policy"
+  copy_template_if_missing "$template_root/agent-policy/workflow-policy.json" "$destination_root/.agent-policy/workflow-policy.json"
 }
 
 add_gitignore_entry() {
@@ -195,6 +198,7 @@ if [ -n "$DESTINATION" ]; then
   destination_root="$(cd "$DESTINATION" && pwd)"
   copy_repo_templates "$template_root" "$destination_root"
   add_gitignore_entry "$destination_root" ".agent-runs/"
+  add_gitignore_entry "$destination_root" ".worktrees/"
   echo "Repo templates copied to $destination_root"
 fi
 

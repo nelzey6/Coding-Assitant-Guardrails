@@ -95,6 +95,10 @@ function Copy-RepoTemplates {
 
     Copy-TemplateIfMissing -Source (Join-Path $TemplateRoot "PROJECT.md") -DestinationPath (Join-Path $DestinationRoot "PROJECT.md")
     Copy-TemplateIfMissing -Source (Join-Path $TemplateRoot "CONTEXT.md") -DestinationPath (Join-Path $DestinationRoot "CONTEXT.md")
+
+    $policyDestination = Join-Path $DestinationRoot ".agent-policy"
+    New-Item -ItemType Directory -Force -Path $policyDestination | Out-Null
+    Copy-TemplateIfMissing -Source (Join-Path $TemplateRoot "agent-policy\workflow-policy.json") -DestinationPath (Join-Path $policyDestination "workflow-policy.json")
 }
 
 function Add-GitignoreEntry {
@@ -199,6 +203,7 @@ if (![string]::IsNullOrWhiteSpace($Destination)) {
 
     Copy-RepoTemplates -ToolName $Tool -TemplateRoot $templateRoot -DestinationRoot $destinationRoot
     Add-GitignoreEntry -DestinationRoot $destinationRoot -Pattern ".agent-runs/"
+    Add-GitignoreEntry -DestinationRoot $destinationRoot -Pattern ".worktrees/"
     Write-Host "Repo templates copied to $destinationRoot"
 }
 

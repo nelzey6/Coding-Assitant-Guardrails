@@ -5,7 +5,7 @@ Shared AI-agent skills and repo templates for Claude Code and Codex.
 This repository is based on `mattpocock/skills` and adds:
 
 - a machine-level installer for Codex, Claude, or both
-- reusable repo templates for `AGENTS.md`, `CLAUDE.md`, `PROJECT.md`, and `CONTEXT.md`
+- reusable repo templates for `AGENTS.md`, `CLAUDE.md`, `PROJECT.md`, `CONTEXT.md`, and `.agent-policy/workflow-policy.json`
 - an `update-project-md` skill for keeping `PROJECT.md` aligned with repository reality
 - trigger-based default routing for skills such as `grill-with-docs`, `diagnose`, `tdd`, and `zoom-out`
 
@@ -49,7 +49,7 @@ By default, the installer:
 3. Installs all active skills into both Codex and Claude skill directories.
 4. Installs the Ralph harness under the installed `ralph-prd` skill folder and creates a user-level `ralph` shim.
 5. If `-Destination` / `--destination` is provided, copies repo templates into that product repo.
-6. Adds `.agent-runs/` to the product repo `.gitignore`.
+6. Adds `.agent-runs/` and `.worktrees/` to the product repo `.gitignore`.
 
 Codex skills install to `~/.codex/skills` (or `%USERPROFILE%\.codex\skills` on Windows). Claude skills install to `~/.claude/skills` (or `%USERPROFILE%\.claude\skills` on Windows).
 
@@ -61,16 +61,18 @@ When `-Destination` / `--destination` is provided:
 - `CLAUDE.md` is overwritten for Claude guidance.
 - `PROJECT.md` is created only if missing.
 - `CONTEXT.md` is created only if missing.
-- `.agent-runs/` is added to `.gitignore`.
+- `.agent-policy/workflow-policy.json` is created only if missing.
+- `.agent-runs/` and `.worktrees/` are added to `.gitignore`.
 
 File roles:
 
 ```text
 AGENTS.md  = always-on Codex behavior for a product repo
 CLAUDE.md  = always-on Claude behavior for a product repo
-PROJECT.md = technical repo map: commands, architecture, validation, debugging
-CONTEXT.md = domain language and product/business meaning
-SKILL.md   = reusable workflow loaded when triggered or requested
+PROJECT.md                  = technical repo map: commands, architecture, validation, debugging
+CONTEXT.md                  = domain language and product/business meaning
+.agent-policy/workflow-policy.json = machine-readable routing/gate policy for autonomous loops
+SKILL.md                    = reusable workflow loaded when triggered or requested
 ```
 
 ## Agent Orchestration
@@ -123,6 +125,7 @@ Useful starting points:
 - `zoom-out`: understand code in broader system context
 - `improve-codebase-architecture`: identify architecture improvement opportunities
 - `handoff`: create a compact handoff for another agent or session
+- [`agentic-loop`](./skills/engineering/agentic-loop/SKILL.md): prepare or run an autonomous coding loop with grill-with-docs discovery, policy-based workflow routing, worktrees, verification, reflection, and human gates
 - `ralph-prd`: interview until decisions are clear, then create a human-readable PRD and Ralph-compatible `prd.json`
 
 Check individual `SKILL.md` files for exact behavior.

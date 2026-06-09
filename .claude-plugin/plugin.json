@@ -1,6 +1,7 @@
 {
   "name": "claude-codex-skills",
   "skills": [
+    "./skills/engineering/agentic-loop",
     "./skills/engineering/diagnose",
     "./skills/engineering/grill-with-docs",
     "./skills/engineering/triage",
