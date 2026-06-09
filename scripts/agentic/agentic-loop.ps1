@@ -281,7 +281,19 @@ function Invoke-Agent([string]$PromptFile, [string]$Template, [string]$WorkingDi
     if (![string]::IsNullOrWhiteSpace($Template)) { Invoke-ShellCommand ($Template.Replace("{prompt}", (Resolve-Path -LiteralPath $PromptFile).Path)) $WorkingDirectory; return }
     switch ($tool) {
         "claude" { Require-Command claude; $prompt = Get-Content -LiteralPath $PromptFile -Raw; Invoke-ShellCommand "claude -p @'`n$prompt`n'@" $WorkingDirectory }
-        "pi" { Require-Command pi; $prompt = Get-Content -LiteralPath $PromptFile -Raw; Invoke-ShellCommand "@'`n$prompt`n'@ | pi -p" $WorkingDirectory }
+        "pi" {
+            Require-Command pi
+            $piCommand = Get-Command pi
+            $resolvedPrompt = (Resolve-Path -LiteralPath $PromptFile).Path
+            $old = Get-Location
+            try {
+                if (![string]::IsNullOrWhiteSpace($WorkingDirectory)) { Set-Location -LiteralPath $WorkingDirectory }
+                & pi -p "@$resolvedPrompt"
+                if ($piCommand.CommandType -in @("Application", "ExternalScript") -and $LASTEXITCODE -ne 0) { throw "pi exited with code $LASTEXITCODE" }
+            } finally {
+                Set-Location $old
+            }
+        }
         "custom" { Write-Error "--tool custom requires --command '... {prompt} ...'"; exit 2 }
         default { Write-Error "Unknown tool '$tool'. Use --command for custom CLIs."; exit 2 }
     }
