@@ -17,7 +17,7 @@ try {
   "version": 1,
   "goal": "Smoke test agentic loop",
   "maxIterations": 1,
-  "checks": ["test -f smoke-output.txt"],
+  "checks": ["test -f smoke-output.txt", "cmd /c echo METRIC smoke_count=1"],
   "defaultDiscoveryWorkflow": "grill-with-docs",
   "tasks": [
     {
@@ -27,7 +27,7 @@ try {
       "workflow": "tdd",
       "priority": 1,
       "acceptanceCriteria": ["smoke-output.txt exists"],
-      "validation": ["test -f smoke-output.txt"],
+      "validation": ["test -f smoke-output.txt", "cmd /c echo METRIC smoke_validation=2"],
       "dependsOn": [],
       "failureHistory": []
     }
@@ -87,10 +87,20 @@ Write-Output "created smoke-output.txt"
     if ($before.tasks[0].status -ne "pending") { throw "Expected state-before task pending" }
     if ($after.tasks[0].status -ne "passed") { throw "Expected state-after task passed" }
     if ((Get-Content -LiteralPath (Join-Path $runDir "executor.log") -Raw) -notmatch "ok|smoke-output") { throw "Expected executor.log to capture executor output" }
-    if ((Get-Content -LiteralPath (Join-Path $runDir "checks.log") -Raw) -notmatch "PASS: test -f smoke-output.txt") { throw "Expected checks.log to capture check output" }
+    $checksContent = Get-Content -LiteralPath (Join-Path $runDir "checks.log") -Raw
+    if ($checksContent -notmatch "PASS: test -f smoke-output.txt") { throw "Expected checks.log to capture check output" }
+    if ($checksContent -notmatch "METRIC smoke_count=1") { throw "Expected checks.log to capture global structured metric" }
+    if ($checksContent -notmatch "METRIC smoke_validation=2") { throw "Expected checks.log to capture validation structured metric" }
+    if ((Get-Content -LiteralPath (Join-Path $runDir "verifier.md") -Raw) -notmatch "Recent harness history") { throw "Expected verifier prompt to include recent harness history" }
     if ((Get-Content -LiteralPath (Join-Path $runDir "verifier.log") -Raw) -notmatch "smoke verifier passed|verifier-result") { throw "Expected verifier.log to capture verifier output" }
     if ((Get-Content -LiteralPath (Join-Path $runDir "diff.patch") -Raw) -notmatch "smoke-output.txt") { throw "Expected diff.patch before commit" }
     if ((Get-Content -LiteralPath (Join-Path $runDir "diff-stat.txt") -Raw) -notmatch "smoke-output.txt") { throw "Expected diff-stat.txt before commit" }
+    $eventLog = Join-Path $tmp ".agent-runs/events.jsonl"
+    if (!(Test-Path -LiteralPath $eventLog)) { throw "Expected events.jsonl" }
+    $events = Get-Content -LiteralPath $eventLog -Raw
+    if ($events -notmatch '"type":"checks_passed"') { throw "Expected checks_passed event" }
+    if ($events -notmatch '"smoke_count":1') { throw "Expected metric in event log" }
+    if ($events -notmatch '"type":"verifier_finished"') { throw "Expected verifier_finished event" }
     Write-Output "agentic smoke passed: $tmp"
 } finally {
     if ($env:AGENTIC_KEEP_SMOKE -ne "1") { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }

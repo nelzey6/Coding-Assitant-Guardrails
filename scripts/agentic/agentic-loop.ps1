@@ -73,6 +73,18 @@ function Invoke-ShellCommand([string]$Command, [string]$WorkingDirectory = "") {
     } finally { Set-Location $old }
 }
 
+function Invoke-ShellCommandCapture([string]$Command, [string]$WorkingDirectory = "") {
+    $old = Get-Location
+    try {
+        if (![string]::IsNullOrWhiteSpace($WorkingDirectory)) { Set-Location -LiteralPath $WorkingDirectory }
+        $output = if ($IsWindows -or $PSVersionTable.PSEdition -eq "Desktop") { & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $Command 2>&1 } else { & sh -lc $Command 2>&1 }
+        $code = $LASTEXITCODE
+        $text = ($output | ForEach-Object { [string]$_ }) -join "`n"
+        if ($code -ne 0) { throw "Command failed with code $code`: $Command`n$text" }
+        return $text
+    } finally { Set-Location $old }
+}
+
 function ConvertTo-SafeSlug([string]$Value) {
     $slug = ($Value -replace '[^A-Za-z0-9._-]+', '-')
     if ([string]::IsNullOrWhiteSpace($slug)) { return "task" }
@@ -204,6 +216,43 @@ if (!([int]::TryParse($maxIterations, [ref]$maxIterationsValue)) -or $maxIterati
 
 New-Item -ItemType Directory -Force -Path $runsRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $worktreeRoot | Out-Null
+$eventLogPath = Join-Path $runsRoot "events.jsonl"
+
+function Write-AgenticEvent([string]$Type, [hashtable]$Data = @{}) {
+    $entry = [ordered]@{ ts = (Get-Date -Format o); type = $Type; state = $stateFile }
+    foreach ($key in $Data.Keys) { $entry[$key] = $Data[$key] }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $eventLogPath) | Out-Null
+    Add-Content -LiteralPath $eventLogPath -Value (ConvertTo-Json -InputObject $entry -Depth 20 -Compress) -Encoding UTF8
+}
+
+function Get-RecentAgenticHistory([int]$Limit = 12) {
+    if (!(Test-Path -LiteralPath $eventLogPath)) { return "No prior event log entries." }
+    $lines = @(Get-Content -LiteralPath $eventLogPath | Select-Object -Last $Limit)
+    if ($lines.Count -eq 0) { return "No prior event log entries." }
+    return ($lines -join "`n")
+}
+
+function ConvertTo-MetricObject([hashtable]$Metrics) {
+    $obj = [ordered]@{}
+    foreach ($key in ($Metrics.Keys | Sort-Object)) { $obj[$key] = $Metrics[$key] }
+    return $obj
+}
+
+function Parse-MetricLines([string]$Text) {
+    $metrics = @{}
+    foreach ($match in [regex]::Matches($Text, '(?m)^METRIC\s+([\w.µ]+)=([^\s]+)\s*$')) {
+        $name = $match.Groups[1].Value
+        if ($name -in @('__proto__', 'constructor', 'prototype')) { continue }
+        [double]$value = 0
+        if ([double]::TryParse($match.Groups[2].Value, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value)) { $metrics[$name] = $value }
+    }
+    return $metrics
+}
+
+function Format-MetricsForPrompt([hashtable]$Metrics) {
+    if ($Metrics.Count -eq 0) { return "No structured METRIC lines were emitted." }
+    return (($Metrics.Keys | Sort-Object | ForEach-Object { "METRIC $_=$($Metrics[$_])" }) -join "`n")
+}
 
 function Get-Tasks($State) { if ($State.PSObject.Properties.Name -contains "tasks" -and $null -ne $State.tasks) { return @($State.tasks) }; return @() }
 function Get-TaskStatusMap($State) {
@@ -256,6 +305,9 @@ function Set-TaskStatus([string]$Id, [string]$Status, [object]$Failure = $null) 
         }
     }
     Write-StateJson $s
+    $event = @{ task = $Id; status = $Status }
+    if ($Failure) { $event["failure"] = $Failure }
+    Write-AgenticEvent "task_status" $event
 }
 function Set-TaskPassed([string]$Id, $VerifierResult, [string]$ReviewBranch = "", [string]$ReviewWorktree = "") {
     $s = Read-StateJson
@@ -279,6 +331,11 @@ function Set-TaskPassed([string]$Id, $VerifierResult, [string]$ReviewBranch = ""
         }
     }
     Write-StateJson $s
+    $event = @{ task = $Id; status = "passed" }
+    if (![string]::IsNullOrWhiteSpace($ReviewBranch)) { $event["reviewBranch"] = $ReviewBranch }
+    if (![string]::IsNullOrWhiteSpace($ReviewWorktree)) { $event["reviewWorktree"] = $ReviewWorktree }
+    if ($VerifierResult -and ($VerifierResult.PSObject.Properties.Name -contains "summary")) { $event["summary"] = [string]$VerifierResult.summary }
+    Write-AgenticEvent "task_passed" $event
 }
 function Add-TaskAttempt([string]$Id, [string]$RunDir) {
     $s = Read-StateJson
@@ -294,6 +351,7 @@ function Add-TaskAttempt([string]$Id, [string]$RunDir) {
         }
     }
     Write-StateJson $s
+    Write-AgenticEvent "task_attempt" @{ task = $Id; runDir = $RunDir }
 }
 function Get-TaskAttempts($Task) {
     if ($Task.PSObject.Properties.Name -contains "attempts" -and $null -ne $Task.attempts) { return [int]$Task.attempts }
@@ -341,6 +399,8 @@ function Show-AgenticStatus {
     if ($next) { Write-Output "Next runnable: $($next.id) - $($next.title)" }
     elseif (Test-HasUnfinishedTasks $s) { Write-Output "No runnable task. Blocked dependencies:`n$(Get-BlockedDependencySummary $s)" }
     else { Write-Output "All tasks complete." }
+    Write-Output "Recent events:"
+    Write-Output (Get-RecentAgenticHistory 8)
 }
 function Invoke-AcceptGit([string[]]$NativeArgs, [string]$Operation) {
     $output = & git @NativeArgs 2>&1
@@ -403,6 +463,7 @@ function Invoke-AcceptTask([string]$TaskId, [bool]$SkipDirtyCheck = $false) {
     else { Write-Host "No tracked branch changes to accept for $TaskId." }
 
     if ($mergeMode -eq "apply") {
+        Write-AgenticEvent "task_accepted" @{ task = $TaskId; branch = $branch; mergeMode = $mergeMode; cleanup = $false }
         Write-Output "Applied '$TaskId' without committing. Inspect staged/unstaged changes in the current worktree. Task worktree '$worktreePath' and branch '$branch' were left intact; remove them after review if no longer needed."
         Write-Output "<promise>ACCEPTED $TaskId</promise>"
         return
@@ -416,6 +477,7 @@ function Invoke-AcceptTask([string]$TaskId, [bool]$SkipDirtyCheck = $false) {
         Stop-AcceptWithMessage "Accept integrated '$TaskId' but cleanup failed. Inspect worktree '$worktreePath' and branch '$branch'. $($_.Exception.Message)"
     }
 
+    Write-AgenticEvent "task_accepted" @{ task = $TaskId; branch = $branch; mergeMode = $mergeMode; cleanup = $true }
     Write-Output "<promise>ACCEPTED $TaskId</promise>"
 }
 
@@ -465,13 +527,28 @@ function Get-TaskChecks($Task) {
 
 function Invoke-Checks([string]$WorkingDirectory, [object[]]$ChecksToRun) {
     $log = @()
+    $allMetrics = @{}
     $effectiveChecks = @($ChecksToRun | Where-Object { ![string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
-    if ($effectiveChecks.Count -eq 0) { return "No checks configured; agent exit success is the only external validation." }
+    if ($effectiveChecks.Count -eq 0) { return "No checks configured; agent exit success is the only external validation.`n`nStructured metrics:`nNo structured METRIC lines were emitted." }
     foreach ($check in $effectiveChecks) {
         Write-Host "Running check in $WorkingDirectory`: $check"
-        try { Invoke-ShellCommand ([string]$check) $WorkingDirectory; $log += "PASS: $check" }
-        catch { $log += "FAIL: $check`n$($_.Exception.Message)"; throw ($log -join "`n") }
+        try {
+            $output = Invoke-ShellCommandCapture ([string]$check) $WorkingDirectory
+            if (![string]::IsNullOrWhiteSpace($output)) { Write-Host $output }
+            $metrics = Parse-MetricLines $output
+            foreach ($key in $metrics.Keys) { $allMetrics[$key] = $metrics[$key] }
+            $log += "PASS: $check"
+            if (![string]::IsNullOrWhiteSpace($output)) { $log += $output }
+        }
+        catch {
+            $failedMetrics = Parse-MetricLines $_.Exception.Message
+            foreach ($key in $failedMetrics.Keys) { $allMetrics[$key] = $failedMetrics[$key] }
+            $log += "FAIL: $check`n$($_.Exception.Message)"
+            if ($allMetrics.Count -gt 0) { $log += "Structured metrics:`n$(Format-MetricsForPrompt $allMetrics)" }
+            throw ($log -join "`n")
+        }
     }
+    $log += "Structured metrics:`n$(Format-MetricsForPrompt $allMetrics)"
     return ($log -join "`n")
 }
 
@@ -637,6 +714,7 @@ function New-ExecutorPrompt($Task, [int]$Iteration, [string]$PromptFile, [string
     $taskJson = $Task | ConvertTo-Json -Depth 20
     $workflow = if ($Task.workflow) { [string]$Task.workflow } else { "tdd" }
     $kind = if ($Task.kind) { [string]$Task.kind } else { "implementation" }
+    $recentHistory = Get-RecentAgenticHistory
     $content = @"
 You are executing one task inside an agentic harness worktree.
 
@@ -659,6 +737,9 @@ Selected workflow: $workflow
 Task kind: $kind
 Run directory: $RunDir
 
+Recent harness history (JSONL tail; source of truth is $eventLogPath):
+$recentHistory
+
 $(Get-WorkflowBlock $workflow)
 
 Task JSON:
@@ -673,6 +754,7 @@ function New-VerifierPrompt($Task, [string]$WorktreePath, [string]$CheckOutput, 
     $diffStat = (& git -C $WorktreePath diff --stat HEAD)
     $diff = (& git -C $WorktreePath diff HEAD)
     $gates = if ($policy -and $policy.humanGates) { ($policy.humanGates | ConvertTo-Json -Depth 10) } else { "[]" }
+    $recentHistory = Get-RecentAgenticHistory
     $content = @"
 You are the verifier for one agentic task.
 
@@ -691,6 +773,9 @@ $taskJson
 
 Human gates:
 $gates
+
+Recent harness history (JSONL tail; source of truth is $eventLogPath):
+$recentHistory
 
 Check output:
 $CheckOutput
@@ -789,6 +874,7 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
     $verifierResultForPrompt = $verifierResult
 
     Write-Host "=== Agentic iteration $iteration/$maxIterationsValue`: $taskId ==="
+    Write-AgenticEvent "iteration_started" @{ task = $taskId; iteration = $iteration; runDir = $runDir; branch = $branch; worktree = $worktreePath }
     New-Item -ItemType Directory -Force -Path $runDirAbs | Out-Null
     Copy-Item -LiteralPath $stateFile -Destination $stateBefore -Force
     Add-TaskAttempt $taskId $runDir
@@ -801,8 +887,10 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
 
     New-ExecutorPrompt $task $iteration $executorPrompt $runDir
     try {
-        try { Invoke-AgentWithLog $executorPrompt $commandTemplate $worktreePath $executorLog }
+        Write-AgenticEvent "executor_started" @{ task = $taskId; prompt = $executorPrompt; log = $executorLog }
+        try { Invoke-AgentWithLog $executorPrompt $commandTemplate $worktreePath $executorLog; Write-AgenticEvent "executor_passed" @{ task = $taskId; log = $executorLog } }
         catch {
+            Write-AgenticEvent "executor_failed" @{ task = $taskId; reason = $_.Exception.Message; log = $executorLog }
             Set-TaskStatus $taskId "needs_human" ([pscustomobject]@{ at = (Get-Date -Format o); phase = "executor"; reason = $_.Exception.Message; resultFile = $verifierResult })
             Write-ChecksLog $checksLog "Checks not run because executor failed."
             Write-DiffArtifacts $worktreePath $runDirAbs
@@ -812,11 +900,19 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
         }
 
         $taskChecks = Get-TaskChecks $task
-        try { $checkOutput = Invoke-Checks $worktreePath $taskChecks; Write-ChecksLog $checksLog $checkOutput }
+        Write-AgenticEvent "checks_started" @{ task = $taskId; commands = @($taskChecks); log = $checksLog }
+        try {
+            $checkOutput = Invoke-Checks $worktreePath $taskChecks
+            Write-ChecksLog $checksLog $checkOutput
+            $checkMetrics = Parse-MetricLines $checkOutput
+            Write-AgenticEvent "checks_passed" @{ task = $taskId; log = $checksLog; metrics = (ConvertTo-MetricObject $checkMetrics) }
+        }
         catch {
             $checkOutput = $_.Exception.Message
             Write-ChecksLog $checksLog $checkOutput
             $failureStatus = Get-FailureStatusForTask $task "checks"
+            $checkMetrics = Parse-MetricLines $checkOutput
+            Write-AgenticEvent "checks_failed" @{ task = $taskId; status = $failureStatus; reason = $_.Exception.Message; log = $checksLog; metrics = (ConvertTo-MetricObject $checkMetrics) }
             Set-TaskStatus $taskId $failureStatus ([pscustomobject]@{ at = (Get-Date -Format o); phase = "checks"; reason = $_.Exception.Message; resultFile = $verifierResult })
             Write-DiffArtifacts $worktreePath $runDirAbs
             Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
@@ -827,10 +923,12 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
         Write-DiffArtifacts $worktreePath $runDirAbs
         New-VerifierPrompt $task $worktreePath $checkOutput $verifierResultForPrompt $verifierPrompt
         $verifierTemplate = if (![string]::IsNullOrWhiteSpace($verifierCommandTemplate)) { $verifierCommandTemplate } else { $commandTemplate }
+        Write-AgenticEvent "verifier_started" @{ task = $taskId; prompt = $verifierPrompt; resultFile = $verifierResult; log = $verifierLog }
         Invoke-AgentWithLog $verifierPrompt $verifierTemplate $worktreePath $verifierLog
         if (!(Test-Path -LiteralPath $verifierResult)) { throw "Verifier did not write $verifierResult" }
         $result = Get-Content -LiteralPath $verifierResult -Raw | ConvertFrom-Json
         $verdict = [string]$result.verdict
+        Write-AgenticEvent "verifier_finished" @{ task = $taskId; verdict = $verdict; summary = [string]$result.summary; resultFile = $verifierResult }
         if ($verdict -eq "pass") {
             if ($commit) {
                 Invoke-CheckedNative git @("add", "-A") $worktreePath

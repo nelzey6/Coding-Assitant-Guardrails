@@ -61,7 +61,8 @@ pwsh -File scripts/agentic/agentic-loop.ps1 --tool custom --command 'my-agent ru
 8. On pass, commits in the worktree and merges the task branch with the selected `--merge-mode` (`ff-only` by default) unless `--no-merge` or `--review-branch` is set.
 9. With `--no-merge`, leaves the passed task branch/worktree in place for review; with `--review-branch`, creates `agentic/review/<safe-task-id>` and keeps the active branch unchanged. Accept either flow later with `--accept <task-id>`.
 10. On check or verifier failure, records `failureHistory`. Retryable failures become `needs_retry` while the retry budget remains; use `--retry <task-id>` to rerun a specific failed task, or let normal selection pick eligible `needs_retry` tasks automatically. `--max-retries <n>` controls automatic retries after the first attempt (default from policy, or `1`).
-11. Repeats until all tasks pass or the iteration budget is exhausted.
+11. Appends key harness events to `.agent-runs/events.jsonl` for audit/debug/recovery.
+12. Repeats until all tasks pass or the iteration budget is exhausted.
 
 ## Safety defaults
 
@@ -69,10 +70,26 @@ pwsh -File scripts/agentic/agentic-loop.ps1 --tool custom --command 'my-agent ru
 - `--status` is the exception to the clean-tree gate, so you can inspect `agentic.json` even while local files are dirty.
 - Runs sequentially only.
 - Keeps failed worktrees for inspection.
+- Records task/check/verifier/review events in `.agent-runs/events.jsonl`.
 - Automatically retries check/verifier failures while the task has retry budget; executor and harness failures go to `needs_human`.
 - The harness, not the executor, marks task status and merges branches.
 - Use `--no-merge` while testing the harness or when you want human review before integration.
 - Use `--cleanup-passed` only when you are comfortable removing passed worktrees.
+
+## Event log, recent-history prompts, and metrics
+
+The harness writes an append-only JSONL event log at `.agent-runs/events.jsonl`. Each line records a timestamped lifecycle event such as task attempts, executor start/pass/fail, checks pass/fail, verifier verdicts, status changes, and passed review branches. `--status` prints the recent event tail.
+
+Executor and verifier prompts include a compact recent-history tail from this event log. This gives fresh agent calls enough context to avoid repeating the latest failed attempt without stuffing entire logs into the prompt.
+
+Validation commands can emit structured metrics with lines like:
+
+```text
+METRIC test_runtime_seconds=18.4
+METRIC bundle_kb=412
+```
+
+The harness parses these lines from check output, records them in the event log, and includes a structured metric summary in `checks.log` and the verifier prompt. Metrics are observational for now; normal task pass/fail behavior still comes from checks plus verifier verdict.
 
 ## Retry flow
 
