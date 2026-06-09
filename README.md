@@ -1,199 +1,199 @@
-# Claude and Codex Skills
+# Coding Assistant Guardrails
 
-Shared AI-agent skills and repo templates for Claude Code and Codex.
+Reusable skills, repo templates, and autonomous-loop harnesses for Codex, Claude Code, and similar coding agents.
 
-This repository is based on `mattpocock/skills` and adds:
+This repo gives a product repository three things:
 
-- a machine-level installer for Codex, Claude, or both
-- reusable repo templates for `AGENTS.md`, `CLAUDE.md`, `PROJECT.md`, `CONTEXT.md`, and `.agent-policy/workflow-policy.json`
-- an `update-project-md` skill for keeping `PROJECT.md` aligned with repository reality
-- trigger-based default routing for skills such as `grill-with-docs`, `diagnose`, `tdd`, and `zoom-out`
+1. **Always-on agent guidance** via `AGENTS.md` and `CLAUDE.md` templates.
+2. **Reusable workflow skills** such as `grill-with-docs`, `diagnose`, `tdd`, `update-project-md`, and `handoff`.
+3. **Optional automation harnesses** for fresh-agent loops: `agentic-loop` for task graphs and `ralph` for PRD/user-story execution.
 
-## Table Of Contents
+It is based on [`mattpocock/skills`](https://github.com/mattpocock/skills), with local templates and harnesses layered on top. Upstream-derived skill content is kept merge-friendly; local orchestration lives in templates, scripts, and local skills.
 
-- [Quick Start](#quick-start)
-- [What The Installer Does](#what-the-installer-does)
-- [Product Repo Files](#product-repo-files)
-- [Agent Orchestration](#agent-orchestration)
-- [Using Skills](#using-skills)
-- [Available Skill Groups](#available-skill-groups)
-- [Ralph Harness](#ralph-harness)
-- [Updating From Upstream](#updating-from-upstream)
+## Quick start
 
-## Quick Start
-
-Run from this repository folder. The installer updates this checkout from its configured git remote by default, then re-runs itself so the latest scripts are used.
-
-Windows PowerShell:
+From this repository checkout, install skills and templates into a product repo:
 
 ```powershell
+# Windows PowerShell / PowerShell Core
 .\scripts\bootstrap\setup-ai-skills.ps1 -Destination D:\Repos\MyProduct
 ```
 
-macOS/Linux Bash:
-
 ```bash
+# macOS/Linux
 ./scripts/bootstrap/setup-ai-skills.sh --destination "$HOME/src/my-product"
 ```
 
-That installs both Codex and Claude skills by default and copies repo templates into the product repo.
+By default this installs both Codex and Claude skills, installs the `agentic-loop` and `ralph` shims, and copies repo templates into the destination repo.
 
-For less common options such as installing only one tool, skipping update, or using a different skills repo path, run the scripts with `--help` / PowerShell parameter completion.
-
-## What The Installer Does
-
-By default, the installer:
-
-1. Updates this skills repo checkout with `git fetch --prune` and `git pull --ff-only`.
-2. Re-runs itself so updated installer code is used.
-3. Installs all active skills into both Codex and Claude skill directories.
-4. Installs the Ralph harness under the installed `ralph-prd` skill folder and creates a user-level `ralph` shim.
-5. Installs the agentic loop harness under the installed `agentic-loop` skill folder and creates a user-level `agentic-loop` shim.
-6. If `-Destination` / `--destination` is provided, copies repo templates into that product repo.
-7. Adds `.agent-runs/`, `.worktrees/`, and `agentic.json` to the product repo `.gitignore`.
-
-Codex skills install to `~/.codex/skills` (or `%USERPROFILE%\.codex\skills` on Windows). Claude skills install to `~/.claude/skills` (or `%USERPROFILE%\.claude\skills` on Windows).
-
-## Product Repo Files
-
-When `-Destination` / `--destination` is provided:
-
-- `AGENTS.md` is overwritten for Codex guidance.
-- `CLAUDE.md` is overwritten for Claude guidance.
-- `PROJECT.md` is created only if missing.
-- `CONTEXT.md` is created only if missing.
-- `.agent-policy/workflow-policy.json` is created only if missing.
-- `.agent-runs/`, `.worktrees/`, and `agentic.json` are added to `.gitignore`.
-
-File roles:
-
-```text
-AGENTS.md  = always-on Codex behavior for a product repo
-CLAUDE.md  = always-on Claude behavior for a product repo
-PROJECT.md                  = technical repo map: commands, architecture, validation, debugging
-CONTEXT.md                  = domain language and product/business meaning
-.agent-policy/workflow-policy.json = machine-readable routing/gate policy for autonomous loops
-SKILL.md                    = reusable workflow loaded when triggered or requested
-```
-
-## Agent Orchestration
-
-[`templates/AGENTS.md`](./templates/AGENTS.md) and [`templates/CLAUDE.md`](./templates/CLAUDE.md) are the main orchestrators.
-
-- `AGENTS.md` is for Codex.
-- `CLAUDE.md` is for Claude Code.
-- They define default behavior, validation expectations, scratch-state rules, ADR handling, and when to invoke installed skills.
-- They route work automatically to skills such as `grill-with-docs`, `diagnose`, `tdd`, `zoom-out`, `improve-codebase-architecture`, `update-project-md`, and `handoff` based on task triggers.
-
-The individual `SKILL.md` files stay reusable and upstream-friendly. Put repo-specific orchestration in `AGENTS.md` / `CLAUDE.md` instead of editing upstream skills when possible.
-
-## Using Skills
-
-Skills are triggered by asking the agent to use them by name or by giving a task that matches their description and the routing rules in `AGENTS.md` or `CLAUDE.md`.
-
-Examples:
-
-```text
-Use update-project-md to inspect this repo and fill PROJECT.md.
-```
-
-```text
-Use grill-with-docs before we implement this feature.
-```
-
-```text
-Use diagnose to investigate this failing integration test.
-```
-
-```text
-Use tdd for this bug fix.
-```
-
-## Available Skill Groups
-
-Skills are organized under:
-
-- `skills/engineering`
-- `skills/productivity`
-- `skills/misc`
-
-Useful starting points:
-
-- `update-project-md`: create or refresh `PROJECT.md` with durable repository facts
-- `grill-with-docs`: clarify requirements and update domain context
-- `diagnose`: disciplined debugging loop
-- `tdd`: red-green-refactor development workflow
-- `zoom-out`: understand code in broader system context
-- `improve-codebase-architecture`: identify architecture improvement opportunities
-- `handoff`: create a compact handoff for another agent or session
-- [`agentic-loop`](./skills/engineering/agentic-loop/SKILL.md): prepare or run an autonomous coding loop with grill-with-docs discovery, policy-based workflow routing, worktrees, verification, reflection, and human gates
-- `ralph-prd`: interview until decisions are clear, then create a human-readable PRD and Ralph-compatible `prd.json`
-
-Check individual `SKILL.md` files for exact behavior.
-
-## Agentic Loop Harness
-
-[`scripts/agentic/agentic-loop.ps1`](./scripts/agentic/agentic-loop.ps1) runs a policy-driven autonomous coding loop over local `agentic.json` state. The setup script installs a user-level `agentic-loop` shim.
-
-Typical safe flow:
+After installation, in your product repo you can run:
 
 ```powershell
 agentic-loop --goal "Fix checkout reliability" --tool claude --plan-only
 agentic-loop --status
-agentic-loop --tool claude --checks "npm test" --no-merge
-agentic-loop --tool claude --checks "npm test" --no-merge --auto-accept-passed
+agentic-loop --tool claude --checks "npm test" --review-branch
+```
+
+Or use the installed skills directly from Codex/Claude, for example:
+
+```text
+Use grill-with-docs before implementing this feature.
+Use diagnose to investigate this failing test.
+Use tdd for this bug fix.
+Use update-project-md to refresh PROJECT.md.
+```
+
+## What gets installed
+
+The installer can target Codex, Claude, or both. By default it:
+
+- updates this skills repo checkout before installing;
+- installs active skills into `~/.codex/skills` and/or `~/.claude/skills`;
+- installs the `agentic-loop` harness and user-level shim;
+- installs the `ralph` harness and user-level shim;
+- seeds missing repo templates into the product repo when `-Destination` / `--destination` is provided;
+- adds `.agent-runs/`, `.worktrees/`, `agentic.json`, and related runtime files to the product repo `.gitignore`.
+
+Run installer help for less common options such as installing only one tool, skipping update, or using a non-default skills repo path.
+
+## Product repo files
+
+When you pass a destination repo, these files define how agents should work there:
+
+| File | Purpose |
+| --- | --- |
+| `AGENTS.md` | Always-on Codex guidance and skill routing. Created only if missing. |
+| `CLAUDE.md` | Always-on Claude Code guidance and skill routing. Created only if missing. |
+| `PROJECT.md` | Technical repo map: commands, architecture, validation, debugging, file roles. Created only if missing. |
+| `CONTEXT.md` | Product/domain language, decisions, assumptions, and business meaning. Created only if missing. |
+| `.agent-policy/workflow-policy.json` | Machine-readable routing/gate policy for autonomous loops. Created only if missing. |
+
+The templates live in [`templates/`](./templates/). `AGENTS.md` and `CLAUDE.md` are the main orchestrators: they tell agents when to use workflows such as `grill-with-docs`, `diagnose`, `tdd`, `zoom-out`, `update-project-md`, and `handoff`. The installer preserves existing persistent markdowns by default; overwrite template files only with the explicit force-overwrite installer option.
+
+## Skills
+
+Skills are reusable workflow instructions installed into Codex/Claude.
+
+Active skill groups:
+
+- [`skills/engineering`](./skills/engineering/README.md) - coding workflows and harness skills
+- [`skills/productivity`](./skills/productivity/README.md) - everyday non-code workflow helpers
+- [`skills/misc`](./skills/misc/README.md) - rarely used but still available skills
+
+Common starting points:
+
+- [`grill-with-docs`](./skills/engineering/grill-with-docs/SKILL.md) - clarify requirements, inspect docs/code, update durable context when needed.
+- [`diagnose`](./skills/engineering/diagnose/SKILL.md) - disciplined debugging loop.
+- [`tdd`](./skills/engineering/tdd/SKILL.md) - red/green/refactor implementation flow.
+- [`zoom-out`](./skills/engineering/zoom-out/SKILL.md) - understand code in broader system context.
+- [`update-project-md`](./skills/engineering/update-project-md/SKILL.md) - refresh `PROJECT.md` from repository reality.
+- [`handoff`](./skills/productivity/handoff/SKILL.md) - create a compact handoff for another agent/session.
+- [`agentic-loop`](./skills/engineering/agentic-loop/SKILL.md) - prepare or run the autonomous task harness.
+- [`ralph-prd`](./skills/engineering/ralph-prd/SKILL.md) - create a PRD plus Ralph-compatible `prd.json`.
+
+Complete active skill index:
+
+- Engineering: [`agentic-loop`](./skills/engineering/agentic-loop/SKILL.md), [`diagnose`](./skills/engineering/diagnose/SKILL.md), [`grill-with-docs`](./skills/engineering/grill-with-docs/SKILL.md), [`improve-codebase-architecture`](./skills/engineering/improve-codebase-architecture/SKILL.md), [`prototype`](./skills/engineering/prototype/SKILL.md), [`ralph-prd`](./skills/engineering/ralph-prd/SKILL.md), [`setup-matt-pocock-skills`](./skills/engineering/setup-matt-pocock-skills/SKILL.md), [`tdd`](./skills/engineering/tdd/SKILL.md), [`to-issues`](./skills/engineering/to-issues/SKILL.md), [`to-prd`](./skills/engineering/to-prd/SKILL.md), [`triage`](./skills/engineering/triage/SKILL.md), [`update-project-md`](./skills/engineering/update-project-md/SKILL.md), [`zoom-out`](./skills/engineering/zoom-out/SKILL.md).
+- Productivity: [`caveman`](./skills/productivity/caveman/SKILL.md), [`grill-me`](./skills/productivity/grill-me/SKILL.md), [`handoff`](./skills/productivity/handoff/SKILL.md), [`write-a-skill`](./skills/productivity/write-a-skill/SKILL.md).
+- Misc: [`git-guardrails-claude-code`](./skills/misc/git-guardrails-claude-code/SKILL.md), [`migrate-to-shoehorn`](./skills/misc/migrate-to-shoehorn/SKILL.md), [`scaffold-exercises`](./skills/misc/scaffold-exercises/SKILL.md), [`setup-pre-commit`](./skills/misc/setup-pre-commit/SKILL.md).
+
+See the linked bucket READMEs and `SKILL.md` files for details.
+
+## Agentic loop harness
+
+[`scripts/agentic/agentic-loop.ps1`](./scripts/agentic/agentic-loop.ps1) is the main autonomous coding harness. It is designed to be a safer, more inspectable `/goal`-style workflow.
+
+High-level flow:
+
+1. Plan from a goal into `agentic.json` tasks using grill-with-docs-style discovery.
+2. Run one task at a time in a fresh git worktree/branch.
+3. Invoke a fresh executor agent with a generated prompt.
+4. Run configured checks and task validation commands.
+5. Invoke a fresh verifier agent unless `--fast-verifier` is explicitly used.
+6. Commit/merge or hold the result for human review.
+7. Persist state, events, handovers, logs, diffs, and summaries under `.agent-runs/`.
+8. On completion, refresh `PROJECT.md` through update-project-md-style finalization unless skipped.
+
+Useful commands:
+
+```powershell
+agentic-loop --goal "Implement retry for flaky checkout" --tool claude --plan-only
+agentic-loop --status
+agentic-loop --tool claude --checks "npm test" --review-branch
+agentic-loop --last-failure
+agentic-loop --why-stuck
+agentic-loop --summary
 agentic-loop --accept task-001
 ```
 
-Use `--no-merge` while reviewing autonomous output. A passed no-merge task remains on `agentic/<safe-task-id>` with a worktree under `.worktrees/`; after review, `--accept <task-id>` integrates it and cleans up. `--auto-accept-passed` keeps the no-merge validation path but accepts immediately after task checks and verifier pass. `--accept` defaults to `--merge-mode ff-only`; pass `--merge-mode cherry-pick`, `--merge-mode no-ff`, or apply/no-commit mode (`--merge-mode apply`) only when that behavior is intentional. `--status` can be run even when the worktree is dirty. The loop creates prompts under `.agent-runs/` and keeps `agentic.json` as ignored local runtime state. See [`scripts/agentic/README.md`](./scripts/agentic/README.md) for the compact harness reference and focused smoke commands.
+Important runtime files:
 
-## Ralph Harness
+| Path | Purpose |
+| --- | --- |
+| `agentic.json` | Local task graph and loop state. |
+| `.agent-runs/events.jsonl` | Append-only lifecycle/event log. |
+| `.agent-runs/<run>/executor.md` | Prompt given to a fresh executor agent. |
+| `.agent-runs/<run>/verifier.md` | Prompt given to a fresh verifier agent. |
+| `.agent-runs/<run>/handover.md` | Per-task future-self handover. |
+| `.agent-runs/<planner-run>/grill-transcript.md` | Visible autonomous planning Q/A/evidence/proposal trail. |
+| `.worktrees/<task-id>` | Isolated task worktree. |
 
-[`scripts/ralph/ralph.ps1`](./scripts/ralph/ralph.ps1) runs a fresh-agent loop over a Ralph-compatible [`prd.json`](./skills/engineering/ralph-prd/SKILL.md). The setup script installs this harness under the installed `ralph-prd` skill folder and creates a user-level `ralph` shim, so product repos do not need a copy of the script.
+For the full command reference, review flows, retry/reset behavior, diagnostics, final docs behavior, and smoke tests, see [`scripts/agentic/README.md`](./scripts/agentic/README.md).
 
-Ralph loop logic:
+## Ralph harness
 
-1. Start only from a clean git working tree, unless `--allow-dirty` is passed.
-2. Read `prd.json`, using `userStories` or a top-level story array as the state source.
-3. Pick the next unfinished story (`passes != true`), sorted by `priority` and then `id`.
-4. Generate a one-story prompt under `.agent-runs/ralph-<timestamp>-<story-id>/prompt.md`.
-5. Launch a fresh agent with the configured adapter: `--tool claude`, `--tool pi`, or `--tool custom --command '... {prompt} ...'`.
-6. Run every configured `--checks` command after the agent exits successfully. If no checks are configured, agent exit success is treated as validation.
-7. If validation passes and the working tree changed, set that story's `passes` field to `true` in `prd.json`.
-8. Append a concise iteration entry to `progress.txt`.
-9. Commit the iteration as `ralph: complete <story-id>`, unless `--no-commit` is set.
-10. Repeat until all stories pass, then print `<promise>COMPLETE</promise>`, or stop when the max iteration budget is reached.
+[`scripts/ralph/ralph.ps1`](./scripts/ralph/ralph.ps1) is a simpler fresh-agent loop over a Ralph-compatible `prd.json`.
 
-Use [`ralph-prd`](./skills/engineering/ralph-prd/SKILL.md) to create the PRD package. Its most important job is **good story slicing**: small vertical stories with observable acceptance criteria. Ralph succeeds on architecture work only when the redesign is sliced into safe migration steps, not broad rewrite tasks.
-
-Typical run:
+Use it when you already have a PRD/user-story package and want the harness to execute one story at a time:
 
 ```powershell
 ralph --tool claude --checks "npm test"
 ralph --tool pi --checks "npm test"
 ```
 
-`prd.json.maxIterations` defines the default iteration budget. `--max-iterations` overrides it. Ralph stops early when all stories pass; the max is only a safety cap. For complex redesigns, set `maxIterations` to story count plus buffer, and prefer multiple phased PRDs when human review checkpoints are needed.
+Ralph keeps the same core principle as the agentic loop - persistent state on disk plus a fresh agent call per unit of work - but with less planning/verifier/review machinery. Use [`ralph-prd`](./skills/engineering/ralph-prd/SKILL.md) to produce the PRD package.
 
-See [`scripts/ralph/README.md`](./scripts/ralph/README.md) for the compact harness reference and [`tests/ralph/smoke.ps1`](./tests/ralph/smoke.ps1) for a five-iteration fake-agent smoke test.
+For details, see [`scripts/ralph/README.md`](./scripts/ralph/README.md).
 
-## Updating From Upstream
+## Which workflow should I use?
 
-Keep custom orchestration in [`templates/AGENTS.md`](./templates/AGENTS.md) / [`templates/CLAUDE.md`](./templates/CLAUDE.md) where possible, not inside upstream skill files. This keeps syncs from `mattpocock/skills` easier.
+| Need | Use |
+| --- | --- |
+| Clarify a feature or domain question | `grill-with-docs` |
+| Debug a concrete failure | `diagnose` |
+| Implement a focused change | `tdd` |
+| Refresh durable technical repo docs | `update-project-md` |
+| Run an autonomous multi-task coding goal | `agentic-loop` |
+| Execute a pre-written PRD/story list | `ralph` |
+| Hand work to another agent/session | `handoff` |
 
-To bring in upstream changes:
+## Repository map
+
+| Path | Purpose |
+| --- | --- |
+| [`templates/`](./templates/) | Product repo templates for agent guidance and policy. |
+| [`skills/`](./skills/) | Installed workflow skills grouped by bucket. |
+| [`scripts/bootstrap/`](./scripts/bootstrap/) | Machine/product-repo installers. |
+| [`scripts/agentic/`](./scripts/agentic/) | Agentic loop harness, setup script, and docs. |
+| [`scripts/ralph/`](./scripts/ralph/) | Ralph harness, setup script, and docs. |
+| [`tests/agentic/`](./tests/agentic/) | Focused harness smoke tests. |
+| [`tests/ralph/`](./tests/ralph/) | Ralph smoke tests. |
+| [`docs/adr/`](./docs/adr/) | Architecture decisions. |
+
+## Updating from upstream
+
+This repo is merged from upstream `mattpocock/skills` regularly. Keep local behavior in local templates, harnesses, and local skills rather than editing upstream-derived files.
+
+To update:
 
 ```bash
 git fetch upstream
 git merge upstream/main
 ```
 
-Resolve conflicts deliberately. Keep custom skills and templates isolated where possible so upstream merges stay manageable.
+Resolve conflicts deliberately. Preserve the separation between upstream skill content and local orchestration.
 
 ## References
 
-This repository is based on [`mattpocock/skills`](https://github.com/mattpocock/skills).
-
-The Operating Principles in [`templates/AGENTS.md`](./templates/AGENTS.md) and [`templates/CLAUDE.md`](./templates/CLAUDE.md) are adapted from [`multica-ai/andrej-karpathy-skills`](https://github.com/multica-ai/andrej-karpathy-skills/tree/main).
-
-The Ralph loop is implemented locally in [`scripts/ralph/ralph.ps1`](./scripts/ralph/ralph.ps1), documented in [`scripts/ralph/README.md`](./scripts/ralph/README.md), and paired with the [`ralph-prd`](./skills/engineering/ralph-prd/SKILL.md) skill for producing story-sliced `prd.json` input.
+- Upstream base: [`mattpocock/skills`](https://github.com/mattpocock/skills)
+- Operating-principles inspiration: [`multica-ai/andrej-karpathy-skills`](https://github.com/multica-ai/andrej-karpathy-skills/tree/main)

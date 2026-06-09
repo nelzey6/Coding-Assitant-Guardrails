@@ -6,6 +6,7 @@ TOOL="${TOOL:-both}"
 SKILLS_REPO="${SKILLS_REPO:-}"
 DESTINATION="${DESTINATION:-}"
 UPDATE="${UPDATE:-true}"
+FORCE_TEMPLATE_OVERWRITE="${FORCE_TEMPLATE_OVERWRITE:-false}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -29,8 +30,12 @@ while [ "$#" -gt 0 ]; do
       UPDATE="false"
       shift
       ;;
+    --force-template-overwrite)
+      FORCE_TEMPLATE_OVERWRITE="true"
+      shift
+      ;;
     -h|--help)
-      echo "Usage: $0 [--tool codex|claude|both] [--destination REPO_PATH] [--update|--no-update]"
+      echo "Usage: $0 [--tool codex|claude|both] [--destination REPO_PATH] [--update|--no-update] [--force-template-overwrite]"
       echo "By default, the script pulls latest changes in this git checkout using its configured remote, then re-runs itself so updated scripts are used."
       exit 0
       ;;
@@ -113,11 +118,19 @@ copy_repo_templates() {
   mkdir -p "$destination_root"
 
   if [ "$TOOL" = "codex" ] || [ "$TOOL" = "both" ]; then
-    copy_template "$template_root/AGENTS.md" "$destination_root/AGENTS.md"
+    if [ "$FORCE_TEMPLATE_OVERWRITE" = "true" ]; then
+      copy_template "$template_root/AGENTS.md" "$destination_root/AGENTS.md"
+    else
+      copy_template_if_missing "$template_root/AGENTS.md" "$destination_root/AGENTS.md"
+    fi
   fi
 
   if [ "$TOOL" = "claude" ] || [ "$TOOL" = "both" ]; then
-    copy_template "$template_root/CLAUDE.md" "$destination_root/CLAUDE.md"
+    if [ "$FORCE_TEMPLATE_OVERWRITE" = "true" ]; then
+      copy_template "$template_root/CLAUDE.md" "$destination_root/CLAUDE.md"
+    else
+      copy_template_if_missing "$template_root/CLAUDE.md" "$destination_root/CLAUDE.md"
+    fi
   fi
 
   copy_template_if_missing "$template_root/PROJECT.md" "$destination_root/PROJECT.md"
@@ -210,7 +223,7 @@ fi
 
 echo "Restart Codex or Claude to refresh available skills."
 if [ "$UPDATE" = "true" ]; then
-  echo "Installed after updating $SKILLS_REPO. Use --destination <repo> to overwrite templates in a product repo."
+  echo "Installed after updating $SKILLS_REPO. Use --destination <repo> to seed missing repo templates without overwriting existing markdowns."
 else
-  echo "Repo templates are available in $SKILLS_REPO/templates. Use --destination <repo> to overwrite templates in a product repo."
+  echo "Repo templates are available in $SKILLS_REPO/templates. Use --destination <repo> to seed missing repo templates without overwriting existing markdowns."
 fi

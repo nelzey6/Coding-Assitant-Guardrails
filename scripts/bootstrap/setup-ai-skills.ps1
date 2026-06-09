@@ -4,7 +4,8 @@ param(
     [string]$SkillsRepo = "",
     [string]$Destination = "",
     [switch]$Update = $true,
-    [switch]$NoUpdate
+    [switch]$NoUpdate,
+    [switch]$ForceTemplateOverwrite
 )
 
 $ErrorActionPreference = "Stop"
@@ -86,11 +87,15 @@ function Copy-RepoTemplates {
     New-Item -ItemType Directory -Force -Path $DestinationRoot | Out-Null
 
     if ($ToolName -eq "Codex" -or $ToolName -eq "Both") {
-        Copy-Template -Source (Join-Path $TemplateRoot "AGENTS.md") -DestinationPath (Join-Path $DestinationRoot "AGENTS.md")
+        $agentsPath = Join-Path $DestinationRoot "AGENTS.md"
+        if ($ForceTemplateOverwrite) { Copy-Template -Source (Join-Path $TemplateRoot "AGENTS.md") -DestinationPath $agentsPath }
+        else { Copy-TemplateIfMissing -Source (Join-Path $TemplateRoot "AGENTS.md") -DestinationPath $agentsPath }
     }
 
     if ($ToolName -eq "Claude" -or $ToolName -eq "Both") {
-        Copy-Template -Source (Join-Path $TemplateRoot "CLAUDE.md") -DestinationPath (Join-Path $DestinationRoot "CLAUDE.md")
+        $claudePath = Join-Path $DestinationRoot "CLAUDE.md"
+        if ($ForceTemplateOverwrite) { Copy-Template -Source (Join-Path $TemplateRoot "CLAUDE.md") -DestinationPath $claudePath }
+        else { Copy-TemplateIfMissing -Source (Join-Path $TemplateRoot "CLAUDE.md") -DestinationPath $claudePath }
     }
 
     Copy-TemplateIfMissing -Source (Join-Path $TemplateRoot "PROJECT.md") -DestinationPath (Join-Path $DestinationRoot "PROJECT.md")
@@ -218,7 +223,7 @@ if (![string]::IsNullOrWhiteSpace($Destination)) {
 
 Write-Host "Restart Codex or Claude to refresh available skills."
 if ($Update) {
-    Write-Host "Installed after updating $SkillsRepo. Use -Destination <repo> to overwrite templates in a product repo."
+    Write-Host "Installed after updating $SkillsRepo. Use -Destination <repo> to seed missing repo templates without overwriting existing markdowns."
 } else {
-    Write-Host "Repo templates are available in $SkillsRepo\templates. Use -Destination <repo> to overwrite templates in a product repo."
+    Write-Host "Repo templates are available in $SkillsRepo\templates. Use -Destination <repo> to seed missing repo templates without overwriting existing markdowns."
 }
