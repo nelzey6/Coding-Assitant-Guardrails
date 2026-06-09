@@ -21,7 +21,8 @@ Options:
   --runs-root <path>         Prompt/result root (default from policy, or .agent-runs)
   --no-commit                Do not commit passing task branch
   --no-merge                 Do not merge passing task branch into current branch; leave it for review/--accept
-  --auto-accept-passed       With --no-merge, auto-accept a task after task validation checks and verifier pass
+  --review-branch            Opt-in review mode: use agentic/review/<safe-task-id> and keep active branch unchanged until --accept
+  --auto-accept-passed       With --no-merge or --review-branch, auto-accept a task after task validation checks and verifier pass
   --allow-dirty              Allow starting with uncommitted changes in main worktree
   --cleanup-passed           Remove passed task worktree after merge/no-merge handling
   --plan-only                Run planner, validate planner-result.json, update state, then stop
@@ -33,15 +34,16 @@ Options:
   --max-retries <n>          Max automatic retries per task after the first attempt (default from policy, or 1)
   --merge-mode <mode>        Merge mode for pass/accept: ff-only | no-ff | cherry-pick | apply (default: ff-only)
 
-No-merge review flow:
+Review flows:
+  Default behavior still merges passing task branches into the active branch after verifier pass.
   Run with --no-merge to commit a passing task on agentic/<safe-task-id>, mark it passed,
-  and keep the worktree/branch for human review. Add --auto-accept-passed to integrate
-  passed no-merge tasks immediately after checks and verifier pass. After review, run --accept <task-id>
-  to integrate that passed task and remove its worktree/branch. --accept defaults to
-  --merge-mode ff-only; use --merge-mode cherry-pick or no-ff when that is intentional.
-  Use --merge-mode apply for single-task accept review: changes are applied with
-  no commit (git cherry-pick --no-commit), staged in the current worktree, and
-  the task worktree/branch are left intact for conservative cleanup after inspection.
+  and keep the worktree/branch for human review. Run with --review-branch to use
+  agentic/review/<safe-task-id> and keep the active branch unchanged until --accept.
+  Add --auto-accept-passed to integrate reviewed tasks immediately after checks and verifier pass.
+  After review, run --accept <task-id> to integrate that passed task and remove its worktree/branch.
+  Use --merge-mode apply for single-task accept review: changes are applied with no commit
+  (git cherry-pick --no-commit), staged in the current worktree, and the task worktree/branch
+  are left intact for conservative cleanup after inspection.
   -h, --help                 Show this help
 
 Environment overrides:
@@ -88,6 +90,7 @@ $worktreeRoot = ""
 $runsRoot = ""
 $commit = $true
 $merge = $true
+$reviewBranchMode = $false
 $autoAcceptPassed = $false
 $allowDirty = $false
 $cleanupPassed = $false
@@ -125,6 +128,7 @@ for ($i = 0; $i -lt $cliArgs.Count; $i++) {
         "--runs-root" { $runsRoot = Read-OptionValue $cliArgs $i "--runs-root"; $i++; continue }
         "--no-commit" { $commit = $false; continue }
         "--no-merge" { $merge = $false; continue }
+        "--review-branch" { $merge = $false; $reviewBranchMode = $true; continue }
         "--auto-accept-passed" { $autoAcceptPassed = $true; continue }
         "--allow-dirty" { $allowDirty = $true; continue }
         "--cleanup-passed" { $cleanupPassed = $true; continue }
@@ -253,13 +257,21 @@ function Set-TaskStatus([string]$Id, [string]$Status, [object]$Failure = $null) 
     }
     Write-StateJson $s
 }
-function Set-TaskPassed([string]$Id, $VerifierResult) {
+function Set-TaskPassed([string]$Id, $VerifierResult, [string]$ReviewBranch = "", [string]$ReviewWorktree = "") {
     $s = Read-StateJson
     foreach ($task in (Get-Tasks $s)) {
         if ([string]$task.id -eq $Id) {
             $task.status = "passed"
             if (!($task.PSObject.Properties.Name -contains "completedAt")) { $task | Add-Member -NotePropertyName completedAt -NotePropertyValue "" -Force }
             $task.completedAt = Get-Date -Format o
+            if (![string]::IsNullOrWhiteSpace($ReviewBranch)) {
+                if (!($task.PSObject.Properties.Name -contains "reviewBranch")) { $task | Add-Member -NotePropertyName reviewBranch -NotePropertyValue "" -Force }
+                $task.reviewBranch = $ReviewBranch
+            }
+            if (![string]::IsNullOrWhiteSpace($ReviewWorktree)) {
+                if (!($task.PSObject.Properties.Name -contains "reviewWorktree")) { $task | Add-Member -NotePropertyName reviewWorktree -NotePropertyValue "" -Force }
+                $task.reviewWorktree = $ReviewWorktree
+            }
             if ($VerifierResult -and ($VerifierResult.PSObject.Properties.Name -contains "artifacts") -and $VerifierResult.artifacts) {
                 if (!($task.PSObject.Properties.Name -contains "artifacts") -or $null -eq $task.artifacts) { $task | Add-Member -NotePropertyName artifacts -NotePropertyValue @() -Force }
                 $task.artifacts = @($task.artifacts) + @($VerifierResult.artifacts)
@@ -322,7 +334,8 @@ function Show-AgenticStatus {
     Write-Output "Tasks:"
     foreach ($task in (Get-Tasks $s | Sort-Object @{ Expression = { if ($null -ne $_.priority) { [int]$_.priority } else { 999 } } }, id)) {
         $deps = if ($task.dependsOn) { " deps=[" + (@($task.dependsOn) -join ",") + "]" } else { "" }
-        Write-Output ("  {0,-12} {1,-12} {2,-16} {3}{4}" -f [string]$task.status, [string]$task.id, [string]$task.workflow, [string]$task.title, $deps)
+        $review = if ($task.PSObject.Properties.Name -contains "reviewBranch" -and ![string]::IsNullOrWhiteSpace([string]$task.reviewBranch)) { " review=[$($task.reviewBranch)]" } else { "" }
+        Write-Output ("  {0,-12} {1,-12} {2,-16} {3}{4}{5}" -f [string]$task.status, [string]$task.id, [string]$task.workflow, [string]$task.title, $deps, $review)
     }
     $next = Get-NextTask $s
     if ($next) { Write-Output "Next runnable: $($next.id) - $($next.title)" }
@@ -340,6 +353,18 @@ function Invoke-AcceptGit([string[]]$NativeArgs, [string]$Operation) {
 function Stop-AcceptWithMessage([string]$Message) {
     throw $Message
 }
+function Clear-TaskReviewState([string]$TaskId) {
+    $s = Read-StateJson
+    foreach ($task in (Get-Tasks $s)) {
+        if ([string]$task.id -eq $TaskId) {
+            if ($task.PSObject.Properties.Name -contains "reviewBranch") { $task.reviewBranch = "" }
+            if ($task.PSObject.Properties.Name -contains "reviewWorktree") { $task.reviewWorktree = "" }
+            if (!($task.PSObject.Properties.Name -contains "acceptedAt")) { $task | Add-Member -NotePropertyName acceptedAt -NotePropertyValue "" -Force }
+            $task.acceptedAt = Get-Date -Format o
+        }
+    }
+    Write-StateJson $s
+}
 function Invoke-AcceptTask([string]$TaskId, [bool]$SkipDirtyCheck = $false) {
     $s = Read-StateJson
     $task = Get-Tasks $s | Where-Object { [string]$_.id -eq $TaskId } | Select-Object -First 1
@@ -349,8 +374,8 @@ function Invoke-AcceptTask([string]$TaskId, [bool]$SkipDirtyCheck = $false) {
     if (!$SkipDirtyCheck -and !$allowDirty -and $acceptStatus) { Stop-AcceptWithMessage "Cannot accept task '$TaskId': working tree is dirty. Commit/stash first, or pass --allow-dirty.`n$((& git status --short) -join "`n")" }
 
     $safeId = ConvertTo-SafeSlug $TaskId
-    $branch = "agentic/$safeId"
-    $worktreePath = Join-Path $worktreeRoot $safeId
+    $branch = if ($task.PSObject.Properties.Name -contains "reviewBranch" -and ![string]::IsNullOrWhiteSpace([string]$task.reviewBranch)) { [string]$task.reviewBranch } else { "agentic/$safeId" }
+    $worktreePath = if ($task.PSObject.Properties.Name -contains "reviewWorktree" -and ![string]::IsNullOrWhiteSpace([string]$task.reviewWorktree)) { [string]$task.reviewWorktree } else { Join-Path $worktreeRoot $safeId }
     $branchExists = (& git branch --list $branch)
     if (!$branchExists) { Stop-AcceptWithMessage "Cannot accept task '$TaskId': branch '$branch' was not found." }
 
@@ -386,6 +411,7 @@ function Invoke-AcceptTask([string]$TaskId, [bool]$SkipDirtyCheck = $false) {
     try {
         if (Test-Path -LiteralPath $worktreePath) { Invoke-AcceptGit @("worktree", "remove", $worktreePath) "git worktree remove $worktreePath" | Out-Host }
         Invoke-AcceptGit @("branch", "-D", $branch) "git branch -D $branch" | Out-Host
+        Clear-TaskReviewState $TaskId
     } catch {
         Stop-AcceptWithMessage "Accept integrated '$TaskId' but cleanup failed. Inspect worktree '$worktreePath' and branch '$branch'. $($_.Exception.Message)"
     }
@@ -747,7 +773,7 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
 
     $taskId = if ($task.id) { [string]$task.id } else { "task-$iteration" }
     $safeId = ConvertTo-SafeSlug $taskId
-    $branch = "agentic/$safeId"
+    $branch = if ($reviewBranchMode) { "agentic/review/$safeId" } else { "agentic/$safeId" }
     $worktreePath = Join-Path $worktreeRoot $safeId
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $runDir = Join-Path $runsRoot "agentic-$timestamp-$safeId"
@@ -824,7 +850,8 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
                 }
                 else { Write-Host "No tracked branch changes to merge for $taskId." }
             }
-            Set-TaskPassed $taskId $result
+            if ($reviewBranchMode) { Set-TaskPassed $taskId $result $branch $worktreePath }
+            else { Set-TaskPassed $taskId $result }
             if (!$merge -and $autoAcceptPassed) {
                 try { Invoke-AcceptTask $taskId $true }
                 catch {
