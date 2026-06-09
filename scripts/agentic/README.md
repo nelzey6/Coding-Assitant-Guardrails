@@ -68,6 +68,7 @@ pwsh -File scripts/agentic/agentic-loop.ps1 --tool custom --command 'my-agent ru
 
 - Starts only from a clean main worktree unless `--allow-dirty` is passed.
 - `--status` is the exception to the clean-tree gate, so you can inspect `agentic.json` even while local files are dirty.
+- `--doctor` is also read-only and allowed with a dirty tree; it reports stale review metadata plus missing review branches/worktrees without changing `agentic.json` or git state.
 - Runs sequentially only.
 - Keeps failed worktrees for inspection.
 - Records task/check/verifier/review events in `.agent-runs/events.jsonl`.
@@ -161,5 +162,6 @@ pwsh -File tests/agentic/auto-accept-smoke.ps1
 pwsh -File tests/agentic/accept-apply-smoke.ps1
 pwsh -File tests/agentic/retry-smoke.ps1
 pwsh -File tests/agentic/review-branch-smoke.ps1
+pwsh -File tests/agentic/doctor-smoke.ps1
 pwsh -File tests/agentic/docs-help-smoke.ps1
 ```

@@ -18,7 +18,10 @@ $requiredReadmeTerms = @(
     "pwsh -File",
     "--review-branch",
     "--accept <task-id>",
-    "--auto-accept-passed"
+    "--auto-accept-passed",
+    "--doctor",
+    "stale review metadata",
+    "missing review branches/worktrees"
 )
 foreach ($term in $requiredReadmeTerms) {
     if ($readme -notmatch [regex]::Escape($term)) { throw "README missing required agentic docs term: $term" }
@@ -30,7 +33,8 @@ $requiredHelpTerms = @(
     "--review-branch",
     "--accept <task-id>",
     "--auto-accept-passed",
-    "--merge-mode <mode>"
+    "--merge-mode <mode>",
+    "--doctor"
 )
 foreach ($term in $requiredHelpTerms) {
     if ($loop -notmatch [regex]::Escape($term)) { throw "Show-Usage missing required option: $term" }
@@ -39,7 +43,8 @@ foreach ($term in $requiredHelpTerms) {
 $requiredSmokeCommands = @(
     "pwsh -File tests/agentic/retry-smoke.ps1",
     "pwsh -File tests/agentic/review-branch-smoke.ps1",
-    "pwsh -File tests/agentic/validation-discovery-smoke.ps1"
+    "pwsh -File tests/agentic/validation-discovery-smoke.ps1",
+    "pwsh -File tests/agentic/doctor-smoke.ps1"
 )
 foreach ($command in $requiredSmokeCommands) {
     if ($readme -notmatch [regex]::Escape($command)) { throw "README smoke section missing: $command" }

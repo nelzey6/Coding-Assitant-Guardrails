@@ -27,6 +27,7 @@ Options:
   --cleanup-passed           Remove passed task worktree after merge/no-merge handling
   --plan-only                Run planner, validate planner-result.json, update state, then stop
   --status                   Print current state summary and exit; allowed even when the worktree is dirty
+  --doctor                   Diagnose stale review metadata and missing branches/worktrees without mutating state
   --accept <task-id>         Merge/cherry-pick an already passed no-merge task, clean up, then exit;
                              use --merge-mode apply for accept apply/no-commit mode
   --retry <task-id>          Run a specific retryable failed task (needs_retry/failed) instead of
@@ -108,6 +109,7 @@ $allowDirty = $false
 $cleanupPassed = $false
 $planOnly = $false
 $statusOnly = $false
+$doctorOnly = $false
 $acceptTaskId = ""
 $retryTaskId = ""
 $maxRetries = ""
@@ -146,6 +148,7 @@ for ($i = 0; $i -lt $cliArgs.Count; $i++) {
         "--cleanup-passed" { $cleanupPassed = $true; continue }
         "--plan-only" { $planOnly = $true; continue }
         "--status" { $statusOnly = $true; continue }
+        "--doctor" { $doctorOnly = $true; continue }
         "--accept" { $acceptTaskId = Read-OptionValue $cliArgs $i "--accept"; $i++; continue }
         "--retry" { $retryTaskId = Read-OptionValue $cliArgs $i "--retry"; $i++; continue }
         "--max-retries" { $maxRetries = Read-OptionValue $cliArgs $i "--max-retries"; $i++; continue }
@@ -235,7 +238,7 @@ function Read-StateJson { return (Normalize-StateJson (Get-Content -LiteralPath 
 function Write-StateJson($State) { ConvertTo-Json -InputObject (Normalize-StateJson $State) -Depth 30 | Set-Content -LiteralPath $stateFile -Encoding UTF8 }
 
 $status = (& git status --porcelain)
-if (!$statusOnly -and [string]::IsNullOrWhiteSpace($acceptTaskId) -and !$allowDirty -and $status) { Write-Error "Working tree is dirty. Commit/stash first, or pass --allow-dirty."; & git status --short | Write-Error; exit 1 }
+if (!$statusOnly -and !$doctorOnly -and [string]::IsNullOrWhiteSpace($acceptTaskId) -and !$allowDirty -and $status) { Write-Error "Working tree is dirty. Commit/stash first, or pass --allow-dirty."; & git status --short | Write-Error; exit 1 }
 if (![string]::IsNullOrWhiteSpace($acceptTaskId) -and ![string]::IsNullOrWhiteSpace($retryTaskId)) { Write-Error "Use either --accept or --retry, not both."; exit 2 }
 
 if (!(Test-Path -LiteralPath $stateFile)) {
@@ -252,8 +255,10 @@ if ([string]::IsNullOrWhiteSpace($maxIterations)) { $maxIterations = "10" }
 [int]$maxIterationsValue = 0
 if (!([int]::TryParse($maxIterations, [ref]$maxIterationsValue)) -or $maxIterationsValue -lt 1) { Write-Error "Invalid max iterations: $maxIterations"; exit 2 }
 
-New-Item -ItemType Directory -Force -Path $runsRoot | Out-Null
-New-Item -ItemType Directory -Force -Path $worktreeRoot | Out-Null
+if (!$doctorOnly) {
+    New-Item -ItemType Directory -Force -Path $runsRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $worktreeRoot | Out-Null
+}
 $eventLogPath = Join-Path $runsRoot "events.jsonl"
 
 function Write-AgenticEvent([string]$Type, [hashtable]$Data = @{}) {
@@ -447,6 +452,37 @@ function Show-AgenticStatus {
     Write-Output "Recent events:"
     Write-Output (Get-RecentAgenticHistory 8)
 }
+function Test-GitBranchExists([string]$Branch) {
+    if ([string]::IsNullOrWhiteSpace($Branch)) { return $false }
+    $output = & git branch --list $Branch
+    return ($LASTEXITCODE -eq 0 -and $null -ne $output -and @($output).Count -gt 0)
+}
+function Invoke-AgenticDoctor {
+    $script:AgenticDoctorExitCode = 0
+    if (!(Test-Path -LiteralPath $stateFile)) { Write-Output "No state file found: $stateFile"; $script:AgenticDoctorExitCode = 1; return }
+    $s = Read-StateJson
+    $issues = @()
+    foreach ($task in (Get-Tasks $s)) {
+        $taskId = [string]$task.id
+        if ($task.PSObject.Properties.Name -contains "reviewBranch" -and ![string]::IsNullOrWhiteSpace([string]$task.reviewBranch)) {
+            $branch = [string]$task.reviewBranch
+            if (!(Test-GitBranchExists $branch)) { $issues += "[$taskId] review branch missing: $branch" }
+        }
+        if ($task.PSObject.Properties.Name -contains "reviewWorktree" -and ![string]::IsNullOrWhiteSpace([string]$task.reviewWorktree)) {
+            $worktree = [string]$task.reviewWorktree
+            if (!(Test-Path -LiteralPath $worktree -PathType Container)) { $issues += "[$taskId] review worktree missing: $worktree" }
+        }
+    }
+    if ($issues.Count -eq 0) {
+        Write-Output "Doctor found no issues."
+        $script:AgenticDoctorExitCode = 0
+        return
+    }
+    Write-Output "Doctor found $($issues.Count) issue(s):"
+    foreach ($issue in $issues) { Write-Output "  - $issue" }
+    $script:AgenticDoctorExitCode = 1
+    return
+}
 function Invoke-AcceptGit([string[]]$NativeArgs, [string]$Operation) {
     $output = & git @NativeArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -527,6 +563,7 @@ function Invoke-AcceptTask([string]$TaskId, [bool]$SkipDirtyCheck = $false) {
 }
 
 if ($statusOnly) { Show-AgenticStatus; exit 0 }
+if ($doctorOnly) { Invoke-AgenticDoctor; exit $script:AgenticDoctorExitCode }
 if (![string]::IsNullOrWhiteSpace($acceptTaskId)) {
     try { Invoke-AcceptTask $acceptTaskId; exit 0 }
     catch { Write-Output $_.Exception.Message; exit 1 }
