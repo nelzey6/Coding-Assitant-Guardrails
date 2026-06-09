@@ -20,6 +20,7 @@ Options:
   --runs-root <path>         Prompt/result root (default from policy, or .agent-runs)
   --no-commit                Do not commit passing task branch
   --no-merge                 Do not merge passing task branch into current branch; leave it for review/--accept
+  --auto-accept-passed       With --no-merge, auto-accept a task after checks and verifier pass
   --allow-dirty              Allow starting with uncommitted changes in main worktree
   --cleanup-passed           Remove passed task worktree after merge/no-merge handling
   --plan-only                Run planner, validate planner-result.json, update state, then stop
@@ -30,7 +31,8 @@ Options:
 
 No-merge review flow:
   Run with --no-merge to commit a passing task on agentic/<safe-task-id>, mark it passed,
-  and keep the worktree/branch for human review. After review, run --accept <task-id>
+  and keep the worktree/branch for human review. Add --auto-accept-passed to integrate
+  passed no-merge tasks immediately after checks and verifier pass. After review, run --accept <task-id>
   to integrate that passed task and remove its worktree/branch. --accept defaults to
   --merge-mode ff-only; use --merge-mode cherry-pick or no-ff when that is intentional.
   -h, --help                 Show this help
@@ -79,6 +81,7 @@ $worktreeRoot = ""
 $runsRoot = ""
 $commit = $true
 $merge = $true
+$autoAcceptPassed = $false
 $allowDirty = $false
 $cleanupPassed = $false
 $planOnly = $false
@@ -114,6 +117,7 @@ for ($i = 0; $i -lt $cliArgs.Count; $i++) {
         "--runs-root" { $runsRoot = Read-OptionValue $cliArgs $i "--runs-root"; $i++; continue }
         "--no-commit" { $commit = $false; continue }
         "--no-merge" { $merge = $false; continue }
+        "--auto-accept-passed" { $autoAcceptPassed = $true; continue }
         "--allow-dirty" { $allowDirty = $true; continue }
         "--cleanup-passed" { $cleanupPassed = $true; continue }
         "--plan-only" { $planOnly = $true; continue }
@@ -304,16 +308,15 @@ function Invoke-AcceptGit([string[]]$NativeArgs, [string]$Operation) {
     return $output
 }
 function Stop-AcceptWithMessage([string]$Message) {
-    Write-Output $Message
-    exit 1
+    throw $Message
 }
-function Invoke-AcceptTask([string]$TaskId) {
+function Invoke-AcceptTask([string]$TaskId, [bool]$SkipDirtyCheck = $false) {
     $s = Read-StateJson
     $task = Get-Tasks $s | Where-Object { [string]$_.id -eq $TaskId } | Select-Object -First 1
     if ($null -eq $task) { Stop-AcceptWithMessage "Cannot accept task '$TaskId': task not found in $stateFile." }
     if ([string]$task.status -ne "passed") { Stop-AcceptWithMessage "Cannot accept task '$TaskId': task status is '$($task.status)', expected 'passed'." }
     $acceptStatus = (& git status --porcelain)
-    if (!$allowDirty -and $acceptStatus) { Stop-AcceptWithMessage "Cannot accept task '$TaskId': working tree is dirty. Commit/stash first, or pass --allow-dirty.`n$((& git status --short) -join "`n")" }
+    if (!$SkipDirtyCheck -and !$allowDirty -and $acceptStatus) { Stop-AcceptWithMessage "Cannot accept task '$TaskId': working tree is dirty. Commit/stash first, or pass --allow-dirty.`n$((& git status --short) -join "`n")" }
 
     $safeId = ConvertTo-SafeSlug $TaskId
     $branch = "agentic/$safeId"
@@ -352,7 +355,10 @@ function Invoke-AcceptTask([string]$TaskId) {
 }
 
 if ($statusOnly) { Show-AgenticStatus; exit 0 }
-if (![string]::IsNullOrWhiteSpace($acceptTaskId)) { Invoke-AcceptTask $acceptTaskId; exit 0 }
+if (![string]::IsNullOrWhiteSpace($acceptTaskId)) {
+    try { Invoke-AcceptTask $acceptTaskId; exit 0 }
+    catch { Write-Output $_.Exception.Message; exit 1 }
+}
 
 function Invoke-Agent([string]$PromptFile, [string]$Template, [string]$WorkingDirectory = "") {
     if (![string]::IsNullOrWhiteSpace($Template)) { Invoke-ShellCommand ($Template.Replace("{prompt}", (Resolve-Path -LiteralPath $PromptFile).Path)) $WorkingDirectory; return }
@@ -776,9 +782,17 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
                 else { Write-Host "No tracked branch changes to merge for $taskId." }
             }
             Set-TaskPassed $taskId $result
+            if (!$merge -and $autoAcceptPassed) {
+                try { Invoke-AcceptTask $taskId $true }
+                catch {
+                    Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
+                    Write-Error "Auto-accept failed for $taskId. Worktree retained at $worktreePath and branch '$branch' remains for recovery. $($_.Exception.Message)"
+                    exit 1
+                }
+            }
             Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
             Add-Content -Path (Join-Path $runsRoot "agentic-progress.txt") -Value "`n## $(Get-Date -Format o) $taskId`n- Verdict: pass`n- Summary: $($result.summary)"
-            if ($cleanupPassed) { Invoke-CheckedNative git @("worktree", "remove", $worktreePath) }
+            if ($cleanupPassed -and (Test-Path -LiteralPath $worktreePath)) { Invoke-CheckedNative git @("worktree", "remove", $worktreePath) }
         } elseif ($verdict -eq "needs_human") {
             Set-TaskStatus $taskId "needs_human" ([pscustomobject]@{ at = (Get-Date -Format o); phase = "verifier"; reason = $result.summary; resultFile = $verifierResult })
             Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
