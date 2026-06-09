@@ -87,6 +87,21 @@ When the planner runs, it now writes a visible autonomous grill artifact:
 
 This file records the planner's goal restatement plus the question/evidence/answer/proposal trail it used before creating `planner-result.json`. Use it to review the same kind of "grill me" reasoning you would normally do interactively, including assumptions, proposed validation, task slicing rationale, and whether human input was needed.
 
+## Operator diagnostics and controls
+
+Use these dirty-tree-safe diagnostics while a run is failing or slow:
+
+```powershell
+pwsh -File scripts/agentic/agentic-loop.ps1 --last-failure
+pwsh -File scripts/agentic/agentic-loop.ps1 --why-stuck
+pwsh -File scripts/agentic/agentic-loop.ps1 --summary
+pwsh -File scripts/agentic/agentic-loop.ps1 --doctor
+```
+
+Use `--reset-task <task-id>` to remove a stale task worktree/branch and mark the task `needs_retry` for a clean rerun. This is mutating and should be used only when you are comfortable discarding the task branch/worktree attempt.
+
+For low-risk tasks, `--fast-verifier` skips the separate verifier agent after checks pass and records a `verifier_skipped` event. The default remains the safer separate verifier. Use `--agent-timeout-seconds <n>` for custom/template executor/verifier commands and `--check-timeout-seconds <n>` for each validation/check command.
+
 ## Event log, recent-history prompts, and metrics
 
 The harness writes an append-only JSONL event log at `.agent-runs/events.jsonl`. Each line records a timestamped lifecycle event such as task attempts, executor start/pass/fail, checks pass/fail, verifier verdicts, status changes, and passed review branches. `--status` prints the recent event tail.
@@ -173,5 +188,7 @@ pwsh -File tests/agentic/accept-apply-smoke.ps1
 pwsh -File tests/agentic/retry-smoke.ps1
 pwsh -File tests/agentic/review-branch-smoke.ps1
 pwsh -File tests/agentic/doctor-smoke.ps1
+pwsh -File tests/agentic/operator-diagnostics-smoke.ps1
+pwsh -File tests/agentic/operator-controls-smoke.ps1
 pwsh -File tests/agentic/docs-help-smoke.ps1
 ```

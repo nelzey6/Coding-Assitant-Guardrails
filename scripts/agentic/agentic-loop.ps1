@@ -27,7 +27,14 @@ Options:
   --cleanup-passed           Remove passed task worktree after merge/no-merge handling
   --plan-only                Run planner, validate planner-result.json, update state, then stop
   --status                   Print current state summary and exit; allowed even when the worktree is dirty
+  --last-failure             Print the latest failure/status context and exit; dirty-tree safe
+  --why-stuck                Explain blocked/needs_human/retryable tasks and suggested next commands; dirty-tree safe
+  --summary                  Print a compact human checkpoint summary and exit; dirty-tree safe
   --doctor                   Diagnose stale review metadata and missing branches/worktrees without mutating state
+  --reset-task <task-id>     Remove a task worktree/branch and mark it needs_retry for a clean rerun
+  --fast-verifier            Skip the verifier agent after checks pass; opt-in for low-risk tasks only
+  --agent-timeout-seconds <n>   Timeout for executor/verifier agent commands (custom/template commands only)
+  --check-timeout-seconds <n>   Timeout for each validation/check command
   --accept <task-id>         Merge/cherry-pick an already passed no-merge task, clean up, then exit;
                              use --merge-mode apply for accept apply/no-commit mode
   --retry <task-id>          Run a specific retryable failed task (needs_retry/failed) instead of
@@ -74,16 +81,41 @@ function Invoke-ShellCommand([string]$Command, [string]$WorkingDirectory = "") {
     } finally { Set-Location $old }
 }
 
-function Invoke-ShellCommandCapture([string]$Command, [string]$WorkingDirectory = "") {
-    $old = Get-Location
-    try {
-        if (![string]::IsNullOrWhiteSpace($WorkingDirectory)) { Set-Location -LiteralPath $WorkingDirectory }
-        $output = if ($IsWindows -or $PSVersionTable.PSEdition -eq "Desktop") { & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $Command 2>&1 } else { & sh -lc $Command 2>&1 }
-        $code = $LASTEXITCODE
-        $text = ($output | ForEach-Object { [string]$_ }) -join "`n"
-        if ($code -ne 0) { throw "Command failed with code $code`: $Command`n$text" }
-        return $text
-    } finally { Set-Location $old }
+function Invoke-ShellCommandCapture([string]$Command, [string]$WorkingDirectory = "", [int]$TimeoutSeconds = 0) {
+    if ($TimeoutSeconds -le 0) {
+        $old = Get-Location
+        try {
+            if (![string]::IsNullOrWhiteSpace($WorkingDirectory)) { Set-Location -LiteralPath $WorkingDirectory }
+            $output = if ($IsWindows -or $PSVersionTable.PSEdition -eq "Desktop") { & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $Command 2>&1 } else { & sh -lc $Command 2>&1 }
+            $code = $LASTEXITCODE
+            $text = ($output | ForEach-Object { [string]$_ }) -join "`n"
+            if ($code -ne 0) { throw "Command failed with code $code`: $Command`n$text" }
+            return $text
+        } finally { Set-Location $old }
+    }
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    if ($IsWindows -or $PSVersionTable.PSEdition -eq "Desktop") {
+        $psi.FileName = "powershell.exe"
+        $escaped = $Command.Replace('"', '\"')
+        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$escaped`""
+    } else {
+        $psi.FileName = "sh"
+        $escaped = $Command.Replace('"', '\"')
+        $psi.Arguments = "-lc `"$escaped`""
+    }
+    if (![string]::IsNullOrWhiteSpace($WorkingDirectory)) { $psi.WorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $process = [System.Diagnostics.Process]::Start($psi)
+    if (!$process.WaitForExit($TimeoutSeconds * 1000)) {
+        try { $process.Kill($true) } catch { try { $process.Kill() } catch {} }
+        throw "Command timed out after $TimeoutSeconds seconds: $Command"
+    }
+    $text = ($process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()).TrimEnd()
+    if ($process.ExitCode -ne 0) { throw "Command failed with code $($process.ExitCode)`: $Command`n$text" }
+    return $text
 }
 
 function ConvertTo-SafeSlug([string]$Value) {
@@ -109,9 +141,16 @@ $allowDirty = $false
 $cleanupPassed = $false
 $planOnly = $false
 $statusOnly = $false
+$lastFailureOnly = $false
+$whyStuckOnly = $false
+$summaryOnly = $false
 $doctorOnly = $false
+$fastVerifier = $false
 $acceptTaskId = ""
+$resetTaskId = ""
 $retryTaskId = ""
+$agentTimeoutSeconds = 0
+$checkTimeoutSeconds = 0
 $maxRetries = ""
 $mergeMode = "ff-only"
 $checks = @()
@@ -148,7 +187,14 @@ for ($i = 0; $i -lt $cliArgs.Count; $i++) {
         "--cleanup-passed" { $cleanupPassed = $true; continue }
         "--plan-only" { $planOnly = $true; continue }
         "--status" { $statusOnly = $true; continue }
+        "--last-failure" { $lastFailureOnly = $true; continue }
+        "--why-stuck" { $whyStuckOnly = $true; continue }
+        "--summary" { $summaryOnly = $true; continue }
         "--doctor" { $doctorOnly = $true; continue }
+        "--reset-task" { $resetTaskId = Read-OptionValue $cliArgs $i "--reset-task"; $i++; continue }
+        "--fast-verifier" { $fastVerifier = $true; continue }
+        "--agent-timeout-seconds" { $agentTimeoutSeconds = [int](Read-OptionValue $cliArgs $i "--agent-timeout-seconds"); $i++; continue }
+        "--check-timeout-seconds" { $checkTimeoutSeconds = [int](Read-OptionValue $cliArgs $i "--check-timeout-seconds"); $i++; continue }
         "--accept" { $acceptTaskId = Read-OptionValue $cliArgs $i "--accept"; $i++; continue }
         "--retry" { $retryTaskId = Read-OptionValue $cliArgs $i "--retry"; $i++; continue }
         "--max-retries" { $maxRetries = Read-OptionValue $cliArgs $i "--max-retries"; $i++; continue }
@@ -238,8 +284,10 @@ function Read-StateJson { return (Normalize-StateJson (Get-Content -LiteralPath 
 function Write-StateJson($State) { ConvertTo-Json -InputObject (Normalize-StateJson $State) -Depth 30 | Set-Content -LiteralPath $stateFile -Encoding UTF8 }
 
 $status = (& git status --porcelain)
-if (!$statusOnly -and !$doctorOnly -and [string]::IsNullOrWhiteSpace($acceptTaskId) -and !$allowDirty -and $status) { Write-Error "Working tree is dirty. Commit/stash first, or pass --allow-dirty."; & git status --short | Write-Error; exit 1 }
+$readOnlyMode = $statusOnly -or $doctorOnly -or $lastFailureOnly -or $whyStuckOnly -or $summaryOnly
+if (!$readOnlyMode -and [string]::IsNullOrWhiteSpace($acceptTaskId) -and [string]::IsNullOrWhiteSpace($resetTaskId) -and !$allowDirty -and $status) { Write-Error "Working tree is dirty. Commit/stash first, or pass --allow-dirty."; & git status --short | Write-Error; exit 1 }
 if (![string]::IsNullOrWhiteSpace($acceptTaskId) -and ![string]::IsNullOrWhiteSpace($retryTaskId)) { Write-Error "Use either --accept or --retry, not both."; exit 2 }
+if (![string]::IsNullOrWhiteSpace($acceptTaskId) -and ![string]::IsNullOrWhiteSpace($resetTaskId)) { Write-Error "Use either --accept or --reset-task, not both."; exit 2 }
 
 if (!(Test-Path -LiteralPath $stateFile)) {
     if ([string]::IsNullOrWhiteSpace($goal)) { throw "Missing $stateFile. Pass --goal to create it, or create agentic.json first." }
@@ -283,7 +331,7 @@ function ConvertTo-MetricObject([hashtable]$Metrics) {
 
 function Parse-MetricLines([string]$Text) {
     $metrics = @{}
-    foreach ($match in [regex]::Matches($Text, '(?m)^METRIC\s+([\w.µ]+)=([^\s]+)\s*$')) {
+    foreach ($match in [regex]::Matches($Text, '(?m)^METRIC\s+([\w.u]+)=([^\s]+)\s*$')) {
         $name = $match.Groups[1].Value
         if ($name -in @('__proto__', 'constructor', 'prototype')) { continue }
         [double]$value = 0
@@ -452,6 +500,92 @@ function Show-AgenticStatus {
     Write-Output "Recent events:"
     Write-Output (Get-RecentAgenticHistory 8)
 }
+function Get-FailureEvents([int]$Limit = 20) {
+    if (!(Test-Path -LiteralPath $eventLogPath)) { return @() }
+    $events = @()
+    foreach ($line in @(Get-Content -LiteralPath $eventLogPath | Select-Object -Last 200)) {
+        try {
+            $event = $line | ConvertFrom-Json
+            if ([string]$event.type -match 'failed|failure|needs_human|task_status') { $events += $event }
+        } catch {}
+    }
+    return @($events | Select-Object -Last $Limit)
+}
+
+function Show-LastFailure {
+    $events = @(Get-FailureEvents 1)
+    if ($events.Count -gt 0) {
+        Write-Output "Latest failure/status event:"
+        Write-Output ($events[0] | ConvertTo-Json -Depth 20)
+        return
+    }
+    $s = Read-StateJson
+    foreach ($task in (Get-Tasks $s | Where-Object { $_.failureHistory } | Select-Object -Last 1)) {
+        Write-Output "Latest task failureHistory:"
+        Write-Output ($task | ConvertTo-Json -Depth 20)
+        return
+    }
+    Write-Output "No failure events or task failureHistory found."
+}
+
+function Show-WhyStuck {
+    if (!(Test-Path -LiteralPath $stateFile)) { Write-Output "No state file found: $stateFile"; return }
+    $s = Read-StateJson
+    $tasks = @(Get-Tasks $s)
+    Write-Output "Why-stuck analysis for: $($s.goal)"
+    $needsHuman = @($tasks | Where-Object { [string]$_.status -eq "needs_human" })
+    $retryable = @($tasks | Where-Object { [string]$_.status -in @("needs_retry", "failed") })
+    $pendingBlocked = @($tasks | Where-Object { [string]$_.status -eq "pending" -and !(Test-DependenciesPassed $_ $s) })
+    if ($needsHuman.Count -eq 0 -and $retryable.Count -eq 0 -and $pendingBlocked.Count -eq 0) {
+        $next = Get-NextTask $s
+        if ($next) { Write-Output "Not stuck: next runnable task is $($next.id). Suggested: run the loop normally." }
+        else { Write-Output "No stuck tasks detected. All tasks may be complete." }
+    }
+    foreach ($task in $needsHuman) { Write-Output "needs_human: $($task.id) - inspect $($task.lastRunDir); resolve manually or split/reset if safe." }
+    foreach ($task in $retryable) { Write-Output "retryable: $($task.id) attempts=$(Get-TaskAttempts $task)/$maxRetriesValue - suggested: --retry $($task.id) or --reset-task $($task.id)." }
+    foreach ($task in $pendingBlocked) { Write-Output "blocked by dependencies: $($task.id) waits on [$(@($task.dependsOn) -join ', ')]." }
+    Write-Output "Recent failures:"
+    foreach ($event in @(Get-FailureEvents 5)) { Write-Output ($event | ConvertTo-Json -Depth 10 -Compress) }
+}
+
+function Show-CheckpointSummary {
+    if (!(Test-Path -LiteralPath $stateFile)) { Write-Output "No state file found: $stateFile"; return }
+    $s = Read-StateJson
+    $tasks = @(Get-Tasks $s)
+    Write-Output "# Agentic checkpoint summary"
+    Write-Output "Goal: $($s.goal)"
+    Write-Output "Phase: $($s.phase)"
+    foreach ($statusName in @("passed", "pending", "needs_retry", "needs_human", "blocked", "running")) {
+        $count = @($tasks | Where-Object { [string]$_.status -eq $statusName }).Count
+        if ($count -gt 0) { Write-Output "- $statusName`: $count" }
+    }
+    $next = Get-NextTask $s
+    if ($next) { Write-Output "Next: $($next.id) - $($next.title)" }
+    Write-Output "Recent events:"
+    Write-Output (Get-RecentAgenticHistory 12)
+}
+
+function Reset-AgenticTask([string]$TaskId) {
+    $s = Read-StateJson
+    $task = Get-Tasks $s | Where-Object { [string]$_.id -eq $TaskId } | Select-Object -First 1
+    if ($null -eq $task) { throw "Cannot reset task '$TaskId': task not found." }
+    $safeId = ConvertTo-SafeSlug $TaskId
+    $branch = if ($task.PSObject.Properties.Name -contains "reviewBranch" -and ![string]::IsNullOrWhiteSpace([string]$task.reviewBranch)) { [string]$task.reviewBranch } else { "agentic/$safeId" }
+    $worktreePath = if ($task.PSObject.Properties.Name -contains "reviewWorktree" -and ![string]::IsNullOrWhiteSpace([string]$task.reviewWorktree)) { [string]$task.reviewWorktree } else { Join-Path $worktreeRoot $safeId }
+    if (Test-Path -LiteralPath $worktreePath) { Invoke-CheckedNative git @("worktree", "remove", "--force", $worktreePath) }
+    if (Test-GitBranchExists $branch) { Invoke-CheckedNative git @("branch", "-D", $branch) }
+    foreach ($candidate in (Get-Tasks $s)) {
+        if ([string]$candidate.id -eq $TaskId) {
+            $candidate.status = "needs_retry"
+            if ($candidate.PSObject.Properties.Name -contains "reviewBranch") { $candidate.reviewBranch = "" }
+            if ($candidate.PSObject.Properties.Name -contains "reviewWorktree") { $candidate.reviewWorktree = "" }
+        }
+    }
+    Write-StateJson $s
+    Write-AgenticEvent "task_reset" @{ task = $TaskId; branch = $branch; worktree = $worktreePath; status = "needs_retry" }
+    Write-Output "Reset $TaskId. Suggested next command: --retry $TaskId"
+}
+
 function Test-GitBranchExists([string]$Branch) {
     if ([string]::IsNullOrWhiteSpace($Branch)) { return $false }
     $output = & git branch --list $Branch
@@ -563,16 +697,37 @@ function Invoke-AcceptTask([string]$TaskId, [bool]$SkipDirtyCheck = $false) {
 }
 
 if ($statusOnly) { Show-AgenticStatus; exit 0 }
+if ($lastFailureOnly) { Show-LastFailure; exit 0 }
+if ($whyStuckOnly) { Show-WhyStuck; exit 0 }
+if ($summaryOnly) { Show-CheckpointSummary; exit 0 }
 if ($doctorOnly) { Invoke-AgenticDoctor; exit $script:AgenticDoctorExitCode }
+if (![string]::IsNullOrWhiteSpace($resetTaskId)) {
+    try { Reset-AgenticTask $resetTaskId; exit 0 }
+    catch { Write-Output $_.Exception.Message; exit 1 }
+}
 if (![string]::IsNullOrWhiteSpace($acceptTaskId)) {
     try { Invoke-AcceptTask $acceptTaskId; exit 0 }
     catch { Write-Output $_.Exception.Message; exit 1 }
 }
 
 function Invoke-Agent([string]$PromptFile, [string]$Template, [string]$WorkingDirectory = "") {
-    if (![string]::IsNullOrWhiteSpace($Template)) { Invoke-ShellCommand ($Template.Replace("{prompt}", (Resolve-Path -LiteralPath $PromptFile).Path)) $WorkingDirectory; return }
+    if (![string]::IsNullOrWhiteSpace($Template)) {
+        $command = $Template.Replace("{prompt}", (Resolve-Path -LiteralPath $PromptFile).Path)
+        if ($agentTimeoutSeconds -gt 0) { Write-Output (Invoke-ShellCommandCapture $command $WorkingDirectory $agentTimeoutSeconds) }
+        else { Invoke-ShellCommand $command $WorkingDirectory }
+        return
+    }
     switch ($tool) {
-        "claude" { Require-Command claude; $prompt = Get-Content -LiteralPath $PromptFile -Raw; Invoke-ShellCommand "claude -p @'`n$prompt`n'@" $WorkingDirectory }
+        "claude" {
+            Require-Command claude
+            $prompt = Get-Content -LiteralPath $PromptFile -Raw
+            $old = Get-Location
+            try {
+                if (![string]::IsNullOrWhiteSpace($WorkingDirectory)) { Set-Location -LiteralPath $WorkingDirectory }
+                & claude -p $prompt
+                if ($LASTEXITCODE -ne 0) { throw "claude exited with code $LASTEXITCODE" }
+            } finally { Set-Location $old }
+        }
         "pi" {
             Require-Command pi
             $piCommand = Get-Command pi
@@ -615,7 +770,7 @@ function Invoke-Checks([string]$WorkingDirectory, [object[]]$ChecksToRun) {
     foreach ($check in $effectiveChecks) {
         Write-Host "Running check in $WorkingDirectory`: $check"
         try {
-            $output = Invoke-ShellCommandCapture ([string]$check) $WorkingDirectory
+            $output = Invoke-ShellCommandCapture ([string]$check) $WorkingDirectory $checkTimeoutSeconds
             if (![string]::IsNullOrWhiteSpace($output)) { Write-Host $output }
             $metrics = Parse-MetricLines $output
             foreach ($key in $metrics.Keys) { $allMetrics[$key] = $metrics[$key] }
@@ -716,6 +871,7 @@ Allowed task statuses in planner output: pending, needs_human, blocked.
 Allowed task kinds: discovery, investigation, implementation, architecture, maintenance, handoff.
 Each task must have: id, title, kind, workflow, status, priority, acceptanceCriteria, validation, dependsOn, failureHistory, artifacts.
 Use one workflow per task. Use dependencies for workflow sequences. Use only canonical workflows from the policy.
+Keep tasks small and independently verifiable: one logical change, one primary artifact/change area, and focused validation. Split broad goals into dependent tasks. If safe slicing is unclear or a task would need multiple unrelated changes, record the uncertainty in openQuestions or needs_human rather than creating a broad task.
 
 Planner result schema:
 {
@@ -908,7 +1064,7 @@ if ((Get-Tasks $state).Count -eq 0) {
         $repairPrompt = Join-Path $plannerRunDir "planner-repair.md"
         $errorText = ($plannerErrors -join "`n")
         $original = Get-Content -LiteralPath $plannerResultFile -Raw
-        Set-Content -LiteralPath $repairPrompt -Value @"
+        $repairContent = @"
 Your previous planner-result.json was invalid.
 
 Validation errors:
@@ -919,7 +1075,8 @@ $original
 
 Rewrite valid planner JSON only to: $plannerResultForPrompt
 Follow the schema and policy from the original planner prompt at: $promptFile
-"@ -Encoding UTF8
+"@
+        Set-Content -LiteralPath $repairPrompt -Value $repairContent -Encoding UTF8
         Write-Host "=== Agentic planner repair ==="
         Invoke-Agent $repairPrompt $commandTemplate ""
         if (!(Test-Path -LiteralPath $plannerResultFile)) { throw "Planner repair did not write $plannerResultFile" }
@@ -1018,12 +1175,19 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
         }
 
         Write-DiffArtifacts $worktreePath $runDirAbs
-        New-VerifierPrompt $task $worktreePath $checkOutput $verifierResultForPrompt $verifierPrompt
-        $verifierTemplate = if (![string]::IsNullOrWhiteSpace($verifierCommandTemplate)) { $verifierCommandTemplate } else { $commandTemplate }
-        Write-AgenticEvent "verifier_started" @{ task = $taskId; prompt = $verifierPrompt; resultFile = $verifierResult; log = $verifierLog }
-        Invoke-AgentWithLog $verifierPrompt $verifierTemplate $worktreePath $verifierLog
-        if (!(Test-Path -LiteralPath $verifierResult)) { throw "Verifier did not write $verifierResult" }
-        $result = Get-Content -LiteralPath $verifierResult -Raw | ConvertFrom-Json
+        if ($fastVerifier) {
+            $result = [pscustomobject]@{ verdict = "pass"; summary = "fast-verifier: checks passed; separate verifier skipped by explicit operator flag"; issues = @(); humanGates = @(); recommendedStatus = "passed"; artifacts = @() }
+            $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $verifierResult -Encoding UTF8
+            Set-Content -LiteralPath $verifierLog -Value "fast-verifier: skipped separate verifier after checks passed." -Encoding UTF8
+            Write-AgenticEvent "verifier_skipped" @{ task = $taskId; resultFile = $verifierResult; log = $verifierLog; reason = "fast-verifier" }
+        } else {
+            New-VerifierPrompt $task $worktreePath $checkOutput $verifierResultForPrompt $verifierPrompt
+            $verifierTemplate = if (![string]::IsNullOrWhiteSpace($verifierCommandTemplate)) { $verifierCommandTemplate } else { $commandTemplate }
+            Write-AgenticEvent "verifier_started" @{ task = $taskId; prompt = $verifierPrompt; resultFile = $verifierResult; log = $verifierLog }
+            Invoke-AgentWithLog $verifierPrompt $verifierTemplate $worktreePath $verifierLog
+            if (!(Test-Path -LiteralPath $verifierResult)) { throw "Verifier did not write $verifierResult" }
+            $result = Get-Content -LiteralPath $verifierResult -Raw | ConvertFrom-Json
+        }
         $verdict = [string]$result.verdict
         Write-AgenticEvent "verifier_finished" @{ task = $taskId; verdict = $verdict; summary = [string]$result.summary; resultFile = $verifierResult }
         if ($verdict -eq "pass") {
