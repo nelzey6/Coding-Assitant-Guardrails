@@ -28,7 +28,9 @@ Options:
   --status                   Print current state summary and exit; allowed even when the worktree is dirty
   --accept <task-id>         Merge/cherry-pick an already passed no-merge task, clean up, then exit;
                              use --merge-mode apply for accept apply/no-commit mode
-  --max-retries <n>          Max automatic retries per task (default from policy, or 1)
+  --retry <task-id>          Run a specific retryable failed task (needs_retry/failed) instead of
+                             normal next-task priority/dependency selection; validates retry budget
+  --max-retries <n>          Max automatic retries per task after the first attempt (default from policy, or 1)
   --merge-mode <mode>        Merge mode for pass/accept: ff-only | no-ff | cherry-pick | apply (default: ff-only)
 
 No-merge review flow:
@@ -92,6 +94,7 @@ $cleanupPassed = $false
 $planOnly = $false
 $statusOnly = $false
 $acceptTaskId = ""
+$retryTaskId = ""
 $maxRetries = ""
 $mergeMode = "ff-only"
 $checks = @()
@@ -128,6 +131,7 @@ for ($i = 0; $i -lt $cliArgs.Count; $i++) {
         "--plan-only" { $planOnly = $true; continue }
         "--status" { $statusOnly = $true; continue }
         "--accept" { $acceptTaskId = Read-OptionValue $cliArgs $i "--accept"; $i++; continue }
+        "--retry" { $retryTaskId = Read-OptionValue $cliArgs $i "--retry"; $i++; continue }
         "--max-retries" { $maxRetries = Read-OptionValue $cliArgs $i "--max-retries"; $i++; continue }
         "--merge-mode" { $mergeMode = Read-OptionValue $cliArgs $i "--merge-mode"; $i++; continue }
         { $_ -in @("-h", "--help") } { Show-Usage; exit 0 }
@@ -178,6 +182,7 @@ function Write-StateJson($State) { ConvertTo-Json -InputObject $State -Depth 30 
 
 $status = (& git status --porcelain)
 if (!$statusOnly -and [string]::IsNullOrWhiteSpace($acceptTaskId) -and !$allowDirty -and $status) { Write-Error "Working tree is dirty. Commit/stash first, or pass --allow-dirty."; & git status --short | Write-Error; exit 1 }
+if (![string]::IsNullOrWhiteSpace($acceptTaskId) -and ![string]::IsNullOrWhiteSpace($retryTaskId)) { Write-Error "Use either --accept or --retry, not both."; exit 2 }
 
 if (!(Test-Path -LiteralPath $stateFile)) {
     if ([string]::IsNullOrWhiteSpace($goal)) { throw "Missing $stateFile. Pass --goal to create it, or create agentic.json first." }
@@ -213,6 +218,7 @@ function Test-DependenciesPassed($Task, $State) {
     return $true
 }
 function Get-NextTask($State) {
+    if (![string]::IsNullOrWhiteSpace($retryTaskId)) { return Get-RetryTaskOrExit $State $retryTaskId }
     $eligible = @(Get-Tasks $State | Where-Object { $_.status -in @("pending", "needs_retry") -and (Test-DependenciesPassed $_ $State) } | Sort-Object @{ Expression = { if ($null -ne $_.priority) { [int]$_.priority } else { 999 } } }, @{ Expression = { if ($_.id) { [string]$_.id } else { "" } } })
     if ($eligible.Count -eq 0) { return $null }
     return $eligible[0]
@@ -281,10 +287,29 @@ function Get-TaskAttempts($Task) {
     if ($Task.PSObject.Properties.Name -contains "attempts" -and $null -ne $Task.attempts) { return [int]$Task.attempts }
     return 0
 }
+function Test-RetryBudgetAvailable($Task) {
+    return (Get-TaskAttempts $Task) -le $maxRetriesValue
+}
+function Test-RetryableTaskStatus([string]$Status) {
+    return $Status -in @("needs_retry", "failed")
+}
+function Get-RetryTaskOrExit($State, [string]$TaskId) {
+    $task = Get-Tasks $State | Where-Object { [string]$_.id -eq $TaskId } | Select-Object -First 1
+    if ($null -eq $task) { Write-Error "Cannot retry task '$TaskId': task not found in $stateFile."; exit 1 }
+    if (!(Test-RetryableTaskStatus ([string]$task.status))) { Write-Error "Cannot retry task '$TaskId': status is '$($task.status)', expected needs_retry or failed."; exit 1 }
+    if (!(Test-DependenciesPassed $task $State)) { Write-Error "Cannot retry task '$TaskId': dependencies are not passed."; exit 1 }
+    if (!(Test-RetryBudgetAvailable $task)) { Write-Error "Cannot retry task '$TaskId': retry budget exhausted (attempts=$($task.attempts), max-retries=$maxRetriesValue)."; exit 1 }
+    return $task
+}
 function Get-FailureStatusForTask($Task, [string]$Phase) {
-    if ((Get-TaskAttempts $Task) -ge $maxRetriesValue) { return "needs_human" }
     if ($Phase -in @("executor", "harness")) { return "needs_human" }
-    return "needs_retry"
+    if (Test-RetryBudgetAvailable $Task) { return "needs_retry" }
+    return "needs_human"
+}
+function Complete-RetryableFailure([string]$TaskId, [string]$FailureStatus, [string]$Message) {
+    if ($FailureStatus -eq "needs_retry") { Write-Warning $Message; return }
+    [Console]::Error.WriteLine($Message)
+    exit 1
 }
 function Show-AgenticStatus {
     if (!(Test-Path -LiteralPath $stateFile)) { Write-Output "No state file found: $stateFile"; return }
@@ -765,8 +790,8 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
             Set-TaskStatus $taskId $failureStatus ([pscustomobject]@{ at = (Get-Date -Format o); phase = "checks"; reason = $_.Exception.Message; resultFile = $verifierResult })
             Write-DiffArtifacts $worktreePath $runDirAbs
             Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
-            Write-Error "Checks failed for $taskId; marked $failureStatus. Worktree retained at $worktreePath. $($_.Exception.Message)"
-            exit 1
+            Complete-RetryableFailure $taskId $failureStatus "Checks failed for $taskId; marked $failureStatus. Worktree retained at $worktreePath. $($_.Exception.Message)"
+            continue
         }
 
         Write-DiffArtifacts $worktreePath $runDirAbs
@@ -807,6 +832,7 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
             Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
             Add-Content -Path (Join-Path $runsRoot "agentic-progress.txt") -Value "`n## $(Get-Date -Format o) $taskId`n- Verdict: pass`n- Summary: $($result.summary)"
             if ($cleanupPassed -and (Test-Path -LiteralPath $worktreePath)) { Invoke-CheckedNative git @("worktree", "remove", $worktreePath) }
+            if (![string]::IsNullOrWhiteSpace($retryTaskId)) { Write-Output "<promise>COMPLETE</promise>"; exit 0 }
         } elseif ($verdict -eq "needs_human") {
             Set-TaskStatus $taskId "needs_human" ([pscustomobject]@{ at = (Get-Date -Format o); phase = "verifier"; reason = $result.summary; resultFile = $verifierResult })
             Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
@@ -816,8 +842,8 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
             $failureStatus = Get-FailureStatusForTask $task "verifier"
             Set-TaskStatus $taskId $failureStatus ([pscustomobject]@{ at = (Get-Date -Format o); phase = "verifier"; reason = $result.summary; resultFile = $verifierResult })
             Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
-            Write-Error "Verifier failed $taskId; marked $failureStatus. Worktree retained at $worktreePath."
-            exit 1
+            Complete-RetryableFailure $taskId $failureStatus "Verifier failed $taskId; marked $failureStatus. Worktree retained at $worktreePath."
+            continue
         }
     } catch {
         Set-TaskStatus $taskId "needs_human" ([pscustomobject]@{ at = (Get-Date -Format o); phase = "harness"; reason = $_.Exception.Message; resultFile = $verifierResult })
