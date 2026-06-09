@@ -36,6 +36,7 @@ Options:
   --no-finalize-docs         Skip the default final PROJECT.md/CONTEXT.md refresh after all tasks pass
   --agent-timeout-seconds <n>   Timeout for executor/verifier/finalizer agent commands (custom/template commands only)
   --check-timeout-seconds <n>   Timeout for each validation/check command
+  --prompt-budget <mode>     Prompt context budget: low | normal | high (default: normal)
   --accept <task-id>         Merge/cherry-pick an already passed no-merge task, clean up, then exit;
                              use --merge-mode apply for accept apply/no-commit mode
   --retry <task-id>          Run a specific retryable failed task (needs_retry/failed) instead of
@@ -153,6 +154,7 @@ $resetTaskId = ""
 $retryTaskId = ""
 $agentTimeoutSeconds = 0
 $checkTimeoutSeconds = 0
+$promptBudget = "normal"
 $maxRetries = ""
 $mergeMode = "ff-only"
 $checks = @()
@@ -198,6 +200,7 @@ for ($i = 0; $i -lt $cliArgs.Count; $i++) {
         "--no-finalize-docs" { $finalizeDocs = $false; continue }
         "--agent-timeout-seconds" { $agentTimeoutSeconds = [int](Read-OptionValue $cliArgs $i "--agent-timeout-seconds"); $i++; continue }
         "--check-timeout-seconds" { $checkTimeoutSeconds = [int](Read-OptionValue $cliArgs $i "--check-timeout-seconds"); $i++; continue }
+        "--prompt-budget" { $promptBudget = Read-OptionValue $cliArgs $i "--prompt-budget"; $i++; continue }
         "--accept" { $acceptTaskId = Read-OptionValue $cliArgs $i "--accept"; $i++; continue }
         "--retry" { $retryTaskId = Read-OptionValue $cliArgs $i "--retry"; $i++; continue }
         "--max-retries" { $maxRetries = Read-OptionValue $cliArgs $i "--max-retries"; $i++; continue }
@@ -227,6 +230,7 @@ if ([string]::IsNullOrWhiteSpace($maxRetries)) { $maxRetries = if ($policy -and 
 [int]$maxRetriesValue = 0
 if (!([int]::TryParse($maxRetries, [ref]$maxRetriesValue)) -or $maxRetriesValue -lt 0) { Write-Error "Invalid max retries: $maxRetries"; exit 2 }
 if ($mergeMode -notin @("ff-only", "no-ff", "cherry-pick", "apply")) { Write-Error "Invalid merge mode: $mergeMode"; exit 2 }
+if ($promptBudget -notin @("low", "normal", "high")) { Write-Error "Invalid prompt budget: $promptBudget"; exit 2 }
 
 function New-EmptyState([string]$GoalText) {
     [pscustomobject]@{
@@ -323,7 +327,47 @@ function Get-RecentAgenticHistory([int]$Limit = 12) {
     if (!(Test-Path -LiteralPath $eventLogPath)) { return "No prior event log entries." }
     $lines = @(Get-Content -LiteralPath $eventLogPath | Select-Object -Last $Limit)
     if ($lines.Count -eq 0) { return "No prior event log entries." }
-    return ($lines -join "`n")
+    if ($promptBudget -eq "high") { return ($lines -join "`n") }
+    $summary = @()
+    foreach ($line in $lines) {
+        try {
+            $event = $line | ConvertFrom-Json
+            $taskPart = if ($event.PSObject.Properties.Name -contains "task" -and ![string]::IsNullOrWhiteSpace([string]$event.task)) { " [$($event.task)]" } else { "" }
+            $detail = if ($event.PSObject.Properties.Name -contains "summary" -and ![string]::IsNullOrWhiteSpace([string]$event.summary)) { [string]$event.summary }
+                      elseif ($event.PSObject.Properties.Name -contains "reason" -and ![string]::IsNullOrWhiteSpace([string]$event.reason)) { [string]$event.reason }
+                      elseif ($event.PSObject.Properties.Name -contains "status" -and ![string]::IsNullOrWhiteSpace([string]$event.status)) { "status=$($event.status)" }
+                      else { "" }
+            if ($detail.Length -gt 180) { $detail = $detail.Substring(0, 180) + "..." }
+            $summary += "- $($event.type)$taskPart $detail".TrimEnd()
+        } catch { $summary += "- $line" }
+    }
+    return ($summary -join "`n")
+}
+
+function Limit-TextForPrompt([string]$Text, [int]$MaxBytes, [int]$TailLines = 80) {
+    if ([string]::IsNullOrEmpty($Text)) { return "" }
+    $bytes = [Text.Encoding]::UTF8.GetByteCount($Text)
+    if ($bytes -le $MaxBytes) { return $Text }
+    $lines = @($Text -split "`r?`n")
+    $tail = ($lines | Select-Object -Last $TailLines) -join "`n"
+    while ([Text.Encoding]::UTF8.GetByteCount($tail) -gt $MaxBytes -and $tail.Length -gt 200) { $tail = $tail.Substring([Math]::Min(200, $tail.Length)) }
+    return "[truncated for prompt: original ${bytes} bytes; showing tail]`n$tail"
+}
+
+function Get-PromptBudgetLimits {
+    switch ($promptBudget) {
+        "low" { return @{ CheckBytes = 6000; DiffBytes = 12000; EventLimit = 6 } }
+        "high" { return @{ CheckBytes = 50000; DiffBytes = 100000; EventLimit = 20 } }
+        default { return @{ CheckBytes = 12000; DiffBytes = 20000; EventLimit = 12 } }
+    }
+}
+
+function Write-PromptWithEvent([string]$PromptFile, [string]$Content, [string]$Kind, [hashtable]$Data = @{}) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PromptFile) | Out-Null
+    Set-Content -LiteralPath $PromptFile -Value $Content -Encoding UTF8
+    $event = @{ prompt = $PromptFile; kind = $Kind; bytes = [Text.Encoding]::UTF8.GetByteCount($Content); promptBudget = $promptBudget }
+    foreach ($key in $Data.Keys) { $event[$key] = $Data[$key] }
+    Write-AgenticEvent "prompt_written" $event
 }
 
 function ConvertTo-MetricObject([hashtable]$Metrics) {
@@ -907,8 +951,7 @@ Goal: $($state.goal)
 Policy:
 $policyText
 "@
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PromptFile) | Out-Null
-    Set-Content -LiteralPath $PromptFile -Value $content -Encoding UTF8
+    Write-PromptWithEvent $PromptFile $content "planner" @{ resultFile = $PlannerResultFile; codegraph = $CodeGraphFile }
 }
 
 function Get-AllowedWorkflows {
@@ -1015,8 +1058,7 @@ $(Get-WorkflowBlock $workflow)
 Task JSON:
 $taskJson
 "@
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PromptFile) | Out-Null
-    Set-Content -LiteralPath $PromptFile -Value $content -Encoding UTF8
+    Write-PromptWithEvent $PromptFile $content "executor" @{ task = [string]$Task.id; codegraph = $CodeGraphFile }
 }
 
 function Invoke-FinalizeDocsIfNeeded {
@@ -1085,10 +1127,16 @@ function Complete-AgenticRun {
 
 function New-VerifierPrompt($Task, [string]$WorktreePath, [string]$CheckOutput, [string]$ResultFile, [string]$PromptFile) {
     $taskJson = $Task | ConvertTo-Json -Depth 20
-    $diffStat = (& git -C $WorktreePath diff --stat HEAD)
-    $diff = (& git -C $WorktreePath diff HEAD)
+    $limits = Get-PromptBudgetLimits
+    $diffStat = (& git -C $WorktreePath diff --stat HEAD) -join "`n"
+    $diffPath = Join-Path (Split-Path -Parent $PromptFile) "diff.patch"
+    $rawDiff = (& git -C $WorktreePath diff HEAD) -join "`n"
+    $rawDiffBytes = [Text.Encoding]::UTF8.GetByteCount($rawDiff)
+    $diffInlined = $rawDiffBytes -le [int]$limits.DiffBytes
+    $diff = if ($diffInlined) { $rawDiff } else { "[diff omitted from prompt: ${rawDiffBytes} bytes exceeds $($limits.DiffBytes). Full diff artifact: $diffPath]" }
+    $checkOutputForPrompt = Limit-TextForPrompt $CheckOutput ([int]$limits.CheckBytes) 80
     $gates = if ($policy -and $policy.humanGates) { ($policy.humanGates | ConvertTo-Json -Depth 10) } else { "[]" }
-    $recentHistory = Get-RecentAgenticHistory
+    $recentHistory = Get-RecentAgenticHistory ([int]$limits.EventLimit)
     $content = @"
 You are the verifier for one agentic task.
 
@@ -1111,8 +1159,8 @@ $gates
 Recent harness history (JSONL tail; source of truth is $eventLogPath):
 $recentHistory
 
-Check output:
-$CheckOutput
+Check output (capped; full output is in checks.log):
+$checkOutputForPrompt
 
 Git diff stat:
 $diffStat
@@ -1120,8 +1168,7 @@ $diffStat
 Git diff:
 $diff
 "@
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PromptFile) | Out-Null
-    Set-Content -LiteralPath $PromptFile -Value $content -Encoding UTF8
+    Write-PromptWithEvent $PromptFile $content "verifier" @{ task = [string]$Task.id; diffBytes = $rawDiffBytes; diffInlined = $diffInlined; checkBytes = [Text.Encoding]::UTF8.GetByteCount($CheckOutput) }
 }
 
 # Plan if needed.

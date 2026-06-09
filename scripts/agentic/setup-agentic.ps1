@@ -8,6 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $source = Join-Path $SkillsRepo "scripts\agentic\agentic-loop.ps1"
+$codeGraphHelper = Join-Path $SkillsRepo "scripts\context\codegraph-context.ps1"
 if (!(Test-Path $source)) {
     throw "Agentic loop script not found: $source"
 }
@@ -25,6 +26,12 @@ foreach ($target in $targets) {
     New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
     Copy-Item -LiteralPath $source -Destination $target -Force
     Write-Host "Installed agentic loop harness to $target"
+    if (Test-Path -LiteralPath $codeGraphHelper) {
+        $contextDir = Join-Path (Split-Path -Parent $targetDir) "context"
+        New-Item -ItemType Directory -Force -Path $contextDir | Out-Null
+        Copy-Item -LiteralPath $codeGraphHelper -Destination (Join-Path $contextDir "codegraph-context.ps1") -Force
+        Write-Host "Installed CodeGraph context helper to $contextDir"
+    }
 }
 
 if ($targets.Count -eq 0) {

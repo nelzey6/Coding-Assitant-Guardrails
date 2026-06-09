@@ -24,6 +24,7 @@ else
 fi
 
 source_file="$SKILLS_REPO/scripts/agentic/agentic-loop.ps1"
+codegraph_helper="$SKILLS_REPO/scripts/context/codegraph-context.ps1"
 if [ ! -f "$source_file" ]; then
   echo "Agentic loop script not found: $source_file" >&2
   exit 1
@@ -48,6 +49,12 @@ for target in "${targets[@]}"; do
   mkdir -p "$(dirname "$target")"
   cp "$source_file" "$target"
   echo "Installed agentic loop harness to $target"
+  if [ -f "$codegraph_helper" ]; then
+    context_dir="$(dirname "$(dirname "$target")")/context"
+    mkdir -p "$context_dir"
+    cp "$codegraph_helper" "$context_dir/codegraph-context.ps1"
+    echo "Installed CodeGraph context helper to $context_dir"
+  fi
 done
 
 if [ "${#targets[@]}" -eq 0 ]; then

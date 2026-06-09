@@ -22,8 +22,12 @@ CodeGraph is not available on PATH. Continue with normal repository inspection.
 function Invoke-CodeGraphText([string]$Candidate) {
     Push-Location $resolvedWorkingDirectory
     try {
-        $commandOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $Candidate 2>&1
-        if ($LASTEXITCODE -eq 0) { return (($commandOutput | ForEach-Object { [string]$_ }) -join "`n").Trim() }
+        try {
+            $commandOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $Candidate 2>&1
+            if ($LASTEXITCODE -eq 0) { return (($commandOutput | ForEach-Object { [string]$_ }) -join "`n").Trim() }
+        } catch {
+            return ""
+        }
         return ""
     } finally { Pop-Location }
 }

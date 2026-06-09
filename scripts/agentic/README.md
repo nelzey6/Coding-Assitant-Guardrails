@@ -100,7 +100,7 @@ pwsh -File scripts/agentic/agentic-loop.ps1 --doctor
 
 Use `--reset-task <task-id>` to remove a stale task worktree/branch and mark the task `needs_retry` for a clean rerun. This is mutating and should be used only when you are comfortable discarding the task branch/worktree attempt.
 
-For low-risk tasks, `--fast-verifier` skips the separate verifier agent after checks pass and records a `verifier_skipped` event. The default remains the safer separate verifier. Use `--agent-timeout-seconds <n>` for custom/template executor/verifier/finalizer commands and `--check-timeout-seconds <n>` for each validation/check command.
+For low-risk tasks, `--fast-verifier` skips the separate verifier agent after checks pass and records a `verifier_skipped` event. The default remains the safer separate verifier. Use `--agent-timeout-seconds <n>` for custom/template executor/verifier/finalizer commands and `--check-timeout-seconds <n>` for each validation/check command. Use `--prompt-budget low|normal|high` to control prompt inlining: lower budgets summarize event history and cap check/diff text more aggressively while keeping full artifacts on disk for inspection.
 
 When all tasks pass and changes were merged into the active branch, the harness runs a final docs refresh by default. The finalizer uses update-project-md-style behavior for `PROJECT.md`, writes `.agent-runs/<finalize-run>/final-summary.md`, records `finalize_docs_*` events, and commits `PROJECT.md` changes as `agentic: finalize docs` when committing is enabled. `CONTEXT.md` is normally owned by the planning grill-with-docs stage, not finalization. Pass `--no-finalize-docs` to skip the final `PROJECT.md` refresh.
 
