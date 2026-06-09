@@ -148,7 +148,7 @@ function Read-StateJson { return (Get-Content -LiteralPath $stateFile -Raw | Con
 function Write-StateJson($State) { ConvertTo-Json -InputObject $State -Depth 30 | Set-Content -LiteralPath $stateFile -Encoding UTF8 }
 
 $status = (& git status --porcelain)
-if (!$allowDirty -and $status) { Write-Error "Working tree is dirty. Commit/stash first, or pass --allow-dirty."; & git status --short | Write-Error; exit 1 }
+if (!$statusOnly -and !$allowDirty -and $status) { Write-Error "Working tree is dirty. Commit/stash first, or pass --allow-dirty."; & git status --short | Write-Error; exit 1 }
 
 if (!(Test-Path -LiteralPath $stateFile)) {
     if ([string]::IsNullOrWhiteSpace($goal)) { throw "Missing $stateFile. Pass --goal to create it, or create agentic.json first." }
