@@ -193,8 +193,46 @@ function New-EmptyState([string]$GoalText) {
     }
 }
 
-function Read-StateJson { return (Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json) }
-function Write-StateJson($State) { ConvertTo-Json -InputObject $State -Depth 30 | Set-Content -LiteralPath $stateFile -Encoding UTF8 }
+function Ensure-NoteProperty($Object, [string]$Name, $Value) {
+    if (!($Object.PSObject.Properties.Name -contains $Name) -or $null -eq $Object.$Name) {
+        $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force
+    }
+}
+
+function Normalize-StateJson($State) {
+    if ($null -eq $State) { return (New-EmptyState "") }
+
+    Ensure-NoteProperty $State "version" 1
+    Ensure-NoteProperty $State "goal" ""
+    Ensure-NoteProperty $State "phase" "execution"
+    Ensure-NoteProperty $State "maxIterations" 10
+    Ensure-NoteProperty $State "checks" ([object[]]@())
+    Ensure-NoteProperty $State "tasks" ([object[]]@())
+    Ensure-NoteProperty $State "decisions" ([object[]]@())
+    Ensure-NoteProperty $State "assumptions" ([object[]]@())
+    Ensure-NoteProperty $State "openQuestions" ([object[]]@())
+    Ensure-NoteProperty $State "blockers" ([object[]]@())
+    Ensure-NoteProperty $State "promptPolicy" ([pscustomobject]@{ lessons = @() })
+
+    foreach ($task in @($State.tasks)) {
+        Ensure-NoteProperty $task "id" ""
+        Ensure-NoteProperty $task "title" ""
+        Ensure-NoteProperty $task "kind" "implementation"
+        Ensure-NoteProperty $task "workflow" "tdd"
+        Ensure-NoteProperty $task "status" "pending"
+        Ensure-NoteProperty $task "priority" 999
+        Ensure-NoteProperty $task "acceptanceCriteria" ([object[]]@())
+        Ensure-NoteProperty $task "validation" ([object[]]@())
+        Ensure-NoteProperty $task "dependsOn" ([object[]]@())
+        Ensure-NoteProperty $task "failureHistory" ([object[]]@())
+        Ensure-NoteProperty $task "artifacts" ([object[]]@())
+    }
+
+    return $State
+}
+
+function Read-StateJson { return (Normalize-StateJson (Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json)) }
+function Write-StateJson($State) { ConvertTo-Json -InputObject (Normalize-StateJson $State) -Depth 30 | Set-Content -LiteralPath $stateFile -Encoding UTF8 }
 
 $status = (& git status --porcelain)
 if (!$statusOnly -and [string]::IsNullOrWhiteSpace($acceptTaskId) -and !$allowDirty -and $status) { Write-Error "Working tree is dirty. Commit/stash first, or pass --allow-dirty."; & git status --short | Write-Error; exit 1 }
