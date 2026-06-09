@@ -52,7 +52,7 @@ pwsh -File scripts/agentic/agentic-loop.ps1 --tool custom --command 'my-agent ru
 ## What it does
 
 1. Loads `agentic.json`, or creates it from `--goal` when missing.
-2. If no tasks exist, runs a planner prompt that requires grill-with-docs-style discovery.
+2. If no tasks exist, runs a planner prompt that requires grill-with-docs-style discovery and writes `.agent-runs/<planner-run>/grill-transcript.md` with autonomous questions, evidence, answers, and proposals.
 3. Picks the next `pending` or `needs_retry` task.
 4. Creates one git worktree under `.worktrees/<task-id>` on branch `agentic/<task-id>`.
 5. Runs an executor agent in that worktree.
@@ -76,6 +76,16 @@ pwsh -File scripts/agentic/agentic-loop.ps1 --tool custom --command 'my-agent ru
 - The harness, not the executor, marks task status and merges branches.
 - Use `--no-merge` while testing the harness or when you want human review before integration.
 - Use `--cleanup-passed` only when you are comfortable removing passed worktrees.
+
+## Planner grill transcript
+
+When the planner runs, it now writes a visible autonomous grill artifact:
+
+```text
+.agent-runs/<planner-run>/grill-transcript.md
+```
+
+This file records the planner's goal restatement plus the question/evidence/answer/proposal trail it used before creating `planner-result.json`. Use it to review the same kind of "grill me" reasoning you would normally do interactively, including assumptions, proposed validation, task slicing rationale, and whether human input was needed.
 
 ## Event log, recent-history prompts, and metrics
 

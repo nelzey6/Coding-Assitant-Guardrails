@@ -688,7 +688,7 @@ $context
     Set-Content -LiteralPath $ContextFile -Value $content -Encoding UTF8
 }
 
-function New-PlannerPrompt([string]$PromptFile, [string]$PlannerResultFile, [string]$RepoContextFile) {
+function New-PlannerPrompt([string]$PromptFile, [string]$PlannerResultFile, [string]$RepoContextFile, [string]$GrillTranscriptFile) {
     $policyText = if ($resolvedPolicyFile) { Get-Content -LiteralPath $resolvedPolicyFile -Raw -ErrorAction SilentlyContinue } else { "" }
     $content = @"
 You are the planner for an autonomous agentic coding loop.
@@ -701,6 +701,15 @@ Inspect deeper in the repository when needed.
 When planning validation, propose focused task.validation commands that prove each task. If a task adds or changes a small smoke test/check that directly proves the change, include that newly added focused smoke command in the task.validation array so the harness runs it before verification. Prefer PowerShell Core examples in the form `pwsh -File path/to/smoke.ps1`; mention `powershell.exe` only for explicitly documented legacy Windows PowerShell compatibility.
 
 Do not edit $stateFile directly. Write planner JSON only to: $PlannerResultFile
+Also write an autonomous grill transcript markdown file to: $GrillTranscriptFile
+
+The grill transcript must make your discovery visible for human review. Use this structure:
+# Autonomous Grill Transcript
+## Goal Restatement
+## Questions, Evidence, Answers, Proposals
+For each grill question include: question, repo/docs evidence inspected, autonomous answer, proposal/decision, and whether human input is needed.
+## Final Plan Rationale
+Explain why the task split, dependencies, validation commands, assumptions, and open questions are appropriate.
 
 Allowed verdicts: planned, needs_human, blocked.
 Allowed task statuses in planner output: pending, needs_human, blocked.
@@ -716,7 +725,8 @@ Planner result schema:
   "assumptions": [],
   "openQuestions": [],
   "blockers": [],
-  "tasks": []
+  "tasks": [],
+  "artifacts": ["path/to/grill-transcript.md"]
 }
 
 Goal: $($state.goal)
@@ -880,14 +890,18 @@ if ((Get-Tasks $state).Count -eq 0) {
     $promptFile = Join-Path $plannerRunDir "planner.md"
     $repoContextFile = Join-Path $plannerRunDir "repo-context.md"
     $plannerResultFile = Join-Path $plannerRunDir "planner-result.json"
+    $grillTranscriptFile = Join-Path $plannerRunDir "grill-transcript.md"
     $plannerResultForPrompt = Join-Path (Resolve-Path -LiteralPath ".").Path $plannerResultFile
     $repoContextForPrompt = Join-Path (Resolve-Path -LiteralPath ".").Path $repoContextFile
+    $grillTranscriptForPrompt = Join-Path (Resolve-Path -LiteralPath ".").Path $grillTranscriptFile
 
     New-RepoContext $repoContextFile
-    New-PlannerPrompt $promptFile $plannerResultForPrompt $repoContextForPrompt
+    New-PlannerPrompt $promptFile $plannerResultForPrompt $repoContextForPrompt $grillTranscriptForPrompt
+    Write-AgenticEvent "planner_started" @{ runDir = $plannerRunDir; prompt = $promptFile; resultFile = $plannerResultFile; grillTranscript = $grillTranscriptFile }
     Write-Host "=== Agentic planner ==="
     Invoke-Agent $promptFile $commandTemplate ""
     if (!(Test-Path -LiteralPath $plannerResultFile)) { throw "Planner did not write $plannerResultFile" }
+    if (!(Test-Path -LiteralPath $grillTranscriptFile)) { throw "Planner did not write $grillTranscriptFile" }
     $plannerResult = Get-Content -LiteralPath $plannerResultFile -Raw | ConvertFrom-Json
     $plannerErrors = @(Test-PlannerResult $plannerResult)
     if ($plannerErrors.Count -gt 0) {
@@ -913,6 +927,7 @@ Follow the schema and policy from the original planner prompt at: $promptFile
         $plannerErrors = @(Test-PlannerResult $plannerResult)
         if ($plannerErrors.Count -gt 0) { throw "Planner result invalid after repair:`n$($plannerErrors -join "`n")" }
     }
+    Write-AgenticEvent "planner_finished" @{ runDir = $plannerRunDir; verdict = [string]$plannerResult.verdict; resultFile = $plannerResultFile; grillTranscript = $grillTranscriptFile }
     Merge-PlannerResult $plannerResult
     if ($planOnly) {
         Write-Output "<promise>PLANNED</promise>"
