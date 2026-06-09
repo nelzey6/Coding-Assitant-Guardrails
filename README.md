@@ -139,11 +139,12 @@ Typical safe flow:
 
 ```powershell
 agentic-loop --goal "Fix checkout reliability" --tool claude --plan-only
-agentic-loop --status --allow-dirty
+agentic-loop --status
 agentic-loop --tool claude --checks "npm test" --no-merge
+agentic-loop --accept task-001
 ```
 
-Use `--no-merge` while reviewing autonomous output. The loop creates per-task worktrees under `.worktrees/`, prompts under `.agent-runs/`, and keeps `agentic.json` as ignored local runtime state.
+Use `--no-merge` while reviewing autonomous output. A passed no-merge task remains on `agentic/<safe-task-id>` with a worktree under `.worktrees/`; after review, `--accept <task-id>` integrates it and cleans up. `--accept` defaults to `--merge-mode ff-only`; pass `--merge-mode cherry-pick` or `--merge-mode no-ff` only when that merge behavior is intentional. `--status` can be run even when the worktree is dirty. The loop creates prompts under `.agent-runs/` and keeps `agentic.json` as ignored local runtime state.
 
 ## Ralph Harness
 

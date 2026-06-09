@@ -19,14 +19,20 @@ Options:
   --worktree-root <path>     Worktree root (default from policy, or .worktrees)
   --runs-root <path>         Prompt/result root (default from policy, or .agent-runs)
   --no-commit                Do not commit passing task branch
-  --no-merge                 Do not merge passing task branch into current branch
+  --no-merge                 Do not merge passing task branch into current branch; leave it for review/--accept
   --allow-dirty              Allow starting with uncommitted changes in main worktree
   --cleanup-passed           Remove passed task worktree after merge/no-merge handling
   --plan-only                Run planner, validate planner-result.json, update state, then stop
-  --status                   Print current state summary and exit
+  --status                   Print current state summary and exit; allowed even when the worktree is dirty
   --accept <task-id>         Merge/cherry-pick an already passed no-merge task, clean up, then exit
   --max-retries <n>          Max automatic retries per task (default from policy, or 1)
-  --merge-mode <mode>        Merge mode: ff-only | no-ff | cherry-pick (default: ff-only)
+  --merge-mode <mode>        Merge mode for pass/accept: ff-only | no-ff | cherry-pick (default: ff-only)
+
+No-merge review flow:
+  Run with --no-merge to commit a passing task on agentic/<safe-task-id>, mark it passed,
+  and keep the worktree/branch for human review. After review, run --accept <task-id>
+  to integrate that passed task and remove its worktree/branch. --accept defaults to
+  --merge-mode ff-only; use --merge-mode cherry-pick or no-ff when that is intentional.
   -h, --help                 Show this help
 
 Environment overrides:
