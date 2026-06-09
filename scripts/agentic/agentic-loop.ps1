@@ -317,6 +317,13 @@ function Get-NextTask($State) {
 function Test-HasUnfinishedTasks($State) {
     return @((Get-Tasks $State) | Where-Object { $_.status -notin @("passed", "blocked") }).Count -gt 0
 }
+function Get-TaskProgressSummary($State) {
+    $tasks = @(Get-Tasks $State)
+    $total = $tasks.Count
+    $completed = @($tasks | Where-Object { $_.status -eq "passed" }).Count
+    $unfinished = @($tasks | Where-Object { $_.status -notin @("passed", "blocked") }).Count
+    return [pscustomobject]@{ Total = $total; Completed = $completed; Unfinished = $unfinished }
+}
 function Get-BlockedDependencySummary($State) {
     $statusById = Get-TaskStatusMap $State
     $lines = @()
@@ -1033,5 +1040,6 @@ if ($null -eq (Get-NextTask $state)) {
     exit 0
 }
 
-Write-Error "Reached max iterations ($maxIterationsValue) with unfinished tasks."
+$progress = Get-TaskProgressSummary $state
+Write-Error "Reached max iterations ($maxIterationsValue) with unfinished tasks after a partial run: completed $($progress.Completed) of $($progress.Total) tasks; $($progress.Unfinished) unfinished. This is budget exhaustion, not a harness crash. Re-run with a higher --max-iterations value to continue remaining work."
 exit 1
