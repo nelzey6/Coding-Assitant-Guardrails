@@ -27,7 +27,7 @@ Options:
   --status                   Print current state summary and exit; allowed even when the worktree is dirty
   --accept <task-id>         Merge/cherry-pick an already passed no-merge task, clean up, then exit
   --max-retries <n>          Max automatic retries per task (default from policy, or 1)
-  --merge-mode <mode>        Merge mode for pass/accept: ff-only | no-ff | cherry-pick (default: ff-only)
+  --merge-mode <mode>        Merge mode for pass/accept: ff-only | no-ff | cherry-pick | apply (default: ff-only)
 
 No-merge review flow:
   Run with --no-merge to commit a passing task on agentic/<safe-task-id>, mark it passed,
@@ -35,6 +35,9 @@ No-merge review flow:
   passed no-merge tasks immediately after checks and verifier pass. After review, run --accept <task-id>
   to integrate that passed task and remove its worktree/branch. --accept defaults to
   --merge-mode ff-only; use --merge-mode cherry-pick or no-ff when that is intentional.
+  Use --merge-mode apply for single-task review: changes are applied with no commit,
+  staged in the current worktree, and the task worktree/branch are left intact for
+  conservative cleanup after inspection.
   -h, --help                 Show this help
 
 Environment overrides:
@@ -149,7 +152,7 @@ if ([string]::IsNullOrWhiteSpace($runsRoot)) { $runsRoot = if ($policy -and $pol
 if ([string]::IsNullOrWhiteSpace($maxRetries)) { $maxRetries = if ($policy -and $policy.autonomousLoop.maxRetriesPerTask) { [string]$policy.autonomousLoop.maxRetriesPerTask } else { "1" } }
 [int]$maxRetriesValue = 0
 if (!([int]::TryParse($maxRetries, [ref]$maxRetriesValue)) -or $maxRetriesValue -lt 0) { Write-Error "Invalid max retries: $maxRetries"; exit 2 }
-if ($mergeMode -notin @("ff-only", "no-ff", "cherry-pick")) { Write-Error "Invalid merge mode: $mergeMode"; exit 2 }
+if ($mergeMode -notin @("ff-only", "no-ff", "cherry-pick", "apply")) { Write-Error "Invalid merge mode: $mergeMode"; exit 2 }
 
 function New-EmptyState([string]$GoalText) {
     [pscustomobject]@{
@@ -331,18 +334,27 @@ function Invoke-AcceptTask([string]$TaskId, [bool]$SkipDirtyCheck = $false) {
             "ff-only" { "git merge --ff-only $branch" }
             "no-ff" { "git merge --no-ff $branch" }
             "cherry-pick" { "git cherry-pick $branch" }
+            "apply" { "git cherry-pick --no-commit $branch" }
         }
         try {
             switch ($mergeMode) {
                 "ff-only" { Invoke-AcceptGit @("merge", "--ff-only", $branch) $operation | Out-Host }
                 "no-ff" { Invoke-AcceptGit @("merge", "--no-ff", $branch, "-m", "agentic: accept $TaskId") $operation | Out-Host }
                 "cherry-pick" { Invoke-AcceptGit @("cherry-pick", $branch) $operation | Out-Host }
+                "apply" { Invoke-AcceptGit @("cherry-pick", "--no-commit", $branch) $operation | Out-Host }
             }
         } catch {
-            Stop-AcceptWithMessage "Accept failed while running '$operation'. Worktree '$worktreePath' and branch '$branch' were left intact for manual recovery. $($_.Exception.Message)"
+            $modeHint = if ($mergeMode -eq "apply") { " The apply/no-commit mode may leave conflict state in the current worktree; resolve it or run 'git cherry-pick --abort' before retrying." } else { "" }
+            Stop-AcceptWithMessage "Accept failed while running '$operation'.$modeHint Worktree '$worktreePath' and branch '$branch' were left intact for manual recovery. $($_.Exception.Message)"
         }
     }
     else { Write-Host "No tracked branch changes to accept for $TaskId." }
+
+    if ($mergeMode -eq "apply") {
+        Write-Output "Applied '$TaskId' without committing. Inspect staged/unstaged changes in the current worktree. Task worktree '$worktreePath' and branch '$branch' were left intact; remove them after review if no longer needed."
+        Write-Output "<promise>ACCEPTED $TaskId</promise>"
+        return
+    }
 
     try {
         if (Test-Path -LiteralPath $worktreePath) { Invoke-AcceptGit @("worktree", "remove", $worktreePath) "git worktree remove $worktreePath" | Out-Host }
