@@ -1,6 +1,8 @@
 #!/usr/bin/env pwsh
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "powershell-helper.ps1")
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "../..")
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("agentic-retry-smoke-" + [guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -45,7 +47,7 @@ throw "Unexpected prompt"
     git -C $tmp commit -m "initial" | Out-Null
 
     $script = Join-Path $repoRoot "scripts/agentic/agentic-loop.ps1"
-    $ps = (Get-Process -Id $PID).Path
+    $ps = Get-AgenticSmokePowerShell
     Push-Location $tmp
     try {
         $help = & $ps -NoProfile -File $script --help

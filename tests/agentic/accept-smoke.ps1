@@ -1,6 +1,8 @@
 #!/usr/bin/env pwsh
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "powershell-helper.ps1")
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "../..")
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("agentic-accept-smoke-" + [guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -72,7 +74,7 @@ try {
     Push-Location $tmp
     try {
         $script = Join-Path $repoRoot "scripts/agentic/agentic-loop.ps1"
-        $ps = (Get-Process -Id $PID).Path
+        $ps = Get-AgenticSmokePowerShell
         $beforeFailedAccept = git -C $tmp rev-parse HEAD
         $failedOutput = & $ps -NoProfile -File $script --accept "task accept/diverged" --merge-mode ff-only 2>&1
         if ($LASTEXITCODE -eq 0) { throw "Expected diverged ff-only accept to fail" }

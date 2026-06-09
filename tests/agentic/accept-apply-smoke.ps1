@@ -1,6 +1,8 @@
 #!/usr/bin/env pwsh
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "powershell-helper.ps1")
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "../..")
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("agentic-accept-apply-smoke-" + [guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -48,7 +50,7 @@ try {
     Push-Location $tmp
     try {
         $script = Join-Path $repoRoot "scripts/agentic/agentic-loop.ps1"
-        $ps = (Get-Process -Id $PID).Path
+        $ps = Get-AgenticSmokePowerShell
 
         Set-Content -Path (Join-Path $tmp "dirty.txt") -Value "dirty" -Encoding UTF8
         $output = & $ps -NoProfile -File $script --accept "task apply/001" --merge-mode apply 2>&1

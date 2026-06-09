@@ -1,6 +1,8 @@
 #!/usr/bin/env pwsh
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "powershell-helper.ps1")
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "../..")
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("agentic-validation-discovery-smoke-" + [guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -15,7 +17,7 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $tmp "tests/agentic") -Force | Out-Null
     Set-Content -Path (Join-Path $tmp "tests/agentic/focused-smoke.ps1") -Value "Set-Content -LiteralPath focused-smoke-ran.txt -Value yes" -Encoding UTF8
 
-    $ps = (Get-Process -Id $PID).Path
+    $ps = Get-AgenticSmokePowerShell
     $state = [pscustomobject]@{
         version = 1
         goal = "Plan and run focused validation smoke"

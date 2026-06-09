@@ -1,6 +1,8 @@
 #!/usr/bin/env pwsh
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "powershell-helper.ps1")
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "../..")
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("agentic-auto-accept-smoke-" + [guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -51,7 +53,7 @@ $resultPath = $Matches[1].Trim()
     git -C $tmp commit -m "add smoke helpers" | Out-Null
 
     $script = Join-Path $repoRoot "scripts/agentic/agentic-loop.ps1"
-    $ps = (Get-Process -Id $PID).Path
+    $ps = Get-AgenticSmokePowerShell
 
     Push-Location $tmp
     try {

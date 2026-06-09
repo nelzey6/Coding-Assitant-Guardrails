@@ -1,6 +1,8 @@
 #!/usr/bin/env pwsh
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "powershell-helper.ps1")
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "../..")
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("agentic-validation-checks-smoke-" + [guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -13,7 +15,7 @@ try {
     Set-Content -Path (Join-Path $tmp "AGENTS.md") -Value "Smoke repo rules." -Encoding UTF8
     Set-Content -Path (Join-Path $tmp "README.md") -Value "# Validation checks smoke" -Encoding UTF8
 
-    $ps = (Get-Process -Id $PID).Path
+    $ps = Get-AgenticSmokePowerShell
     Set-Content -Path (Join-Path $tmp "global-check.ps1") -Value "Add-Content -LiteralPath check-order.txt -Value global; if (!(Test-Path task-output.txt)) { throw 'missing task output' }" -Encoding UTF8
     Set-Content -Path (Join-Path $tmp "state-check.ps1") -Value "Add-Content -LiteralPath check-order.txt -Value state; if (!(Test-Path task-output.txt)) { throw 'missing task output' }" -Encoding UTF8
     Set-Content -Path (Join-Path $tmp "validation-check.ps1") -Value "Add-Content -LiteralPath check-order.txt -Value validation; Set-Content -LiteralPath validation-ran.txt -Value yes" -Encoding UTF8

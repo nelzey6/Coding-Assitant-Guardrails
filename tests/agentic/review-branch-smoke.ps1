@@ -1,6 +1,8 @@
 #!/usr/bin/env pwsh
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "powershell-helper.ps1")
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "../..")
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("agentic-review-branch-smoke-" + [guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -39,7 +41,7 @@ if ($content -notmatch 'Write JSON only to this path:\s*(.+)') { throw "Result p
     $baseHead = git -C $tmp rev-parse HEAD
 
     $script = Join-Path $repoRoot "scripts/agentic/agentic-loop.ps1"
-    $ps = (Get-Process -Id $PID).Path
+    $ps = Get-AgenticSmokePowerShell
     Push-Location $tmp
     try {
         & $ps -NoProfile -File $script --review-branch --command "& '$executor' '{prompt}'" --verifier-command "& '$verifier' '{prompt}'" --max-iterations 1

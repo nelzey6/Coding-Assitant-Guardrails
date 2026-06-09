@@ -1,6 +1,8 @@
 #!/usr/bin/env pwsh
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "powershell-helper.ps1")
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "../..")
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("agentic-smoke-" + [guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -65,7 +67,7 @@ Write-Output "created smoke-output.txt"
     Push-Location $tmp
     try {
         $script = Join-Path $repoRoot "scripts/agentic/agentic-loop.ps1"
-        $ps = (Get-Process -Id $PID).Path
+        $ps = Get-AgenticSmokePowerShell
         & $ps -NoProfile -File $script --tool custom --command "`"$ps`" -NoProfile -File `"$fake`" {prompt}" --max-iterations 1
         if ($LASTEXITCODE -ne 0) { throw "agentic-loop exited with $LASTEXITCODE" }
     } finally {
