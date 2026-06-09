@@ -67,8 +67,15 @@ $shShim = Join-Path $binDir "agentic-loop"
 $shTarget = $preferred.Replace("\", "/")
 @"
 #!/usr/bin/env sh
-exec pwsh -NoProfile -File "$shTarget" "`$@"
-"@ | Set-Content -Path $shShim -Encoding UTF8
+if command -v pwsh >/dev/null 2>&1; then
+  exec pwsh -NoProfile -File "$shTarget" "`$@"
+elif command -v powershell.exe >/dev/null 2>&1; then
+  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$shTarget" "`$@"
+else
+  echo "agentic-loop requires pwsh or powershell.exe on PATH" >&2
+  exit 127
+fi
+"@ | Set-Content -Path $shShim -Encoding ASCII
 Write-Host "Installed agentic-loop shell shim to $shShim"
 
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")

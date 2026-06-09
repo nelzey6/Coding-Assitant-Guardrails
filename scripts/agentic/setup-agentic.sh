@@ -71,7 +71,14 @@ mkdir -p "$bin_dir"
 shim="$bin_dir/agentic-loop"
 cat > "$shim" <<SHIM
 #!/usr/bin/env sh
-exec pwsh -NoProfile -File "$preferred" "\$@"
+if command -v pwsh >/dev/null 2>&1; then
+  exec pwsh -NoProfile -File "$preferred" "\$@"
+elif command -v powershell.exe >/dev/null 2>&1; then
+  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$preferred" "\$@"
+else
+  echo "agentic-loop requires pwsh or powershell.exe on PATH" >&2
+  exit 127
+fi
 SHIM
 chmod +x "$shim"
 echo "Installed agentic-loop shell shim to $shim"
