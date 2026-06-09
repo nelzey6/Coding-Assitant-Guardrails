@@ -187,6 +187,11 @@ if [ -f "$ralph_setup" ]; then
   bash "$ralph_setup" --skills-repo "$SKILLS_REPO" --tool "$TOOL"
 fi
 
+agentic_setup="$SKILLS_REPO/scripts/agentic/setup-agentic.sh"
+if [ -f "$agentic_setup" ]; then
+  bash "$agentic_setup" --skills-repo "$SKILLS_REPO" --tool "$TOOL"
+fi
+
 if [ -n "$DESTINATION" ]; then
   template_root="$SKILLS_REPO/templates"
   if [ ! -d "$template_root" ]; then
@@ -199,6 +204,7 @@ if [ -n "$DESTINATION" ]; then
   copy_repo_templates "$template_root" "$destination_root"
   add_gitignore_entry "$destination_root" ".agent-runs/"
   add_gitignore_entry "$destination_root" ".worktrees/"
+  add_gitignore_entry "$destination_root" "agentic.json"
   echo "Repo templates copied to $destination_root"
 fi
 

@@ -48,8 +48,9 @@ By default, the installer:
 2. Re-runs itself so updated installer code is used.
 3. Installs all active skills into both Codex and Claude skill directories.
 4. Installs the Ralph harness under the installed `ralph-prd` skill folder and creates a user-level `ralph` shim.
-5. If `-Destination` / `--destination` is provided, copies repo templates into that product repo.
-6. Adds `.agent-runs/` and `.worktrees/` to the product repo `.gitignore`.
+5. Installs the agentic loop harness under the installed `agentic-loop` skill folder and creates a user-level `agentic-loop` shim.
+6. If `-Destination` / `--destination` is provided, copies repo templates into that product repo.
+7. Adds `.agent-runs/`, `.worktrees/`, and `agentic.json` to the product repo `.gitignore`.
 
 Codex skills install to `~/.codex/skills` (or `%USERPROFILE%\.codex\skills` on Windows). Claude skills install to `~/.claude/skills` (or `%USERPROFILE%\.claude\skills` on Windows).
 
@@ -62,7 +63,7 @@ When `-Destination` / `--destination` is provided:
 - `PROJECT.md` is created only if missing.
 - `CONTEXT.md` is created only if missing.
 - `.agent-policy/workflow-policy.json` is created only if missing.
-- `.agent-runs/` and `.worktrees/` are added to `.gitignore`.
+- `.agent-runs/`, `.worktrees/`, and `agentic.json` are added to `.gitignore`.
 
 File roles:
 
@@ -129,6 +130,20 @@ Useful starting points:
 - `ralph-prd`: interview until decisions are clear, then create a human-readable PRD and Ralph-compatible `prd.json`
 
 Check individual `SKILL.md` files for exact behavior.
+
+## Agentic Loop Harness
+
+[`scripts/agentic/agentic-loop.ps1`](./scripts/agentic/agentic-loop.ps1) runs a policy-driven autonomous coding loop over local `agentic.json` state. The setup script installs a user-level `agentic-loop` shim.
+
+Typical safe flow:
+
+```powershell
+agentic-loop --goal "Fix checkout reliability" --tool claude --plan-only
+agentic-loop --status --allow-dirty
+agentic-loop --tool claude --checks "npm test" --no-merge
+```
+
+Use `--no-merge` while reviewing autonomous output. The loop creates per-task worktrees under `.worktrees/`, prompts under `.agent-runs/`, and keeps `agentic.json` as ignored local runtime state.
 
 ## Ralph Harness
 

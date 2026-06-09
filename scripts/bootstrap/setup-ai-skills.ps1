@@ -189,6 +189,14 @@ if (Test-Path $ralphSetup) {
     }
 }
 
+$agenticSetup = Join-Path $SkillsRepo "scripts\agentic\setup-agentic.ps1"
+if (Test-Path $agenticSetup) {
+    & $agenticSetup -SkillsRepo $SkillsRepo -Tool $Tool
+    if (!$?) {
+        throw "Agentic loop setup failed"
+    }
+}
+
 if (![string]::IsNullOrWhiteSpace($Destination)) {
     $templateRoot = Join-Path $SkillsRepo "templates"
     if (!(Test-Path $templateRoot)) {
@@ -204,6 +212,7 @@ if (![string]::IsNullOrWhiteSpace($Destination)) {
     Copy-RepoTemplates -ToolName $Tool -TemplateRoot $templateRoot -DestinationRoot $destinationRoot
     Add-GitignoreEntry -DestinationRoot $destinationRoot -Pattern ".agent-runs/"
     Add-GitignoreEntry -DestinationRoot $destinationRoot -Pattern ".worktrees/"
+    Add-GitignoreEntry -DestinationRoot $destinationRoot -Pattern "agentic.json"
     Write-Host "Repo templates copied to $destinationRoot"
 }
 
