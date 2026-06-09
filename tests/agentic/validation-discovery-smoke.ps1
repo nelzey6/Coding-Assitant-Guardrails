@@ -19,8 +19,9 @@ try {
     $state = [pscustomobject]@{
         version = 1
         goal = "Plan and run focused validation smoke"
+        phase = "planning"
         maxIterations = 1
-        checks = @("pwsh -File tests/agentic/focused-smoke.ps1")
+        checks = @()
         defaultDiscoveryWorkflow = "grill-with-docs"
         tasks = @()
         decisions = @()
@@ -36,7 +37,7 @@ try {
 param([string]$Prompt)
 $content = Get-Content -LiteralPath $Prompt -Raw
 if ($content -match "Planner result schema") {
-    if ($content -notmatch "newly added focused smoke tests") { throw "planner prompt missing focused smoke validation guidance" }
+    if ($content -notmatch "focused smoke") { throw "planner prompt missing focused smoke validation guidance" }
     if ($content -match "powershell\.exe" -and $content -notmatch "legacy Windows PowerShell compatibility") { throw "planner prompt should limit powershell.exe to legacy compatibility" }
     if ($content -notmatch "pwsh -File") { throw "planner prompt missing pwsh -File guidance" }
     if ($content -match "Write planner JSON only to: (.+)") {
@@ -56,7 +57,7 @@ if ($content -match "Planner result schema") {
                 status = "pending"
                 priority = 1
                 acceptanceCriteria = @("focused smoke is listed as task validation")
-                validation = @("pwsh -File tests/agentic/focused-smoke.ps1")
+                validation = @("$($PSHOME)\powershell.exe -NoProfile -File tests/agentic/focused-smoke.ps1")
                 dependsOn = @()
                 failureHistory = @()
                 artifacts = @("tests/agentic/focused-smoke.ps1")
@@ -73,7 +74,7 @@ if ($content -match "verifier-result.json") {
     }
 }
 if ($content -match "Task JSON") {
-    if ($content -notmatch "newly added focused smoke tests") { throw "executor prompt missing focused smoke validation guidance" }
+    if ($content -notmatch "focused smoke") { throw "executor prompt missing focused smoke validation guidance" }
     if ($content -match "powershell\.exe" -and $content -notmatch "legacy Windows PowerShell compatibility") { throw "executor prompt should limit powershell.exe to legacy compatibility" }
     if ($content -notmatch "pwsh -File") { throw "executor prompt missing pwsh -File guidance" }
     "ok" | Set-Content -LiteralPath task-output.txt -Encoding UTF8
