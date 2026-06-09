@@ -287,6 +287,15 @@ function Invoke-Agent([string]$PromptFile, [string]$Template, [string]$WorkingDi
     }
 }
 
+function Invoke-AgentWithLog([string]$PromptFile, [string]$Template, [string]$WorkingDirectory, [string]$LogPath) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogPath) | Out-Null
+    try { Invoke-Agent $PromptFile $Template $WorkingDirectory *>&1 | Tee-Object -FilePath $LogPath }
+    catch {
+        Add-Content -LiteralPath $LogPath -Value "ERROR: $($_.Exception.Message)"
+        throw
+    }
+}
+
 function Invoke-Checks([string]$WorkingDirectory) {
     $log = @()
     if ($checks.Count -eq 0) { return "No --checks configured; agent exit success is the only external validation." }
@@ -296,6 +305,20 @@ function Invoke-Checks([string]$WorkingDirectory) {
         catch { $log += "FAIL: $check`n$($_.Exception.Message)"; throw ($log -join "`n") }
     }
     return ($log -join "`n")
+}
+
+function Write-ChecksLog([string]$LogPath, [string]$Content) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogPath) | Out-Null
+    Set-Content -LiteralPath $LogPath -Value $Content -Encoding UTF8
+}
+
+function Write-DiffArtifacts([string]$WorktreePath, [string]$RunDir) {
+    # Surface new files in the pre-commit diff without staging content.
+    & git -C $WorktreePath add -N . 2>$null
+    $patch = (& git -C $WorktreePath diff HEAD) -join "`n"
+    $stat = (& git -C $WorktreePath diff --stat HEAD) -join "`n"
+    Set-Content -LiteralPath (Join-Path $RunDir "diff.patch") -Value $patch -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $RunDir "diff-stat.txt") -Value $stat -Encoding UTF8
 }
 
 function New-RepoContext([string]$ContextFile) {
@@ -582,12 +605,20 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
     $worktreePath = Join-Path $worktreeRoot $safeId
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $runDir = Join-Path $runsRoot "agentic-$timestamp-$safeId"
-    $executorPrompt = Join-Path $runDir "executor.md"
-    $verifierPrompt = Join-Path $runDir "verifier.md"
-    $verifierResult = Join-Path $runDir "verifier-result.json"
-    $verifierResultForPrompt = Join-Path (Resolve-Path -LiteralPath ".").Path $verifierResult
+    $runDirAbs = Join-Path (Resolve-Path -LiteralPath ".").Path $runDir
+    $executorPrompt = Join-Path $runDirAbs "executor.md"
+    $verifierPrompt = Join-Path $runDirAbs "verifier.md"
+    $verifierResult = Join-Path $runDirAbs "verifier-result.json"
+    $executorLog = Join-Path $runDirAbs "executor.log"
+    $checksLog = Join-Path $runDirAbs "checks.log"
+    $verifierLog = Join-Path $runDirAbs "verifier.log"
+    $stateBefore = Join-Path $runDirAbs "state-before.json"
+    $stateAfter = Join-Path $runDirAbs "state-after.json"
+    $verifierResultForPrompt = $verifierResult
 
     Write-Host "=== Agentic iteration $iteration/$maxIterationsValue`: $taskId ==="
+    New-Item -ItemType Directory -Force -Path $runDirAbs | Out-Null
+    Copy-Item -LiteralPath $stateFile -Destination $stateBefore -Force
     Add-TaskAttempt $taskId $runDir
     $task = Get-Tasks (Read-StateJson) | Where-Object { [string]$_.id -eq $taskId } | Select-Object -First 1
     Set-TaskStatus $taskId "running"
@@ -598,24 +629,32 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
 
     New-ExecutorPrompt $task $iteration $executorPrompt $runDir
     try {
-        try { Invoke-Agent $executorPrompt $commandTemplate $worktreePath }
+        try { Invoke-AgentWithLog $executorPrompt $commandTemplate $worktreePath $executorLog }
         catch {
             Set-TaskStatus $taskId "needs_human" ([pscustomobject]@{ at = (Get-Date -Format o); phase = "executor"; reason = $_.Exception.Message; resultFile = $verifierResult })
+            Write-ChecksLog $checksLog "Checks not run because executor failed."
+            Write-DiffArtifacts $worktreePath $runDirAbs
+            Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
             Write-Error "Executor failed for $taskId. Worktree retained at $worktreePath. $($_.Exception.Message)"
             exit 1
         }
 
-        try { $checkOutput = Invoke-Checks $worktreePath }
+        try { $checkOutput = Invoke-Checks $worktreePath; Write-ChecksLog $checksLog $checkOutput }
         catch {
+            $checkOutput = $_.Exception.Message
+            Write-ChecksLog $checksLog $checkOutput
             $failureStatus = Get-FailureStatusForTask $task "checks"
             Set-TaskStatus $taskId $failureStatus ([pscustomobject]@{ at = (Get-Date -Format o); phase = "checks"; reason = $_.Exception.Message; resultFile = $verifierResult })
+            Write-DiffArtifacts $worktreePath $runDirAbs
+            Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
             Write-Error "Checks failed for $taskId; marked $failureStatus. Worktree retained at $worktreePath. $($_.Exception.Message)"
             exit 1
         }
 
+        Write-DiffArtifacts $worktreePath $runDirAbs
         New-VerifierPrompt $task $worktreePath $checkOutput $verifierResultForPrompt $verifierPrompt
         $verifierTemplate = if (![string]::IsNullOrWhiteSpace($verifierCommandTemplate)) { $verifierCommandTemplate } else { $commandTemplate }
-        Invoke-Agent $verifierPrompt $verifierTemplate $worktreePath
+        Invoke-AgentWithLog $verifierPrompt $verifierTemplate $worktreePath $verifierLog
         if (!(Test-Path -LiteralPath $verifierResult)) { throw "Verifier did not write $verifierResult" }
         $result = Get-Content -LiteralPath $verifierResult -Raw | ConvertFrom-Json
         $verdict = [string]$result.verdict
@@ -639,20 +678,26 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
                 else { Write-Host "No tracked branch changes to merge for $taskId." }
             }
             Set-TaskPassed $taskId $result
+            Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
             Add-Content -Path (Join-Path $runsRoot "agentic-progress.txt") -Value "`n## $(Get-Date -Format o) $taskId`n- Verdict: pass`n- Summary: $($result.summary)"
             if ($cleanupPassed) { Invoke-CheckedNative git @("worktree", "remove", $worktreePath) }
         } elseif ($verdict -eq "needs_human") {
             Set-TaskStatus $taskId "needs_human" ([pscustomobject]@{ at = (Get-Date -Format o); phase = "verifier"; reason = $result.summary; resultFile = $verifierResult })
+            Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
             Write-Error "Verifier returned needs_human for $taskId. Worktree retained at $worktreePath."
             exit 1
         } else {
             $failureStatus = Get-FailureStatusForTask $task "verifier"
             Set-TaskStatus $taskId $failureStatus ([pscustomobject]@{ at = (Get-Date -Format o); phase = "verifier"; reason = $result.summary; resultFile = $verifierResult })
+            Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
             Write-Error "Verifier failed $taskId; marked $failureStatus. Worktree retained at $worktreePath."
             exit 1
         }
     } catch {
         Set-TaskStatus $taskId "needs_human" ([pscustomobject]@{ at = (Get-Date -Format o); phase = "harness"; reason = $_.Exception.Message; resultFile = $verifierResult })
+        if (!(Test-Path -LiteralPath $checksLog)) { Write-ChecksLog $checksLog "Checks did not complete before harness failure." }
+        if (!(Test-Path -LiteralPath (Join-Path $runDirAbs "diff.patch"))) { Write-DiffArtifacts $worktreePath $runDirAbs }
+        Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
         Write-Error "Task $taskId failed in harness; marked needs_human. Worktree retained at $worktreePath. $($_.Exception.Message)"
         exit 1
     }
