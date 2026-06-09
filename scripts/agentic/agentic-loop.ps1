@@ -385,12 +385,20 @@ function Invoke-AgentWithLog([string]$PromptFile, [string]$Template, [string]$Wo
     }
 }
 
-function Invoke-Checks([string]$WorkingDirectory) {
+function Get-TaskChecks($Task) {
+    $taskChecks = @()
+    $taskChecks += @($checks)
+    if ($Task -and ($Task.PSObject.Properties.Name -contains "validation") -and $Task.validation) { $taskChecks += @($Task.validation) }
+    return @($taskChecks | Where-Object { ![string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+}
+
+function Invoke-Checks([string]$WorkingDirectory, [object[]]$ChecksToRun) {
     $log = @()
-    if ($checks.Count -eq 0) { return "No --checks configured; agent exit success is the only external validation." }
-    foreach ($check in $checks) {
+    $effectiveChecks = @($ChecksToRun | Where-Object { ![string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+    if ($effectiveChecks.Count -eq 0) { return "No checks configured; agent exit success is the only external validation." }
+    foreach ($check in $effectiveChecks) {
         Write-Host "Running check in $WorkingDirectory`: $check"
-        try { Invoke-ShellCommand $check $WorkingDirectory; $log += "PASS: $check" }
+        try { Invoke-ShellCommand ([string]$check) $WorkingDirectory; $log += "PASS: $check" }
         catch { $log += "FAIL: $check`n$($_.Exception.Message)"; throw ($log -join "`n") }
     }
     return ($log -join "`n")
@@ -728,7 +736,8 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
             exit 1
         }
 
-        try { $checkOutput = Invoke-Checks $worktreePath; Write-ChecksLog $checksLog $checkOutput }
+        $taskChecks = Get-TaskChecks $task
+        try { $checkOutput = Invoke-Checks $worktreePath $taskChecks; Write-ChecksLog $checksLog $checkOutput }
         catch {
             $checkOutput = $_.Exception.Message
             Write-ChecksLog $checksLog $checkOutput
