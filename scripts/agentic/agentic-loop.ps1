@@ -24,6 +24,7 @@ Options:
   --cleanup-passed           Remove passed task worktree after merge/no-merge handling
   --plan-only                Run planner, validate planner-result.json, update state, then stop
   --status                   Print current state summary and exit
+  --accept <task-id>         Merge/cherry-pick an already passed no-merge task, clean up, then exit
   --max-retries <n>          Max automatic retries per task (default from policy, or 1)
   --merge-mode <mode>        Merge mode: ff-only | no-ff | cherry-pick (default: ff-only)
   -h, --help                 Show this help
@@ -76,33 +77,46 @@ $allowDirty = $false
 $cleanupPassed = $false
 $planOnly = $false
 $statusOnly = $false
+$acceptTaskId = ""
 $maxRetries = ""
 $mergeMode = "ff-only"
 $checks = @()
 if ($env:AGENTIC_CHECKS) { $checks += $env:AGENTIC_CHECKS }
 
-for ($i = 0; $i -lt $args.Count; $i++) {
-    switch ($args[$i]) {
-        "--goal" { $i++; $goal = $args[$i]; continue }
-        "--tool" { $i++; $tool = $args[$i]; continue }
-        "--command" { $i++; $commandTemplate = $args[$i]; continue }
-        "--verifier-command" { $i++; $verifierCommandTemplate = $args[$i]; continue }
-        "--max-iterations" { $i++; $maxIterations = $args[$i]; continue }
-        "--checks" { $i++; $checks += $args[$i]; continue }
-        "--state" { $i++; $stateFile = $args[$i]; continue }
-        "--policy" { $i++; $policyFile = $args[$i]; continue }
-        "--worktree-root" { $i++; $worktreeRoot = $args[$i]; continue }
-        "--runs-root" { $i++; $runsRoot = $args[$i]; continue }
+$cliArgs = @($args)
+function Read-OptionValue([object[]]$CliArgs, [int]$Index, [string]$OptionName) {
+    $valueIndex = $Index + 1
+    if ($valueIndex -ge $CliArgs.Count -or [string]::IsNullOrWhiteSpace([string]$CliArgs[$valueIndex]) -or ([string]$CliArgs[$valueIndex]).StartsWith("--")) {
+        Write-Output "Missing value for $OptionName."
+        Show-Usage
+        exit 2
+    }
+    return [string]$CliArgs[$valueIndex]
+}
+
+for ($i = 0; $i -lt $cliArgs.Count; $i++) {
+    switch ($cliArgs[$i]) {
+        "--goal" { $goal = Read-OptionValue $cliArgs $i "--goal"; $i++; continue }
+        "--tool" { $tool = Read-OptionValue $cliArgs $i "--tool"; $i++; continue }
+        "--command" { $commandTemplate = Read-OptionValue $cliArgs $i "--command"; $i++; continue }
+        "--verifier-command" { $verifierCommandTemplate = Read-OptionValue $cliArgs $i "--verifier-command"; $i++; continue }
+        "--max-iterations" { $maxIterations = Read-OptionValue $cliArgs $i "--max-iterations"; $i++; continue }
+        "--checks" { $checks += Read-OptionValue $cliArgs $i "--checks"; $i++; continue }
+        "--state" { $stateFile = Read-OptionValue $cliArgs $i "--state"; $i++; continue }
+        "--policy" { $policyFile = Read-OptionValue $cliArgs $i "--policy"; $i++; continue }
+        "--worktree-root" { $worktreeRoot = Read-OptionValue $cliArgs $i "--worktree-root"; $i++; continue }
+        "--runs-root" { $runsRoot = Read-OptionValue $cliArgs $i "--runs-root"; $i++; continue }
         "--no-commit" { $commit = $false; continue }
         "--no-merge" { $merge = $false; continue }
         "--allow-dirty" { $allowDirty = $true; continue }
         "--cleanup-passed" { $cleanupPassed = $true; continue }
         "--plan-only" { $planOnly = $true; continue }
         "--status" { $statusOnly = $true; continue }
-        "--max-retries" { $i++; $maxRetries = $args[$i]; continue }
-        "--merge-mode" { $i++; $mergeMode = $args[$i]; continue }
+        "--accept" { $acceptTaskId = Read-OptionValue $cliArgs $i "--accept"; $i++; continue }
+        "--max-retries" { $maxRetries = Read-OptionValue $cliArgs $i "--max-retries"; $i++; continue }
+        "--merge-mode" { $mergeMode = Read-OptionValue $cliArgs $i "--merge-mode"; $i++; continue }
         { $_ -in @("-h", "--help") } { Show-Usage; exit 0 }
-        default { Write-Error "Unknown option: $($args[$i])"; Show-Usage; exit 2 }
+        default { Write-Error "Unknown option: $($cliArgs[$i])"; Show-Usage; exit 2 }
     }
 }
 
@@ -148,7 +162,7 @@ function Read-StateJson { return (Get-Content -LiteralPath $stateFile -Raw | Con
 function Write-StateJson($State) { ConvertTo-Json -InputObject $State -Depth 30 | Set-Content -LiteralPath $stateFile -Encoding UTF8 }
 
 $status = (& git status --porcelain)
-if (!$statusOnly -and !$allowDirty -and $status) { Write-Error "Working tree is dirty. Commit/stash first, or pass --allow-dirty."; & git status --short | Write-Error; exit 1 }
+if (!$statusOnly -and [string]::IsNullOrWhiteSpace($acceptTaskId) -and !$allowDirty -and $status) { Write-Error "Working tree is dirty. Commit/stash first, or pass --allow-dirty."; & git status --short | Write-Error; exit 1 }
 
 if (!(Test-Path -LiteralPath $stateFile)) {
     if ([string]::IsNullOrWhiteSpace($goal)) { throw "Missing $stateFile. Pass --goal to create it, or create agentic.json first." }
@@ -275,7 +289,64 @@ function Show-AgenticStatus {
     elseif (Test-HasUnfinishedTasks $s) { Write-Output "No runnable task. Blocked dependencies:`n$(Get-BlockedDependencySummary $s)" }
     else { Write-Output "All tasks complete." }
 }
+function Invoke-AcceptGit([string[]]$NativeArgs, [string]$Operation) {
+    $output = & git @NativeArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $details = ($output | ForEach-Object { [string]$_ }) -join "`n"
+        throw "$Operation failed with code $LASTEXITCODE. $details"
+    }
+    return $output
+}
+function Stop-AcceptWithMessage([string]$Message) {
+    Write-Output $Message
+    exit 1
+}
+function Invoke-AcceptTask([string]$TaskId) {
+    $s = Read-StateJson
+    $task = Get-Tasks $s | Where-Object { [string]$_.id -eq $TaskId } | Select-Object -First 1
+    if ($null -eq $task) { Stop-AcceptWithMessage "Cannot accept task '$TaskId': task not found in $stateFile." }
+    if ([string]$task.status -ne "passed") { Stop-AcceptWithMessage "Cannot accept task '$TaskId': task status is '$($task.status)', expected 'passed'." }
+    $acceptStatus = (& git status --porcelain)
+    if (!$allowDirty -and $acceptStatus) { Stop-AcceptWithMessage "Cannot accept task '$TaskId': working tree is dirty. Commit/stash first, or pass --allow-dirty.`n$((& git status --short) -join "`n")" }
+
+    $safeId = ConvertTo-SafeSlug $TaskId
+    $branch = "agentic/$safeId"
+    $worktreePath = Join-Path $worktreeRoot $safeId
+    $branchExists = (& git branch --list $branch)
+    if (!$branchExists) { Stop-AcceptWithMessage "Cannot accept task '$TaskId': branch '$branch' was not found." }
+
+    $branchHead = (& git rev-parse $branch)
+    $mainHead = (& git rev-parse HEAD)
+    if ($branchHead -ne $mainHead) {
+        $operation = switch ($mergeMode) {
+            "ff-only" { "git merge --ff-only $branch" }
+            "no-ff" { "git merge --no-ff $branch" }
+            "cherry-pick" { "git cherry-pick $branch" }
+        }
+        try {
+            switch ($mergeMode) {
+                "ff-only" { Invoke-AcceptGit @("merge", "--ff-only", $branch) $operation | Out-Host }
+                "no-ff" { Invoke-AcceptGit @("merge", "--no-ff", $branch, "-m", "agentic: accept $TaskId") $operation | Out-Host }
+                "cherry-pick" { Invoke-AcceptGit @("cherry-pick", $branch) $operation | Out-Host }
+            }
+        } catch {
+            Stop-AcceptWithMessage "Accept failed while running '$operation'. Worktree '$worktreePath' and branch '$branch' were left intact for manual recovery. $($_.Exception.Message)"
+        }
+    }
+    else { Write-Host "No tracked branch changes to accept for $TaskId." }
+
+    try {
+        if (Test-Path -LiteralPath $worktreePath) { Invoke-AcceptGit @("worktree", "remove", $worktreePath) "git worktree remove $worktreePath" | Out-Host }
+        Invoke-AcceptGit @("branch", "-D", $branch) "git branch -D $branch" | Out-Host
+    } catch {
+        Stop-AcceptWithMessage "Accept integrated '$TaskId' but cleanup failed. Inspect worktree '$worktreePath' and branch '$branch'. $($_.Exception.Message)"
+    }
+
+    Write-Output "<promise>ACCEPTED $TaskId</promise>"
+}
+
 if ($statusOnly) { Show-AgenticStatus; exit 0 }
+if (![string]::IsNullOrWhiteSpace($acceptTaskId)) { Invoke-AcceptTask $acceptTaskId; exit 0 }
 
 function Invoke-Agent([string]$PromptFile, [string]$Template, [string]$WorkingDirectory = "") {
     if (![string]::IsNullOrWhiteSpace($Template)) { Invoke-ShellCommand ($Template.Replace("{prompt}", (Resolve-Path -LiteralPath $PromptFile).Path)) $WorkingDirectory; return }
