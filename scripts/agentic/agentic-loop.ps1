@@ -33,7 +33,8 @@ Options:
   --doctor                   Diagnose stale review metadata and missing branches/worktrees without mutating state
   --reset-task <task-id>     Remove a task worktree/branch and mark it needs_retry for a clean rerun
   --fast-verifier            Skip the verifier agent after checks pass; opt-in for low-risk tasks only
-  --agent-timeout-seconds <n>   Timeout for executor/verifier agent commands (custom/template commands only)
+  --no-finalize-docs         Skip the default final PROJECT.md/CONTEXT.md refresh after all tasks pass
+  --agent-timeout-seconds <n>   Timeout for executor/verifier/finalizer agent commands (custom/template commands only)
   --check-timeout-seconds <n>   Timeout for each validation/check command
   --accept <task-id>         Merge/cherry-pick an already passed no-merge task, clean up, then exit;
                              use --merge-mode apply for accept apply/no-commit mode
@@ -146,6 +147,7 @@ $whyStuckOnly = $false
 $summaryOnly = $false
 $doctorOnly = $false
 $fastVerifier = $false
+$finalizeDocs = $true
 $acceptTaskId = ""
 $resetTaskId = ""
 $retryTaskId = ""
@@ -193,6 +195,7 @@ for ($i = 0; $i -lt $cliArgs.Count; $i++) {
         "--doctor" { $doctorOnly = $true; continue }
         "--reset-task" { $resetTaskId = Read-OptionValue $cliArgs $i "--reset-task"; $i++; continue }
         "--fast-verifier" { $fastVerifier = $true; continue }
+        "--no-finalize-docs" { $finalizeDocs = $false; continue }
         "--agent-timeout-seconds" { $agentTimeoutSeconds = [int](Read-OptionValue $cliArgs $i "--agent-timeout-seconds"); $i++; continue }
         "--check-timeout-seconds" { $checkTimeoutSeconds = [int](Read-OptionValue $cliArgs $i "--check-timeout-seconds"); $i++; continue }
         "--accept" { $acceptTaskId = Read-OptionValue $cliArgs $i "--accept"; $i++; continue }
@@ -848,7 +851,7 @@ function New-PlannerPrompt([string]$PromptFile, [string]$PlannerResultFile, [str
     $content = @"
 You are the planner for an autonomous agentic coding loop.
 
-Read and follow AGENTS.md / CLAUDE.md if present. Use grill-with-docs-style discovery by default before planning: restate the goal, inspect repo docs/code for answers, separate decisions/assumptions/open questions, and stop with needs_human only for unresolved product/domain decisions.
+Read and follow AGENTS.md / CLAUDE.md if present. Use grill-with-docs-style discovery by default before planning: restate the goal, inspect repo docs/code for answers, separate decisions/assumptions/open questions, update CONTEXT.md when durable domain/product context changes, and stop with needs_human only for unresolved product/domain decisions.
 
 The harness provided a context packet at: $RepoContextFile
 Inspect deeper in the repository when needed.
@@ -974,6 +977,7 @@ Hard rules:
 - Do not mark the task passed yourself.
 - Do not edit upstream-derived files unless explicit permission is present.
 - Keep task artifacts under this run directory when useful: $RunDir
+- Before finishing, write a concise handover note to `$RunDir/handover.md` with: what changed, key files, validation run, gotchas, and next-task notes.
 - For discovery/investigation tasks, useful artifact files may be the main output; code changes are not required unless the task asks for them.
 - For implementation/architecture/maintenance tasks, prefer tracked repo changes plus validation unless the task is explicitly artifact-only.
 - When you add a focused smoke test/check that proves this task, use or propose it as a task.validation command (for example `pwsh -File tests/path/focused-smoke.ps1`) so the harness runs it before verification.
@@ -995,6 +999,70 @@ $taskJson
 "@
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PromptFile) | Out-Null
     Set-Content -LiteralPath $PromptFile -Value $content -Encoding UTF8
+}
+
+function Invoke-FinalizeDocsIfNeeded {
+    if (!$finalizeDocs) { Write-AgenticEvent "finalize_docs_skipped" @{ reason = "no-finalize-docs" }; return }
+    if (!$merge) { Write-AgenticEvent "finalize_docs_skipped" @{ reason = "changes-not-merged" }; return }
+    if (!(Test-Path -LiteralPath "PROJECT.md") -and !(Test-Path -LiteralPath "CONTEXT.md")) { Write-AgenticEvent "finalize_docs_skipped" @{ reason = "no-project-or-context-md" }; return }
+
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $finalizeRunDir = Join-Path $runsRoot "agentic-$timestamp-finalize-docs"
+    $finalizeRunDirAbs = Join-Path (Resolve-Path -LiteralPath ".").Path $finalizeRunDir
+    $promptFile = Join-Path $finalizeRunDirAbs "finalize-docs.md"
+    $logFile = Join-Path $finalizeRunDirAbs "finalize-docs.log"
+    $summaryFile = Join-Path $finalizeRunDirAbs "final-summary.md"
+    New-Item -ItemType Directory -Force -Path $finalizeRunDirAbs | Out-Null
+
+    $stateJson = (Read-StateJson) | ConvertTo-Json -Depth 20
+    $recentHistory = Get-RecentAgenticHistory 30
+    $diffStat = (& git diff --stat HEAD) -join "`n"
+    $projectState = if (Test-Path -LiteralPath "PROJECT.md") { "PROJECT.md exists" } else { "PROJECT.md missing" }
+    $contextState = if (Test-Path -LiteralPath "CONTEXT.md") { "CONTEXT.md exists (planning-stage grill-with-docs ownership)" } else { "CONTEXT.md missing" }
+    $content = @"
+You are finalizing a completed agentic loop run.
+
+Goal: update durable repository markdowns only when the completed work changed durable facts.
+
+Rules:
+- Use the canonical update-project-md behavior for PROJECT.md.
+- Update PROJECT.md for technical facts: commands, architecture, validation, workflows, debugging, file roles, setup changes.
+- Do not normally edit CONTEXT.md here; CONTEXT.md belongs to the planning grill-with-docs stage. Only touch it if execution discovered a durable domain/product fact that could not have been known during planning, and explain that exception in the final summary.
+- Do not edit AGENTS.md or CLAUDE.md unless the task explicitly changed agent policy.
+- Keep edits concise and factual. Do not add transient run logs.
+- If no durable docs need changes, leave the markdown files unchanged and explain why in the final summary.
+- Always write a final human checkpoint summary to: $summaryFile
+
+Docs available:
+- $projectState
+- $contextState
+
+Agentic state:
+$stateJson
+
+Recent harness events:
+$recentHistory
+
+Current uncommitted diff stat before doc finalization:
+$diffStat
+"@
+    Set-Content -LiteralPath $promptFile -Value $content -Encoding UTF8
+    Write-AgenticEvent "finalize_docs_started" @{ runDir = $finalizeRunDir; prompt = $promptFile; summary = $summaryFile }
+    Invoke-AgentWithLog $promptFile $commandTemplate "" $logFile
+    if (!(Test-Path -LiteralPath $summaryFile)) {
+        Set-Content -LiteralPath $summaryFile -Value "# Agentic final summary`n`nFinalizer did not create a summary; inspect $logFile." -Encoding UTF8
+    }
+    $docChanges = (& git status --porcelain -- PROJECT.md)
+    if ($docChanges -and $commit) {
+        Invoke-CheckedNative git @("add", "PROJECT.md")
+        Invoke-CheckedNative git @("commit", "-m", "agentic: finalize docs")
+    }
+    Write-AgenticEvent "finalize_docs_finished" @{ runDir = $finalizeRunDir; summary = $summaryFile; docsChanged = [bool]$docChanges }
+}
+
+function Complete-AgenticRun {
+    Invoke-FinalizeDocsIfNeeded
+    Write-Output "<promise>COMPLETE</promise>"
 }
 
 function New-VerifierPrompt($Task, [string]$WorktreePath, [string]$CheckOutput, [string]$ResultFile, [string]$PromptFile) {
@@ -1106,7 +1174,7 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
             Write-Error "No runnable task is available. Pending tasks are blocked by dependencies:`n$blockedSummary"
             exit 1
         }
-        Write-Output "<promise>COMPLETE</promise>"
+        Complete-AgenticRun
         exit 0
     }
 
@@ -1123,6 +1191,7 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
     $executorLog = Join-Path $runDirAbs "executor.log"
     $checksLog = Join-Path $runDirAbs "checks.log"
     $verifierLog = Join-Path $runDirAbs "verifier.log"
+    $handoverFile = Join-Path $runDirAbs "handover.md"
     $stateBefore = Join-Path $runDirAbs "state-before.json"
     $stateAfter = Join-Path $runDirAbs "state-after.json"
     $verifierResultForPrompt = $verifierResult
@@ -1219,8 +1288,29 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
                     exit 1
                 }
             }
+            if (!(Test-Path -LiteralPath $handoverFile)) {
+                $diffStatForHandover = if (Test-Path -LiteralPath (Join-Path $runDirAbs "diff-stat.txt")) { Get-Content -LiteralPath (Join-Path $runDirAbs "diff-stat.txt") -Raw } else { "" }
+                $handoverContent = @"
+# Task handover: $taskId
+
+## Summary
+$($result.summary)
+
+## Validation
+See checks log: $checksLog
+Verifier result: $verifierResult
+
+## Changed files
+$diffStatForHandover
+
+## Next-task notes
+No executor-authored handover was found, so the harness generated this fallback from verifier/check artifacts.
+"@
+                Set-Content -LiteralPath $handoverFile -Value $handoverContent -Encoding UTF8
+            }
+            Write-AgenticEvent "task_handover_written" @{ task = $taskId; path = $handoverFile }
             Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
-            Add-Content -Path (Join-Path $runsRoot "agentic-progress.txt") -Value "`n## $(Get-Date -Format o) $taskId`n- Verdict: pass`n- Summary: $($result.summary)"
+            Add-Content -Path (Join-Path $runsRoot "agentic-progress.txt") -Value "`n## $(Get-Date -Format o) $taskId`n- Verdict: pass`n- Summary: $($result.summary)`n- Handover: $handoverFile"
             if ($cleanupPassed -and (Test-Path -LiteralPath $worktreePath)) { Invoke-CheckedNative git @("worktree", "remove", $worktreePath) }
             if (![string]::IsNullOrWhiteSpace($retryTaskId)) { Write-Output "<promise>COMPLETE</promise>"; exit 0 }
         } elseif ($verdict -eq "needs_human") {
@@ -1252,7 +1342,7 @@ if ($null -eq (Get-NextTask $state)) {
         Write-Error "Reached max iterations or no runnable task is available. Pending tasks are blocked by dependencies:`n$blockedSummary"
         exit 1
     }
-    Write-Output "<promise>COMPLETE</promise>"
+    Complete-AgenticRun
     exit 0
 }
 
