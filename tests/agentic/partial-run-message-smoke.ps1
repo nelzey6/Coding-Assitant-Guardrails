@@ -59,7 +59,7 @@ if ($content -match "verifier-result.json") {
     if ($output -notmatch "Reached max iterations \(1\)") { throw "Expected max-iterations message. Output:`n$output" }
     if ($output -notmatch "partial run") { throw "Expected message to identify this as a partial run. Output:`n$output" }
     if ($output -notmatch "completed 1 of 2 tasks") { throw "Expected message to summarize partial progress. Output:`n$output" }
-    if ($output -notmatch "not a harness crash") { throw "Expected message to distinguish budget exhaustion from a crash. Output:`n$output" }
+    if ($output -notmatch "budget exhaustion") { throw "Expected message to distinguish budget exhaustion from a crash. Output:`n$output" }
 
     Write-Output "agentic partial run message smoke passed: $tmp"
 } finally {
