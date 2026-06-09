@@ -54,7 +54,7 @@ pwsh -File scripts/agentic/agentic-loop.ps1 --tool custom --command 'my-agent ru
 3. Picks the next `pending` or `needs_retry` task.
 4. Creates one git worktree under `.worktrees/<task-id>` on branch `agentic/<task-id>`.
 5. Runs an executor agent in that worktree.
-6. Runs configured checks in that worktree.
+6. Runs configured checks in that worktree, including global `--checks` / `agentic.json` checks and the selected task's `validation` commands.
 7. Runs a verifier prompt and requires `verifier-result.json` with verdict `pass`, `fail`, or `needs_human`.
 8. On pass, commits in the worktree and merges the task branch with the selected `--merge-mode` (`ff-only` by default) unless `--no-merge` is set.
 9. With `--no-merge`, leaves the passed task branch/worktree in place for review; accept it later with `--accept <task-id>`.
@@ -71,7 +71,7 @@ pwsh -File scripts/agentic/agentic-loop.ps1 --tool custom --command 'my-agent ru
 - Use `--no-merge` while testing the harness or when you want human review before integration.
 - Use `--cleanup-passed` only when you are comfortable removing passed worktrees.
 
-## No-merge review and accept flow
+## No-merge review, auto-accept, and apply flows
 
 Use `--no-merge` when you want the harness to validate and commit a task without integrating it into the current branch:
 
@@ -92,18 +92,36 @@ After review, accept the passed task from a clean main worktree:
 pwsh -File scripts/agentic/agentic-loop.ps1 --accept task-001
 ```
 
+For unattended validation runs where no human review is needed, combine `--no-merge` with `--auto-accept-passed`. The harness still runs task validation checks and the verifier first, then immediately accepts the passed branch:
+
+```powershell
+pwsh -File scripts/agentic/agentic-loop.ps1 --tool claude --checks "npm test" --no-merge --auto-accept-passed
+```
+
 `--accept <task-id>` verifies that the task exists and is already `passed`, integrates the corresponding `agentic/<safe-task-id>` branch, and removes the task worktree/branch after a successful integration. It uses `--merge-mode ff-only` by default. If fast-forward is not the desired operation, pass `--merge-mode cherry-pick` or `--merge-mode no-ff` explicitly:
 
 ```powershell
 pwsh -File scripts/agentic/agentic-loop.ps1 --accept task-001 --merge-mode cherry-pick
 ```
 
-If the accept merge/cherry-pick fails, the branch and worktree are left intact for manual recovery.
+For single-task review without creating an integration commit, use apply/no-commit accept mode. It applies the passed task with `git cherry-pick --no-commit`, leaves the resulting changes in the current worktree for inspection, and keeps the task branch/worktree intact for conservative cleanup:
 
-## Smoke test
+```powershell
+pwsh -File scripts/agentic/agentic-loop.ps1 --accept task-001 --merge-mode apply
+```
+
+If the accept merge/cherry-pick/apply fails, the branch and worktree are left intact for manual recovery.
+
+## Focused smoke tests
 
 ```powershell
 pwsh -File tests/agentic/smoke.ps1
+pwsh -File tests/agentic/plan-only-smoke.ps1
+pwsh -File tests/agentic/dependency-smoke.ps1
 pwsh -File tests/agentic/status-dirty-smoke.ps1
+pwsh -File tests/agentic/pi-adapter-smoke.ps1
 pwsh -File tests/agentic/accept-smoke.ps1
+pwsh -File tests/agentic/validation-checks-smoke.ps1
+pwsh -File tests/agentic/auto-accept-smoke.ps1
+pwsh -File tests/agentic/accept-apply-smoke.ps1
 ```

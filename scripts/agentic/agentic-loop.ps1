@@ -13,19 +13,21 @@ Options:
   --command <template>       Executor command template. Use {prompt} for prompt file.
   --verifier-command <tpl>   Verifier command template. Defaults to --command/tool adapter.
   --max-iterations <n>       Max task iterations (default: agentic.json maxIterations, or 10)
-  --checks <command>         Validation command to run in the task worktree (repeatable)
+  --checks <command>         Validation command to run in the task worktree (repeatable);
+                             combined with each task.validation command before verifier
   --state <path>             State JSON path (default: agentic.json)
   --policy <path>            Workflow policy path (default: .agent-policy/workflow-policy.json, fallback templates/agent-policy/workflow-policy.json)
   --worktree-root <path>     Worktree root (default from policy, or .worktrees)
   --runs-root <path>         Prompt/result root (default from policy, or .agent-runs)
   --no-commit                Do not commit passing task branch
   --no-merge                 Do not merge passing task branch into current branch; leave it for review/--accept
-  --auto-accept-passed       With --no-merge, auto-accept a task after checks and verifier pass
+  --auto-accept-passed       With --no-merge, auto-accept a task after task validation checks and verifier pass
   --allow-dirty              Allow starting with uncommitted changes in main worktree
   --cleanup-passed           Remove passed task worktree after merge/no-merge handling
   --plan-only                Run planner, validate planner-result.json, update state, then stop
   --status                   Print current state summary and exit; allowed even when the worktree is dirty
-  --accept <task-id>         Merge/cherry-pick an already passed no-merge task, clean up, then exit
+  --accept <task-id>         Merge/cherry-pick an already passed no-merge task, clean up, then exit;
+                             use --merge-mode apply for accept apply/no-commit mode
   --max-retries <n>          Max automatic retries per task (default from policy, or 1)
   --merge-mode <mode>        Merge mode for pass/accept: ff-only | no-ff | cherry-pick | apply (default: ff-only)
 
@@ -35,9 +37,9 @@ No-merge review flow:
   passed no-merge tasks immediately after checks and verifier pass. After review, run --accept <task-id>
   to integrate that passed task and remove its worktree/branch. --accept defaults to
   --merge-mode ff-only; use --merge-mode cherry-pick or no-ff when that is intentional.
-  Use --merge-mode apply for single-task review: changes are applied with no commit,
-  staged in the current worktree, and the task worktree/branch are left intact for
-  conservative cleanup after inspection.
+  Use --merge-mode apply for single-task accept review: changes are applied with
+  no commit (git cherry-pick --no-commit), staged in the current worktree, and
+  the task worktree/branch are left intact for conservative cleanup after inspection.
   -h, --help                 Show this help
 
 Environment overrides:

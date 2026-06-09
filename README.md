@@ -141,10 +141,11 @@ Typical safe flow:
 agentic-loop --goal "Fix checkout reliability" --tool claude --plan-only
 agentic-loop --status
 agentic-loop --tool claude --checks "npm test" --no-merge
+agentic-loop --tool claude --checks "npm test" --no-merge --auto-accept-passed
 agentic-loop --accept task-001
 ```
 
-Use `--no-merge` while reviewing autonomous output. A passed no-merge task remains on `agentic/<safe-task-id>` with a worktree under `.worktrees/`; after review, `--accept <task-id>` integrates it and cleans up. `--accept` defaults to `--merge-mode ff-only`; pass `--merge-mode cherry-pick` or `--merge-mode no-ff` only when that merge behavior is intentional. `--status` can be run even when the worktree is dirty. The loop creates prompts under `.agent-runs/` and keeps `agentic.json` as ignored local runtime state.
+Use `--no-merge` while reviewing autonomous output. A passed no-merge task remains on `agentic/<safe-task-id>` with a worktree under `.worktrees/`; after review, `--accept <task-id>` integrates it and cleans up. `--auto-accept-passed` keeps the no-merge validation path but accepts immediately after task checks and verifier pass. `--accept` defaults to `--merge-mode ff-only`; pass `--merge-mode cherry-pick`, `--merge-mode no-ff`, or apply/no-commit mode (`--merge-mode apply`) only when that behavior is intentional. `--status` can be run even when the worktree is dirty. The loop creates prompts under `.agent-runs/` and keeps `agentic.json` as ignored local runtime state. See [`scripts/agentic/README.md`](./scripts/agentic/README.md) for the compact harness reference and focused smoke commands.
 
 ## Ralph Harness
 
