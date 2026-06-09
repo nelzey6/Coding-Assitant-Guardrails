@@ -54,7 +54,7 @@ pwsh -File scripts/agentic/agentic-loop.ps1 --tool custom --command 'my-agent ru
 3. Picks the next `pending` or `needs_retry` task.
 4. Creates one git worktree under `.worktrees/<task-id>` on branch `agentic/<task-id>`.
 5. Runs an executor agent in that worktree.
-6. Runs configured checks in that worktree, including global `--checks` / `agentic.json` checks and the selected task's `validation` commands.
+6. Runs configured checks in that worktree, including global `--checks` / `agentic.json` checks and the selected task's `validation` commands. When a task adds a focused smoke test that proves the change, put it in `task.validation` (for example, `pwsh -File tests/agentic/my-focused-smoke.ps1`) so the harness runs it before verifier review.
 7. Runs a verifier prompt and requires `verifier-result.json` with verdict `pass`, `fail`, or `needs_human`.
 8. On pass, commits in the worktree and merges the task branch with the selected `--merge-mode` (`ff-only` by default) unless `--no-merge` is set.
 9. With `--no-merge`, leaves the passed task branch/worktree in place for review; accept it later with `--accept <task-id>`.
@@ -122,6 +122,7 @@ pwsh -File tests/agentic/status-dirty-smoke.ps1
 pwsh -File tests/agentic/pi-adapter-smoke.ps1
 pwsh -File tests/agentic/accept-smoke.ps1
 pwsh -File tests/agentic/validation-checks-smoke.ps1
+pwsh -File tests/agentic/validation-discovery-smoke.ps1
 pwsh -File tests/agentic/auto-accept-smoke.ps1
 pwsh -File tests/agentic/accept-apply-smoke.ps1
 ```

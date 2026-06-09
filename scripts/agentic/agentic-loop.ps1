@@ -513,6 +513,8 @@ Read and follow AGENTS.md / CLAUDE.md if present. Use grill-with-docs-style disc
 The harness provided a context packet at: $RepoContextFile
 Inspect deeper in the repository when needed.
 
+When planning validation, propose focused task.validation commands that prove each task. If a task adds or changes a small smoke test/check that directly proves the change, include that newly added focused smoke command in the task.validation array so the harness runs it before verification. Prefer PowerShell Core examples in the form `pwsh -File path/to/smoke.ps1`; mention `powershell.exe` only for explicitly documented legacy Windows PowerShell compatibility.
+
 Do not edit $stateFile directly. Write planner JSON only to: $PlannerResultFile
 
 Allowed verdicts: planned, needs_human, blocked.
@@ -622,6 +624,8 @@ Hard rules:
 - Keep task artifacts under this run directory when useful: $RunDir
 - For discovery/investigation tasks, useful artifact files may be the main output; code changes are not required unless the task asks for them.
 - For implementation/architecture/maintenance tasks, prefer tracked repo changes plus validation unless the task is explicitly artifact-only.
+- When you add a focused smoke test/check that proves this task, use or propose it as a task.validation command (for example `pwsh -File tests/path/focused-smoke.ps1`) so the harness runs it before verification.
+- Use `pwsh -File` in harness and smoke-test command examples. Mention `powershell.exe` only as a legacy Windows PowerShell compatibility fallback when explicitly needed.
 
 Iteration: $Iteration
 State file: $stateFile
