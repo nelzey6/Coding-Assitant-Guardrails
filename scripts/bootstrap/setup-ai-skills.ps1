@@ -157,6 +157,7 @@ if ($Update -and $env:SETUP_AI_SKILLS_REEXECED -ne "1") {
     if ($PSBoundParameters.ContainsKey("Tool")) { $reexecArgs += @("-Tool", $Tool) }
     if ($PSBoundParameters.ContainsKey("SkillsRepo")) { $reexecArgs += @("-SkillsRepo", $SkillsRepo) }
     if ($PSBoundParameters.ContainsKey("Destination")) { $reexecArgs += @("-Destination", $Destination) }
+    if ($PSBoundParameters.ContainsKey("ForceTemplateOverwrite")) { $reexecArgs += "-ForceTemplateOverwrite" }
     if ($PSBoundParameters.ContainsKey("Update") -or !$PSBoundParameters.ContainsKey("NoUpdate")) { $reexecArgs += "-Update" }
 
     Write-Host "Re-running updated installer"

@@ -806,7 +806,17 @@ function Write-DiffArtifacts([string]$WorktreePath, [string]$RunDir) {
     Set-Content -LiteralPath (Join-Path $RunDir "diff-stat.txt") -Value $stat -Encoding UTF8
 }
 
-function New-RepoContext([string]$ContextFile) {
+function New-CodeGraphContext([string]$OutputFile, [string]$WorkingDirectory = ".") {
+    $script = Join-Path (Resolve-Path -LiteralPath $PSScriptRoot).Path "..\context\codegraph-context.ps1"
+    if (Test-Path -LiteralPath $script) {
+        try { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Output $OutputFile -WorkingDirectory $WorkingDirectory | Out-Null; return }
+        catch {}
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputFile) | Out-Null
+    Set-Content -LiteralPath $OutputFile -Value "# CodeGraph Context`n`nCodeGraph context helper was unavailable. Continue with normal repository inspection." -Encoding UTF8
+}
+
+function New-RepoContext([string]$ContextFile, [string]$CodeGraphFile = "") {
     $branch = (& git branch --show-current)
     $head = (& git rev-parse --short HEAD)
     $statusText = ((& git status --short) -join "`n")
@@ -841,12 +851,15 @@ $project
 
 CONTEXT.md:
 $context
+
+CodeGraph context:
+$CodeGraphFile
 "@
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ContextFile) | Out-Null
     Set-Content -LiteralPath $ContextFile -Value $content -Encoding UTF8
 }
 
-function New-PlannerPrompt([string]$PromptFile, [string]$PlannerResultFile, [string]$RepoContextFile, [string]$GrillTranscriptFile) {
+function New-PlannerPrompt([string]$PromptFile, [string]$PlannerResultFile, [string]$RepoContextFile, [string]$GrillTranscriptFile, [string]$CodeGraphFile) {
     $policyText = if ($resolvedPolicyFile) { Get-Content -LiteralPath $resolvedPolicyFile -Raw -ErrorAction SilentlyContinue } else { "" }
     $content = @"
 You are the planner for an autonomous agentic coding loop.
@@ -854,6 +867,8 @@ You are the planner for an autonomous agentic coding loop.
 Read and follow AGENTS.md / CLAUDE.md if present. Use grill-with-docs-style discovery by default before planning: restate the goal, inspect repo docs/code for answers, separate decisions/assumptions/open questions, update CONTEXT.md when durable domain/product context changes, and stop with needs_human only for unresolved product/domain decisions.
 
 The harness provided a context packet at: $RepoContextFile
+The harness also generated optional CodeGraph context at: $CodeGraphFile
+Use CodeGraph context for orientation before broad manual search, then verify conclusions against source files. If the artifact says CodeGraph is unavailable, continue normally.
 Inspect deeper in the repository when needed.
 
 When planning validation, propose focused task.validation commands that prove each task. If a task adds or changes a small smoke test/check that directly proves the change, include that newly added focused smoke command in the task.validation array so the harness runs it before verification. Prefer PowerShell Core examples in the form `pwsh -File path/to/smoke.ps1`; mention `powershell.exe` only for explicitly documented legacy Windows PowerShell compatibility.
@@ -961,7 +976,7 @@ function Get-WorkflowBlock([string]$Workflow) {
     return "Required workflow: use $Workflow. Read and follow the canonical SKILL.md for this workflow."
 }
 
-function New-ExecutorPrompt($Task, [int]$Iteration, [string]$PromptFile, [string]$RunDir) {
+function New-ExecutorPrompt($Task, [int]$Iteration, [string]$PromptFile, [string]$RunDir, [string]$CodeGraphFile = "") {
     $taskJson = $Task | ConvertTo-Json -Depth 20
     $workflow = if ($Task.workflow) { [string]$Task.workflow } else { "tdd" }
     $kind = if ($Task.kind) { [string]$Task.kind } else { "implementation" }
@@ -988,6 +1003,9 @@ State file: $stateFile
 Selected workflow: $workflow
 Task kind: $kind
 Run directory: $RunDir
+CodeGraph context: $CodeGraphFile
+
+Use CodeGraph context for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions by reading source files. If CodeGraph is unavailable, continue normally.
 
 Recent harness history (JSONL tail; source of truth is $eventLogPath):
 $recentHistory
@@ -1115,12 +1133,15 @@ if ((Get-Tasks $state).Count -eq 0) {
     $repoContextFile = Join-Path $plannerRunDir "repo-context.md"
     $plannerResultFile = Join-Path $plannerRunDir "planner-result.json"
     $grillTranscriptFile = Join-Path $plannerRunDir "grill-transcript.md"
+    $codeGraphFile = Join-Path $plannerRunDir "codegraph.md"
     $plannerResultForPrompt = Join-Path (Resolve-Path -LiteralPath ".").Path $plannerResultFile
     $repoContextForPrompt = Join-Path (Resolve-Path -LiteralPath ".").Path $repoContextFile
     $grillTranscriptForPrompt = Join-Path (Resolve-Path -LiteralPath ".").Path $grillTranscriptFile
 
-    New-RepoContext $repoContextFile
-    New-PlannerPrompt $promptFile $plannerResultForPrompt $repoContextForPrompt $grillTranscriptForPrompt
+    New-CodeGraphContext $codeGraphFile "."
+    $codeGraphForPrompt = Join-Path (Resolve-Path -LiteralPath ".").Path $codeGraphFile
+    New-RepoContext $repoContextFile $codeGraphForPrompt
+    New-PlannerPrompt $promptFile $plannerResultForPrompt $repoContextForPrompt $grillTranscriptForPrompt $codeGraphForPrompt
     Write-AgenticEvent "planner_started" @{ runDir = $plannerRunDir; prompt = $promptFile; resultFile = $plannerResultFile; grillTranscript = $grillTranscriptFile }
     Write-Host "=== Agentic planner ==="
     Invoke-Agent $promptFile $commandTemplate ""
@@ -1188,6 +1209,7 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
     $executorPrompt = Join-Path $runDirAbs "executor.md"
     $verifierPrompt = Join-Path $runDirAbs "verifier.md"
     $verifierResult = Join-Path $runDirAbs "verifier-result.json"
+    $codeGraphFile = Join-Path $runDirAbs "codegraph.md"
     $executorLog = Join-Path $runDirAbs "executor.log"
     $checksLog = Join-Path $runDirAbs "checks.log"
     $verifierLog = Join-Path $runDirAbs "verifier.log"
@@ -1208,7 +1230,8 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
         Invoke-CheckedNative git @("worktree", "add", "-b", $branch, $worktreePath, "HEAD")
     }
 
-    New-ExecutorPrompt $task $iteration $executorPrompt $runDir
+    New-CodeGraphContext $codeGraphFile $worktreePath
+    New-ExecutorPrompt $task $iteration $executorPrompt $runDir $codeGraphFile
     try {
         Write-AgenticEvent "executor_started" @{ task = $taskId; prompt = $executorPrompt; log = $executorLog }
         try { Invoke-AgentWithLog $executorPrompt $commandTemplate $worktreePath $executorLog; Write-AgenticEvent "executor_passed" @{ task = $taskId; log = $executorLog } }

@@ -7,6 +7,7 @@ This repo gives a product repository three things:
 1. **Always-on agent guidance** via `AGENTS.md` and `CLAUDE.md` templates.
 2. **Reusable workflow skills** such as `grill-with-docs`, `diagnose`, `tdd`, `update-project-md`, and `handoff`.
 3. **Optional automation harnesses** for fresh-agent loops: `agentic-loop` for task graphs and `ralph` for PRD/user-story execution.
+4. **Optional CodeGraph context** as CLI-generated markdown artifacts, so agents can use graph orientation even without MCP support.
 
 It is based on [`mattpocock/skills`](https://github.com/mattpocock/skills), with local templates and harnesses layered on top. Upstream-derived skill content is kept merge-friendly; local orchestration lives in templates, scripts, and local skills.
 
@@ -15,16 +16,22 @@ It is based on [`mattpocock/skills`](https://github.com/mattpocock/skills), with
 From this repository checkout, install skills and templates into a product repo:
 
 ```powershell
+# Optional, before setup: install CodeGraph for graph-based repo context
+.\third-party\codegraph\install-codegraph.ps1
+
 # Windows PowerShell / PowerShell Core
 .\scripts\bootstrap\setup-ai-skills.ps1 -Destination D:\Repos\MyProduct
 ```
 
 ```bash
+# Optional, before setup: install CodeGraph for graph-based repo context
+./third-party/codegraph/install-codegraph.sh
+
 # macOS/Linux
 ./scripts/bootstrap/setup-ai-skills.sh --destination "$HOME/src/my-product"
 ```
 
-By default this installs both Codex and Claude skills, installs the `agentic-loop` and `ralph` shims, and copies repo templates into the destination repo.
+By default this installs both Codex and Claude skills, installs the `agentic-loop` and `ralph` shims, and seeds missing repo templates into the destination repo. CodeGraph is optional and deliberately installed separately; when present on PATH, the harness uses it automatically.
 
 After installation, in your product repo you can run:
 
@@ -50,6 +57,7 @@ The installer can target Codex, Claude, or both. By default it:
 - updates this skills repo checkout before installing;
 - installs active skills into `~/.codex/skills` and/or `~/.claude/skills`;
 - installs the `agentic-loop` harness and user-level shim;
+- includes optional CodeGraph context helper scripts under `scripts/context/` plus separate third-party install notes under `third-party/codegraph/`;
 - installs the `ralph` harness and user-level shim;
 - seeds missing repo templates into the product repo when `-Destination` / `--destination` is provided;
 - adds `.agent-runs/`, `.worktrees/`, `agentic.json`, and related runtime files to the product repo `.gitignore`.
@@ -140,6 +148,10 @@ Important runtime files:
 
 For the full command reference, review flows, retry/reset behavior, diagnostics, final docs behavior, and smoke tests, see [`scripts/agentic/README.md`](./scripts/agentic/README.md).
 
+### CodeGraph context
+
+Pi does not need MCP support for CodeGraph in this setup. If a `codegraph` CLI is available on PATH, the agentic loop generates `codegraph.md` artifacts for planner and executor runs and points agents at those files. If CodeGraph is missing, the artifact says so and the run continues normally. See [`third-party/codegraph/README.md`](./third-party/codegraph/README.md) and [`scripts/context/codegraph-context.ps1`](./scripts/context/codegraph-context.ps1).
+
 ## Ralph harness
 
 [`scripts/ralph/ralph.ps1`](./scripts/ralph/ralph.ps1) is a simpler fresh-agent loop over a Ralph-compatible `prd.json`.
@@ -197,3 +209,4 @@ Resolve conflicts deliberately. Preserve the separation between upstream skill c
 
 - Upstream base: [`mattpocock/skills`](https://github.com/mattpocock/skills)
 - Operating-principles inspiration: [`multica-ai/andrej-karpathy-skills`](https://github.com/multica-ai/andrej-karpathy-skills/tree/main)
+- Optional codebase graph context: [`codegraph`](https://github.com/codegen-sh/codegraph)

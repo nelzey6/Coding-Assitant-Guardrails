@@ -58,13 +58,14 @@ Before editing code:
 
 1. Read `git status`.
 2. Read `PROJECT.md` and relevant local docs.
-3. If `PROJECT.md` is missing, empty, placeholder-only, or clearly stale for the task, invoke the installed `update-project-md` skill before implementation.
-4. Inspect the code, tests, logs, traces, and build files needed for the request.
-5. Use the installed shared skills when they match the task.
-6. Apply Decision Capture for non-trivial code/design work.
-7. Implement the smallest durable change.
-8. Validate with the most targeted useful checks.
-9. Inspect the diff before handoff.
+3. If CodeGraph is available (`codegraph` on PATH or a generated `.agent-runs/*/codegraph.md` exists), use it for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions against source files.
+4. If `PROJECT.md` is missing, empty, placeholder-only, or clearly stale for the task, invoke the installed `update-project-md` skill before implementation.
+5. Inspect the code, tests, logs, traces, and build files needed for the request.
+6. Use the installed shared skills when they match the task.
+7. Apply Decision Capture for non-trivial code/design work.
+8. Implement the smallest durable change.
+9. Validate with the most targeted useful checks.
+10. Inspect the diff before handoff.
 
 ## Skill Usage
 
