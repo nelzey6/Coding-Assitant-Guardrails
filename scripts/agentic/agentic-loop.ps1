@@ -255,7 +255,7 @@ if ([string]::IsNullOrWhiteSpace($maxIterations)) { $maxIterations = "10" }
 [int]$maxIterationsValue = 0
 if (!([int]::TryParse($maxIterations, [ref]$maxIterationsValue)) -or $maxIterationsValue -lt 1) { Write-Error "Invalid max iterations: $maxIterations"; exit 2 }
 
-if (!$doctorOnly) {
+if (!$doctorOnly -and [string]::IsNullOrWhiteSpace($acceptTaskId)) {
     New-Item -ItemType Directory -Force -Path $runsRoot | Out-Null
     New-Item -ItemType Directory -Force -Path $worktreeRoot | Out-Null
 }

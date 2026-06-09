@@ -11,8 +11,9 @@ try {
     git -C $tmp init | Out-Null
     git -C $tmp config user.email "agentic-smoke@example.test"
     git -C $tmp config user.name "Agentic Smoke"
+    git -C $tmp config core.autocrlf false
     Set-Content -Path (Join-Path $tmp "README.md") -Value "# Accept apply smoke" -Encoding UTF8
-    Set-Content -Path (Join-Path $tmp ".gitignore") -Value ".worktrees/" -Encoding UTF8
+    Set-Content -Path (Join-Path $tmp ".gitignore") -Value ".worktrees/`n.agent-runs/" -Encoding UTF8
     @'
 {
   "version": 1,
