@@ -218,6 +218,7 @@ if (![string]::IsNullOrWhiteSpace($Destination)) {
     Copy-RepoTemplates -ToolName $Tool -TemplateRoot $templateRoot -DestinationRoot $destinationRoot
     Add-GitignoreEntry -DestinationRoot $destinationRoot -Pattern ".agent-runs/"
     Add-GitignoreEntry -DestinationRoot $destinationRoot -Pattern ".worktrees/"
+    Add-GitignoreEntry -DestinationRoot $destinationRoot -Pattern ".codegraph/"
     Add-GitignoreEntry -DestinationRoot $destinationRoot -Pattern "agentic.json"
     Write-Host "Repo templates copied to $destinationRoot"
 }

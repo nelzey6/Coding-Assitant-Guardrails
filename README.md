@@ -60,7 +60,7 @@ The installer can target Codex, Claude, or both. By default it:
 - includes optional CodeGraph context helper scripts under `scripts/context/` plus separate third-party install notes under `third-party/codegraph/`;
 - installs the `ralph` harness and user-level shim;
 - seeds missing repo templates into the product repo when `-Destination` / `--destination` is provided;
-- adds `.agent-runs/`, `.worktrees/`, `agentic.json`, and related runtime files to the product repo `.gitignore`.
+- adds `.agent-runs/`, `.worktrees/`, `.codegraph/`, `agentic.json`, and related runtime files to the product repo `.gitignore`.
 
 Run installer help for less common options such as installing only one tool, skipping update, or using a non-default skills repo path.
 

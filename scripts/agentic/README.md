@@ -177,6 +177,9 @@ If the accept merge/cherry-pick/apply fails, the branch and worktree are left in
 ## Focused smoke tests
 
 ```powershell
+pwsh -File tests/agentic/all-smoke.ps1
+
+# Or run focused tests individually:
 pwsh -File tests/agentic/smoke.ps1
 pwsh -File tests/agentic/plan-only-smoke.ps1
 pwsh -File tests/agentic/dependency-smoke.ps1
@@ -193,5 +196,6 @@ pwsh -File tests/agentic/doctor-smoke.ps1
 pwsh -File tests/agentic/operator-diagnostics-smoke.ps1
 pwsh -File tests/agentic/operator-controls-smoke.ps1
 pwsh -File tests/agentic/finalize-docs-smoke.ps1
+pwsh -File tests/agentic/codegraph-context-smoke.ps1
 pwsh -File tests/agentic/docs-help-smoke.ps1
 ```

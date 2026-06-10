@@ -31,8 +31,11 @@ try {
 
         if ($content -match "Write planner JSON only to: (.+)") {
             $resultPath = $Matches[1].Trim()
+            $transcriptPath = $null
+            if ($content -match "Also write an autonomous grill transcript markdown file to: (.+)") { $transcriptPath = $Matches[1].Trim() }
             $parent = Split-Path -Parent $resultPath
             if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+            if ($transcriptPath) { "# Autonomous Grill Transcript`n`nPi adapter smoke transcript." | Set-Content -LiteralPath $transcriptPath -Encoding UTF8 }
             @"
 {
   "verdict": "planned",
@@ -41,6 +44,7 @@ try {
   "assumptions": [],
   "openQuestions": [],
   "blockers": [],
+  "artifacts": ["grill-transcript.md"],
   "tasks": [
     {
       "id": "task-001",

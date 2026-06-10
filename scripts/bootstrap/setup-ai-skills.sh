@@ -217,6 +217,7 @@ if [ -n "$DESTINATION" ]; then
   copy_repo_templates "$template_root" "$destination_root"
   add_gitignore_entry "$destination_root" ".agent-runs/"
   add_gitignore_entry "$destination_root" ".worktrees/"
+  add_gitignore_entry "$destination_root" ".codegraph/"
   add_gitignore_entry "$destination_root" "agentic.json"
   echo "Repo templates copied to $destination_root"
 fi

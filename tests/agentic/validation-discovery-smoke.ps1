@@ -44,6 +44,9 @@ if ($content -match "Planner result schema") {
     if ($content -notmatch "pwsh -File") { throw "planner prompt missing pwsh -File guidance" }
     if ($content -match "Write planner JSON only to: (.+)") {
         $resultPath = $Matches[1].Trim()
+        if ($content -match "Also write an autonomous grill transcript markdown file to: (.+)") {
+            "# Autonomous Grill Transcript`n`nValidation discovery smoke transcript." | Set-Content -LiteralPath $Matches[1].Trim() -Encoding UTF8
+        }
         @{
             verdict = "planned"
             summary = "planned focused smoke validation"
@@ -51,6 +54,7 @@ if ($content -match "Planner result schema") {
             assumptions = @()
             openQuestions = @()
             blockers = @()
+            artifacts = @("grill-transcript.md")
             tasks = @(@{
                 id = "task-001"
                 title = "Use focused smoke validation"
