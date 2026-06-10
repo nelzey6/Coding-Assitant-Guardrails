@@ -100,7 +100,16 @@ pwsh -File scripts/agentic/agentic-loop.ps1 --doctor
 
 Use `--reset-task <task-id>` to remove a stale task worktree/branch and mark the task `needs_retry` for a clean rerun. This is mutating and should be used only when you are comfortable discarding the task branch/worktree attempt.
 
-For low-risk tasks, `--fast-verifier` skips the separate verifier agent after checks pass and records a `verifier_skipped` event. The default remains the safer separate verifier. Use `--agent-timeout-seconds <n>` for custom/template executor/verifier/finalizer commands and `--check-timeout-seconds <n>` for each validation/check command. Use `--prompt-budget low|normal|high` to control prompt inlining: lower budgets summarize event history and cap check/diff text more aggressively while keeping full artifacts on disk for inspection.
+`--fast-verifier` skips the separate verifier agent after checks pass and records a `verifier_skipped` event, but it is honored only for low-risk tasks: kind `maintenance`/`discovery`/`investigation` that also declare a `scope`. High-risk tasks (or any task without scope) force the full verifier and record a `verifier_skip_denied` event. The default remains the safer separate verifier. Use `--agent-timeout-seconds <n>` for custom/template executor/verifier/finalizer commands and `--check-timeout-seconds <n>` for each validation/check command. Use `--prompt-budget low|normal|high` to control prompt inlining: lower budgets summarize event history and cap check/diff text more aggressively while keeping full artifacts on disk for inspection.
+
+## Production-hardening rails
+
+These deterministic rails move safety properties out of the LLM verifier alone:
+
+- **Diff-scope rail.** A task may declare an optional `scope` glob list (forward-slash globs; `**` crosses path separators, `*` stays within a segment). When present, the harness checks `git diff --name-only HEAD` after the executor and before the verifier; any changed file outside scope is a retryable failure (`scope_violation` event) with the offending paths fed into the retry prompt. Absent scope is advisory-only, so existing state files keep working.
+- **Planner task-complexity budget.** `Test-PlannerResult` rejects tasks with more than 7 acceptance criteria, more than 5 scope globs, or empty acceptance criteria on an implementation/architecture task, forcing the planner to split broad goals.
+- **Global circuit-breaker.** `--max-runtime-seconds <n>` caps wall-clock for the whole run and `--max-agent-calls <n>` caps planner+executor+verifier invocations. When either trips, the harness emits `budget_exhausted`, marks the next runnable task `needs_human`, and stops cleanly. Token counts are not metered because Bedrock token usage is not observable from the harness.
+- **Adversarial multi-vote verifier.** High-risk tasks (implementation/architecture kind with a declared scope, or a scope matching a human-gate path) get N independent refute-first verifier votes (`--verifier-votes <n>`, default 3 for high-risk, 1 otherwise); a majority `pass` is required and any `needs_human` escalates. Low-risk and legacy scopeless tasks keep the single-verifier path.
 
 When all tasks pass and changes were merged into the active branch, the harness runs a final docs refresh by default. The finalizer uses update-project-md-style behavior for `PROJECT.md`, writes `.agent-runs/<finalize-run>/final-summary.md`, records `finalize_docs_*` events, and commits `PROJECT.md` changes as `agentic: finalize docs` when committing is enabled. `CONTEXT.md` is normally owned by the planning grill-with-docs stage, not finalization. Pass `--no-finalize-docs` to skip the final `PROJECT.md` refresh.
 
@@ -197,5 +206,11 @@ pwsh -File tests/agentic/operator-diagnostics-smoke.ps1
 pwsh -File tests/agentic/operator-controls-smoke.ps1
 pwsh -File tests/agentic/finalize-docs-smoke.ps1
 pwsh -File tests/agentic/codegraph-context-smoke.ps1
+pwsh -File tests/agentic/scope-rail-smoke.ps1
+pwsh -File tests/agentic/planner-budget-smoke.ps1
+pwsh -File tests/agentic/fast-verifier-guard-smoke.ps1
+pwsh -File tests/agentic/circuit-breaker-smoke.ps1
+pwsh -File tests/agentic/shell-hardening-smoke.ps1
+pwsh -File tests/agentic/adversarial-verifier-smoke.ps1
 pwsh -File tests/agentic/docs-help-smoke.ps1
 ```

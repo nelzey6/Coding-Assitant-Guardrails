@@ -19,6 +19,12 @@ $tests = @(
     "operator-controls-smoke.ps1",
     "finalize-docs-smoke.ps1",
     "codegraph-context-smoke.ps1",
+    "scope-rail-smoke.ps1",
+    "planner-budget-smoke.ps1",
+    "fast-verifier-guard-smoke.ps1",
+    "circuit-breaker-smoke.ps1",
+    "shell-hardening-smoke.ps1",
+    "adversarial-verifier-smoke.ps1",
     "docs-help-smoke.ps1"
 )
 
