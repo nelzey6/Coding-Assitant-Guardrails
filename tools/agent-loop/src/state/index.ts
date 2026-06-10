@@ -33,6 +33,8 @@ export interface Task {
   acceptedAt?: string;
   lastRunDir?: string;
   attempts?: number;
+  scope?: string[];
+  artifacts?: string[];
 }
 
 export interface AgenticState {
@@ -40,11 +42,33 @@ export interface AgenticState {
   goal?: string;
   phase?: string;
   maxIterations?: number;
+  checks?: string[];
   tasks?: Task[];
   decisions?: string[];
   assumptions?: string[];
   openQuestions?: string[];
   blockers?: string[];
+  promptPolicy?: { lessons?: string[] };
+}
+
+export interface PlannerResult {
+  verdict: "planned" | "needs_human" | "blocked";
+  summary?: string;
+  decisions?: string[];
+  assumptions?: string[];
+  openQuestions?: string[];
+  blockers?: string[];
+  tasks?: Task[];
+  artifacts?: string[];
+}
+
+export interface VerifierResult {
+  verdict: "pass" | "fail" | "needs_human";
+  summary?: string;
+  issues?: string[];
+  humanGates?: string[];
+  recommendedStatus?: string;
+  artifacts?: string[];
 }
 
 export function loadState(repoRoot: string, stateFile = "agentic.json"): AgenticState | null {
@@ -125,4 +149,133 @@ export function clearTaskReviewState(state: AgenticState, taskId: string, accept
       task.acceptedAt = acceptedAt;
     }
   }
+}
+
+// Set a task's status and optionally append a failure record. Writes state + event.
+export function setTaskStatus(
+  repoRoot: string,
+  stateFile: string,
+  runsRoot: string,
+  taskId: string,
+  status: TaskStatus,
+  failure?: FailureRecord
+): AgenticState {
+  const state = loadState(repoRoot, stateFile)!;
+  for (const task of getTasks(state)) {
+    if (task.id === taskId) {
+      task.status = status;
+      if (failure) {
+        if (!task.failureHistory) task.failureHistory = [];
+        task.failureHistory.push(failure);
+      }
+    }
+  }
+  writeState(repoRoot, state, stateFile);
+  const eventData: Record<string, unknown> = { task: taskId, status };
+  if (failure) eventData["failure"] = failure;
+  appendEventToLog(repoRoot, runsRoot, stateFile, "task_status", eventData);
+  return state;
+}
+
+// Mark a task passed, recording verifier artifacts and optional review branch/worktree.
+export function setTaskPassed(
+  repoRoot: string,
+  stateFile: string,
+  runsRoot: string,
+  taskId: string,
+  verifierResult: VerifierResult,
+  reviewBranch = "",
+  reviewWorktree = ""
+): AgenticState {
+  const state = loadState(repoRoot, stateFile)!;
+  for (const task of getTasks(state)) {
+    if (task.id === taskId) {
+      task.status = "passed";
+      (task as Task & { completedAt?: string }).completedAt = new Date().toISOString();
+      if (reviewBranch) task.reviewBranch = reviewBranch;
+      if (reviewWorktree) task.reviewWorktree = reviewWorktree;
+      if (verifierResult.artifacts?.length) {
+        task.artifacts = [...(task.artifacts ?? []), ...verifierResult.artifacts];
+      }
+    }
+  }
+  writeState(repoRoot, state, stateFile);
+  const eventData: Record<string, unknown> = { task: taskId, status: "passed" };
+  if (reviewBranch) eventData["reviewBranch"] = reviewBranch;
+  if (reviewWorktree) eventData["reviewWorktree"] = reviewWorktree;
+  if (verifierResult.summary) eventData["summary"] = verifierResult.summary;
+  appendEventToLog(repoRoot, runsRoot, stateFile, "task_passed", eventData);
+  return state;
+}
+
+// Increment attempt counter and stamp lastRunDir / startedAt.
+export function addTaskAttempt(
+  repoRoot: string,
+  stateFile: string,
+  runsRoot: string,
+  taskId: string,
+  runDir: string
+): AgenticState {
+  const state = loadState(repoRoot, stateFile)!;
+  for (const task of getTasks(state)) {
+    if (task.id === taskId) {
+      task.attempts = (task.attempts ?? 0) + 1;
+      task.lastRunDir = runDir;
+      (task as Task & { startedAt?: string }).startedAt = new Date().toISOString();
+    }
+  }
+  writeState(repoRoot, state, stateFile);
+  appendEventToLog(repoRoot, runsRoot, stateFile, "task_attempt", { task: taskId, runDir });
+  return state;
+}
+
+// Determine whether a failed phase should retry or escalate to needs_human.
+export function getFailureStatusForTask(
+  task: Task,
+  phase: string,
+  maxRetries: number
+): TaskStatus {
+  if (phase === "executor" || phase === "harness") return "needs_human";
+  const attempts = getTaskAttempts(task);
+  return attempts <= maxRetries ? "needs_retry" : "needs_human";
+}
+
+// Merge a planner result into state: append metadata lists and transition phase.
+export function mergePlannerResult(
+  repoRoot: string,
+  stateFile: string,
+  result: PlannerResult
+): AgenticState {
+  const state = loadState(repoRoot, stateFile)!;
+  if (result.decisions?.length) state.decisions = [...(state.decisions ?? []), ...result.decisions];
+  if (result.assumptions?.length) state.assumptions = [...(state.assumptions ?? []), ...result.assumptions];
+  if (result.openQuestions?.length) state.openQuestions = [...(state.openQuestions ?? []), ...result.openQuestions];
+  if (result.blockers?.length) state.blockers = [...(state.blockers ?? []), ...result.blockers];
+  if (result.verdict === "planned") {
+    state.tasks = [...(state.tasks ?? []), ...(result.tasks ?? [])];
+    state.phase = "execution";
+  } else if (result.verdict === "needs_human") {
+    state.phase = "needs_human";
+  } else {
+    state.phase = "blocked";
+  }
+  writeState(repoRoot, state, stateFile);
+  return state;
+}
+
+// Thin wrapper so state mutators can append events without importing the full events module
+// (avoids a circular dependency path; the loop module imports both directly).
+function appendEventToLog(
+  repoRoot: string,
+  runsRoot: string,
+  stateFile: string,
+  type: string,
+  data: Record<string, unknown>
+): void {
+  const { appendFileSync, mkdirSync } = require("fs") as typeof import("fs");
+  const { join: pathJoin, dirname } = require("path") as typeof import("path");
+  const logPath = pathJoin(repoRoot, runsRoot, "events.jsonl");
+  mkdirSync(dirname(logPath), { recursive: true });
+  const entry = { ts: new Date().toISOString(), type, state: stateFile, ...data };
+  appendFileSync(logPath, JSON.stringify(entry) + "\n", "utf-8");
 }
