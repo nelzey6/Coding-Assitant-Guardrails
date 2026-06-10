@@ -43,7 +43,8 @@ function runCommand(command: string, cwd: string, timeoutSeconds: number): strin
 
   if (isWindows) {
     const scriptPath = join(tmpdir(), `agentic-cmd-${id}.ps1`);
-    writeFileSync(scriptPath, command, "utf-8");
+    // Append exit $LASTEXITCODE so PowerShell -File propagates the command's exit code.
+    writeFileSync(scriptPath, `${command}\nexit $LASTEXITCODE`, "utf-8");
     try {
       const result = spawnSync(
         "powershell.exe",

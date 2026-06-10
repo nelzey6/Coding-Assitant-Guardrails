@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { execFileSync } from "child_process";
 import type { AgenticState, Task } from "../state/index.js";
@@ -104,7 +104,6 @@ export function writeRepoContext(contextFile: string, opts: RepoContextOptions):
 
   const topItems: string[] = [];
   try {
-    const { readdirSync, statSync } = require("fs") as typeof import("fs");
     const entries = readdirSync(repoRoot).slice(0, 80);
     for (const e of entries) {
       try { topItems.push(statSync(join(repoRoot, e)).isDirectory() ? `${e}/` : e); } catch { /* skip */ }

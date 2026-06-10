@@ -1,0 +1,413 @@
+#!/usr/bin/env tsx
+/**
+ * End-to-end smoke test for the TypeScript agentic loop CLI.
+ * Mirrors the coverage of scope-rail-smoke, fast-verifier-guard-smoke,
+ * validation-checks-smoke, and retry-smoke — but drives `agent run`
+ * (tools/agent-loop/src/index.ts) instead of the PS1 harness.
+ *
+ * Each case spins up a throwaway git repo in $TEMP, writes a fake agent
+ * script that either passes, fails checks, or writes a verifier JSON,
+ * runs the CLI, then asserts on state + events.
+ *
+ * Run: npx tsx tests/agentic/agent-loop-ts-smoke.ts
+ * Keep temp dirs: AGENTIC_KEEP_SMOKE=1 npx tsx tests/agentic/agent-loop-ts-smoke.ts
+ */
+
+import {
+  mkdirSync, mkdtempSync, writeFileSync, readFileSync,
+  rmSync, existsSync, copyFileSync,
+} from "fs";
+import { join, resolve } from "path";
+import { tmpdir } from "os";
+import { spawnSync, execFileSync } from "child_process";
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+const REPO_ROOT = resolve(import.meta.dirname, "../..");
+const CLI = join(REPO_ROOT, "tools/agent-loop/src/index.ts");
+// On Windows, avoid tsx.cmd (which requires shell:true and breaks quoted --command args).
+// Instead invoke node directly with tsx's CLI entry point so we can use shell:false.
+const TSX_CLI_MJS = join(REPO_ROOT, "tools/agent-loop/node_modules/tsx/dist/cli.mjs");
+const IS_WIN = process.platform === "win32";
+const keep = process.env.AGENTIC_KEEP_SMOKE === "1";
+
+const POLICY_SRC = join(REPO_ROOT, "templates/agent-policy/workflow-policy.json");
+
+function tmpRepo(tag: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `agentic-ts-smoke-${tag}-`));
+  git(["init"], dir);
+  git(["config", "user.email", "agentic-smoke@example.test"], dir);
+  git(["config", "user.name", "Agentic Smoke"], dir);
+  writeFileSync(join(dir, "README.md"), "# smoke", "utf-8");
+  writeFileSync(join(dir, "AGENTS.md"), "Smoke repo rules.", "utf-8");
+  // Provide the workflow policy so loadPolicy() can resolve it.
+  const policyDir = join(dir, "templates", "agent-policy");
+  mkdirSync(policyDir, { recursive: true });
+  copyFileSync(POLICY_SRC, join(policyDir, "workflow-policy.json"));
+  return dir;
+}
+
+function git(args: string[], cwd?: string): string {
+  const r = spawnSync("git", args, { cwd, encoding: "utf-8" });
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed:\n${r.stderr}`);
+  return r.stdout.trim();
+}
+
+function writeState(dir: string, state: object): void {
+  writeFileSync(join(dir, "agentic.json"), JSON.stringify(state, null, 2), "utf-8");
+}
+
+function readState(dir: string): any {
+  return JSON.parse(readFileSync(join(dir, "agentic.json"), "utf-8"));
+}
+
+function readEvents(dir: string): any[] {
+  const p = join(dir, ".agent-runs", "events.jsonl");
+  if (!existsSync(p)) return [];
+  return readFileSync(p, "utf-8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+}
+
+function hasEvent(events: any[], type: string): boolean {
+  return events.some((e) => e.type === type);
+}
+
+// Write a JS fake-agent script. On Windows the `--command` template invokes
+// node directly (avoids shell quoting complexity with tsx).
+function writeFakeAgent(dir: string, name: string, body: string): string {
+  const p = join(dir, name);
+  writeFileSync(p, `#!/usr/bin/env node\n${body}\n`, "utf-8");
+  return p;
+}
+
+function runCLI(cwd: string, args: string[], timeout = 60_000): { status: number; stdout: string; stderr: string } {
+  // Use node + tsx/dist/cli.mjs directly (no .cmd wrapper) so we can use shell:false
+  // and pass quoted --command arguments without the shell re-parsing them.
+  const r = spawnSync(
+    process.execPath,
+    [TSX_CLI_MJS, CLI, ...args],
+    { cwd, encoding: "utf-8", timeout, shell: false, env: { ...process.env, FORCE_COLOR: "0" } }
+  );
+  return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+// Fake agents are plain .mjs (no TypeScript), run with node directly.
+// Quote both paths so Windows paths with spaces (e.g. "C:\Program Files\...") don't break.
+function fakeCommand(agentPath: string): string {
+  const nodePath = process.execPath.includes(" ") ? `"${process.execPath}"` : process.execPath;
+  const agentQ   = agentPath.includes(" ")        ? `"${agentPath}"`        : agentPath;
+  return `${nodePath} ${agentQ} {prompt}`;
+}
+
+function baseTask(overrides: object = {}): object {
+  return {
+    id: "task-001",
+    title: "Smoke task",
+    kind: "implementation",
+    workflow: "tdd",
+    status: "pending",
+    priority: 1,
+    acceptanceCriteria: ["output.txt exists"],
+    validation: [],
+    dependsOn: [],
+    failureHistory: [],
+    artifacts: [],
+    scope: [],
+    ...overrides,
+  };
+}
+
+function baseState(taskOverrides: object = {}, stateOverrides: object = {}): object {
+  return {
+    version: 1,
+    goal: "Smoke goal",
+    maxIterations: 3,
+    checks: [],
+    defaultDiscoveryWorkflow: "grill-with-docs",
+    tasks: [baseTask(taskOverrides)],
+    decisions: [],
+    assumptions: [],
+    openQuestions: [],
+    blockers: [],
+    promptPolicy: { lessons: [] },
+    ...stateOverrides,
+  };
+}
+
+function assert(condition: boolean, msg: string): void {
+  if (!condition) throw new Error(`ASSERTION FAILED: ${msg}`);
+}
+
+const results: { name: string; ok: boolean; error?: string }[] = [];
+
+function runCase(name: string, fn: () => void): void {
+  try {
+    fn();
+    results.push({ name, ok: true });
+    console.log(`  PASS  ${name}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    results.push({ name, ok: false, error: msg });
+    console.error(`  FAIL  ${name}\n        ${msg}`);
+  }
+}
+
+// ── case 1: happy path — executor writes file, verifier passes ────────────────
+
+runCase("happy path: task passes end-to-end", () => {
+  const dir = tmpRepo("happy");
+  try {
+    writeState(dir, baseState());
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { dirname } from "path";
+const promptFile = process.argv[2];
+const content = readFileSync(promptFile, "utf-8");
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  if (!m) throw new Error("no result path");
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+writeFileSync("output.txt", "done", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "verifier_finished"), "missing verifier_finished event");
+    assert(hasEvent(events, "task_passed"), "missing task_passed event");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 2: scope violation — out-of-scope file → task fails ─────────────────
+
+runCase("scope violation: out-of-scope file marks task failed", () => {
+  const dir = tmpRepo("scope");
+  try {
+    writeState(dir, baseState({ scope: ["allowed/**"] }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) throw new Error("verifier must not run after scope violation");
+mkdirSync("allowed", { recursive: true });
+writeFileSync("allowed/in.txt", "ok", "utf-8");
+writeFileSync("outside.txt", "sneaky", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    // non-zero exit expected (needs_human path)
+    const state = readState(dir);
+    assert(state.tasks[0].status !== "passed", `task must not pass after scope violation, got ${state.tasks[0].status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "scope_violation"), "missing scope_violation event");
+    const scopeEv = events.find((e) => e.type === "scope_violation");
+    assert(scopeEv?.outOfScope?.includes("outside.txt"), `expected outside.txt in outOfScope, got ${JSON.stringify(scopeEv?.outOfScope)}`);
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 3: scope clean — task passes when diff stays in scope ───────────────
+
+runCase("scope clean: in-scope diff → scope_passed event", () => {
+  const dir = tmpRepo("scope-clean");
+  try {
+    writeState(dir, baseState({ scope: ["allowed/**"] }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+mkdirSync("allowed", { recursive: true });
+writeFileSync("allowed/in.txt", "ok", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "scope_passed"), "missing scope_passed event");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 4: fast-verifier denied for high-risk task ──────────────────────────
+
+runCase("fast-verifier denied: high-risk task runs full verifier", () => {
+  const dir = tmpRepo("fvguard");
+  try {
+    writeState(dir, baseState({ kind: "implementation", scope: ["out.txt"] }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "full verifier ran", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+writeFileSync("out.txt", "ok", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge", "--fast-verifier"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+
+    const events = readEvents(dir);
+    assert(hasEvent(events, "verifier_skip_denied"), "expected verifier_skip_denied for high-risk task");
+    assert(!hasEvent(events, "verifier_skipped"), "verifier must NOT be skipped for a high-risk task");
+    assert(hasEvent(events, "verifier_finished"), "expected verifier_finished (full verifier ran)");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 5: fast-verifier allowed for low-risk task ──────────────────────────
+
+runCase("fast-verifier allowed: low-risk task skips verifier agent", () => {
+  const dir = tmpRepo("fvallow");
+  try {
+    writeState(dir, baseState({ kind: "maintenance", scope: ["out.txt"] }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync } from "fs";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) throw new Error("verifier agent must not be called for fast-verifier task");
+writeFileSync("out.txt", "ok", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge", "--fast-verifier"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+
+    const events = readEvents(dir);
+    assert(hasEvent(events, "verifier_skipped"), "expected verifier_skipped event");
+    assert(!hasEvent(events, "verifier_started"), "verifier agent must not start for fast-verifier task");
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 6: checks failure → retry → pass ────────────────────────────────────
+
+runCase("checks retry: task retries after check failure, passes on second attempt", () => {
+  const dir = tmpRepo("retry");
+  try {
+    writeState(dir, baseState({ validation: ["node -e \"if(!require('fs').existsSync('retry-output.txt'))process.exit(1)\""] }, { maxIterations: 3 }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "retry ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+// Only write output on the second attempt (attempts=2 appears in task JSON)
+if (content.includes('"attempts": 2') || content.includes('"attempts":2')) {
+  writeFileSync("retry-output.txt", "ok", "utf-8");
+}
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--max-retries", "2", "--no-merge"], 90_000);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+    assert((state.tasks[0].attempts ?? 0) >= 2, `expected >=2 attempts, got ${state.tasks[0].attempts}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "checks_failed"), "expected checks_failed event on first attempt");
+    assert(hasEvent(events, "task_passed"), "expected task_passed on second attempt");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 7: verifier fail → retry budget exhausted → needs_human ─────────────
+
+runCase("verifier fail: retry budget exhausted escalates to needs_human", () => {
+  const dir = tmpRepo("vfail");
+  try {
+    writeState(dir, baseState({}, { maxIterations: 4 }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "fail", summary: "always fail", issues: [], humanGates: [], recommendedStatus: "needs_retry", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+writeFileSync("output.txt", "done", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    // max-retries 1 means after 2 attempts (1 original + 1 retry) it escalates
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "4", "--max-retries", "1", "--no-merge"], 90_000);
+    assert(r.status !== 0, "expected non-zero exit when budget exhausted");
+    const state = readState(dir);
+    assert(state.tasks[0].status === "needs_human", `expected needs_human, got ${state.tasks[0].status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "verifier_finished"), "expected verifier_finished");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── summary ───────────────────────────────────────────────────────────────────
+
+const passed = results.filter((r) => r.ok).length;
+const failed = results.filter((r) => !r.ok).length;
+console.log(`\n${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);

@@ -1,5 +1,5 @@
 import { mkdirSync, copyFileSync, writeFileSync, readFileSync, existsSync, appendFileSync } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, dirname } from "path";
 import { execFileSync } from "child_process";
 import {
   loadState,
@@ -96,7 +96,7 @@ function writeDiffArtifacts(worktreePath: string, runDir: string): void {
 }
 
 function writeChecksLog(logPath: string, content: string): void {
-  mkdirSync(require("path").dirname(logPath), { recursive: true });
+  mkdirSync(dirname(logPath), { recursive: true });
   writeFileSync(logPath, content, "utf-8");
 }
 

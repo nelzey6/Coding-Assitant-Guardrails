@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync, existsSync } from "fs";
-import { join } from "path";
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from "fs";
+import { join, dirname } from "path";
 
 export type TaskStatus =
   | "pending"
@@ -263,8 +263,6 @@ export function mergePlannerResult(
   return state;
 }
 
-// Thin wrapper so state mutators can append events without importing the full events module
-// (avoids a circular dependency path; the loop module imports both directly).
 function appendEventToLog(
   repoRoot: string,
   runsRoot: string,
@@ -272,9 +270,7 @@ function appendEventToLog(
   type: string,
   data: Record<string, unknown>
 ): void {
-  const { appendFileSync, mkdirSync } = require("fs") as typeof import("fs");
-  const { join: pathJoin, dirname } = require("path") as typeof import("path");
-  const logPath = pathJoin(repoRoot, runsRoot, "events.jsonl");
+  const logPath = join(repoRoot, runsRoot, "events.jsonl");
   mkdirSync(dirname(logPath), { recursive: true });
   const entry = { ts: new Date().toISOString(), type, state: stateFile, ...data };
   appendFileSync(logPath, JSON.stringify(entry) + "\n", "utf-8");
