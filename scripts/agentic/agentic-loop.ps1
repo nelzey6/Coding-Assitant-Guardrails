@@ -282,6 +282,7 @@ function Normalize-StateJson($State) {
         Ensure-NoteProperty $task "dependsOn" ([object[]]@())
         Ensure-NoteProperty $task "failureHistory" ([object[]]@())
         Ensure-NoteProperty $task "artifacts" ([object[]]@())
+        Ensure-NoteProperty $task "scope" ([object[]]@())
     }
 
     return $State
@@ -809,6 +810,59 @@ function Get-TaskChecks($Task) {
     return @($taskChecks | Where-Object { ![string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
 }
 
+function Get-TaskScope($Task) {
+    if ($Task -and ($Task.PSObject.Properties.Name -contains "scope") -and $Task.scope) {
+        return @($Task.scope | Where-Object { ![string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+    }
+    return @()
+}
+
+function ConvertTo-ScopeRegex([string]$Glob) {
+    # Translate a forward-slash glob into an anchored regex.
+    # ** matches across path separators; * matches within a single segment; ? matches one non-slash char.
+    $normalized = ($Glob -replace '\\', '/').Trim()
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append('^')
+    $i = 0
+    while ($i -lt $normalized.Length) {
+        $c = $normalized[$i]
+        if ($c -eq '*') {
+            if ($i + 1 -lt $normalized.Length -and $normalized[$i + 1] -eq '*') {
+                [void]$sb.Append('.*'); $i += 2
+                if ($i -lt $normalized.Length -and $normalized[$i] -eq '/') { $i++ }  # collapse `**/`
+                continue
+            }
+            [void]$sb.Append('[^/]*'); $i++; continue
+        }
+        if ($c -eq '?') { [void]$sb.Append('[^/]'); $i++; continue }
+        [void]$sb.Append([regex]::Escape([string]$c)); $i++
+    }
+    [void]$sb.Append('$')
+    return $sb.ToString()
+}
+
+function Test-PathInScope([string]$RelativePath, [string[]]$ScopeGlobs) {
+    $normalized = ($RelativePath -replace '\\', '/').Trim()
+    foreach ($glob in $ScopeGlobs) {
+        $pattern = ConvertTo-ScopeRegex $glob
+        if ($normalized -match $pattern) { return $true }
+        # A bare directory path like "src/agentic" (no glob metacharacters) should also match
+        # files beneath it. Globs that already use * or ? are matched literally, not widened.
+        if ($glob -notmatch '[*?]') {
+            $dirPattern = ConvertTo-ScopeRegex (($glob -replace '/+$', '') + '/**')
+            if ($normalized -match $dirPattern) { return $true }
+        }
+    }
+    return $false
+}
+
+function Get-OutOfScopeFiles([string]$WorktreePath, [string[]]$ScopeGlobs) {
+    # Surface new files too, then compare the uncommitted HEAD delta against scope.
+    & git -C $WorktreePath add -N . 2>$null
+    $changed = @(& git -C $WorktreePath diff --name-only HEAD | ForEach-Object { [string]$_ } | Where-Object { ![string]::IsNullOrWhiteSpace($_) })
+    return @($changed | Where-Object { !(Test-PathInScope $_ $ScopeGlobs) })
+}
+
 function Invoke-Checks([string]$WorkingDirectory, [object[]]$ChecksToRun) {
     $log = @()
     $allMetrics = @{}
@@ -931,9 +985,11 @@ Explain why the task split, dependencies, validation commands, assumptions, and 
 Allowed verdicts: planned, needs_human, blocked.
 Allowed task statuses in planner output: pending, needs_human, blocked.
 Allowed task kinds: discovery, investigation, implementation, architecture, maintenance, handoff.
-Each task must have: id, title, kind, workflow, status, priority, acceptanceCriteria, validation, dependsOn, failureHistory, artifacts.
+Each task must have: id, title, kind, workflow, status, priority, acceptanceCriteria, validation, dependsOn, failureHistory, artifacts, scope.
 Use one workflow per task. Use dependencies for workflow sequences. Use only canonical workflows from the policy.
 Keep tasks small and independently verifiable: one logical change, one primary artifact/change area, and focused validation. Split broad goals into dependent tasks. If safe slicing is unclear or a task would need multiple unrelated changes, record the uncertainty in openQuestions or needs_human rather than creating a broad task.
+Always set `scope` to the forward-slash glob list of files the task may change (for example ["scripts/agentic/**", "tests/agentic/my-smoke.ps1"]). The harness enforces scope as a hard pre-verifier rail: files changed outside scope fail the task. Keep scope tight (5 globs or fewer) so the rail is meaningful; if a task needs broad scope it is probably too large and should be split.
+Task-size budget (enforced by the harness validator): at most 7 acceptanceCriteria, at most 5 scope globs, and implementation/architecture tasks must have at least one acceptanceCriterion. Tasks exceeding the budget are rejected; split them or record the difficulty in openQuestions/needs_human.
 
 Planner result schema:
 {
@@ -946,6 +1002,7 @@ Planner result schema:
   "tasks": [],
   "artifacts": ["path/to/grill-transcript.md"]
 }
+Each task object: { "id": "...", "title": "...", "kind": "...", "workflow": "...", "status": "pending", "priority": 1, "acceptanceCriteria": [], "validation": [], "dependsOn": [], "failureHistory": [], "artifacts": [], "scope": ["scripts/agentic/**"] }
 
 Goal: $($state.goal)
 Policy:
@@ -976,6 +1033,12 @@ function Test-PlannerResult($PlannerResult) {
         if ([string]$task.workflow -notin $allowedWorkflows) { $errors += "$id has invalid workflow: $($task.workflow)" }
         if ([string]$task.status -notin $allowedStatuses) { $errors += "$id has invalid status: $($task.status)" }
         if ($null -eq $task.priority) { $errors += "$id missing priority" }
+        # Task-complexity budget: keep tasks small enough to verify deterministically.
+        $acCount = @($task.acceptanceCriteria).Count
+        if ($acCount -gt 7) { $errors += "$id has too many acceptanceCriteria ($acCount > 7); split the task" }
+        $scopeCount = @($task.scope | Where-Object { ![string]::IsNullOrWhiteSpace([string]$_) }).Count
+        if ($scopeCount -gt 5) { $errors += "$id has too many scope globs ($scopeCount > 5); split the task or tighten scope" }
+        if ([string]$task.kind -in @("implementation", "architecture") -and $acCount -eq 0) { $errors += "$id is an $($task.kind) task with no acceptanceCriteria; add criteria or reclassify" }
     }
     foreach ($task in @($PlannerResult.tasks)) {
         foreach ($dep in @($task.dependsOn)) {
@@ -1040,6 +1103,7 @@ Hard rules:
 - For implementation/architecture/maintenance tasks, prefer tracked repo changes plus validation unless the task is explicitly artifact-only.
 - When you add a focused smoke test/check that proves this task, use or propose it as a task.validation command (for example `pwsh -File tests/path/focused-smoke.ps1`) so the harness runs it before verification.
 - Use `pwsh -File` in harness and smoke-test command examples. Mention `powershell.exe` only as a legacy Windows PowerShell compatibility fallback when explicitly needed.
+- If the task JSON has a non-empty `scope`, change only files matching those globs. The harness enforces this as a hard pre-verifier rail: files changed outside scope fail the task. If you must touch a file outside scope, stop and record it in the handover instead of editing it.
 
 Iteration: $Iteration
 State file: $stateFile
@@ -1314,6 +1378,25 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
         }
 
         Write-DiffArtifacts $worktreePath $runDirAbs
+
+        # Diff-scope rail: when the task declares scope, enforce it deterministically before
+        # the verifier. Out-of-scope files are a retryable failure with the paths fed to retry.
+        $taskScope = Get-TaskScope $task
+        if ($taskScope.Count -gt 0) {
+            $outOfScope = @(Get-OutOfScopeFiles $worktreePath $taskScope)
+            if ($outOfScope.Count -gt 0) {
+                $scopeReason = "Out-of-scope changes for $taskId (declared scope: $($taskScope -join ', ')): $($outOfScope -join ', ')"
+                $failureStatus = Get-FailureStatusForTask $task "checks"
+                Write-AgenticEvent "scope_violation" @{ task = $taskId; status = $failureStatus; outOfScope = @($outOfScope); scope = @($taskScope) }
+                Write-ChecksLog $checksLog "$checkOutput`n`nSCOPE VIOLATION: $scopeReason"
+                Set-TaskStatus $taskId $failureStatus ([pscustomobject]@{ at = (Get-Date -Format o); phase = "scope"; reason = $scopeReason; resultFile = $verifierResult })
+                Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
+                Complete-RetryableFailure $taskId $failureStatus "Scope violation for $taskId; marked $failureStatus. Worktree retained at $worktreePath. $scopeReason"
+                continue
+            }
+            Write-AgenticEvent "scope_passed" @{ task = $taskId; scope = @($taskScope) }
+        }
+
         if ($fastVerifier) {
             $result = [pscustomobject]@{ verdict = "pass"; summary = "fast-verifier: checks passed; separate verifier skipped by explicit operator flag"; issues = @(); humanGates = @(); recommendedStatus = "passed"; artifacts = @() }
             $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $verifierResult -Encoding UTF8
