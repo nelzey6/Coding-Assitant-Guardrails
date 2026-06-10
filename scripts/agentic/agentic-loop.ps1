@@ -102,28 +102,41 @@ function Invoke-ShellCommandCapture([string]$Command, [string]$WorkingDirectory 
         } finally { Set-Location $old }
     }
 
+    # Write the command body to a temp script and invoke the interpreter with -File / a script
+    # path argument. The arbitrary command text never reaches the process argument parser, so no
+    # hand-rolled quote-escaping of $Command is needed (the old `"`->`\"` approach was fragile).
+    # The only interpolated argument is the temp path we generate (a guid filename with no shell
+    # metacharacters), so quoting it is safe.
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    if ($IsWindows -or $PSVersionTable.PSEdition -eq "Desktop") {
-        $psi.FileName = "powershell.exe"
-        $escaped = $Command.Replace('"', '\"')
-        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$escaped`""
-    } else {
-        $psi.FileName = "sh"
-        $escaped = $Command.Replace('"', '\"')
-        $psi.Arguments = "-lc `"$escaped`""
+    $isWindowsHost = ($IsWindows -or $PSVersionTable.PSEdition -eq "Desktop")
+    $cmdFile = $null
+    try {
+        if ($isWindowsHost) {
+            $cmdFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "agentic-cmd-" + [guid]::NewGuid().ToString("n") + ".ps1")
+            Set-Content -LiteralPath $cmdFile -Value $Command -Encoding UTF8
+            $psi.FileName = "powershell.exe"
+            $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$cmdFile`""
+        } else {
+            $cmdFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "agentic-cmd-" + [guid]::NewGuid().ToString("n") + ".sh")
+            Set-Content -LiteralPath $cmdFile -Value $Command -Encoding UTF8
+            $psi.FileName = "sh"
+            $psi.Arguments = "`"$cmdFile`""
+        }
+        if (![string]::IsNullOrWhiteSpace($WorkingDirectory)) { $psi.WorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path }
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $process = [System.Diagnostics.Process]::Start($psi)
+        if (!$process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill($true) } catch { try { $process.Kill() } catch {} }
+            throw "Command timed out after $TimeoutSeconds seconds: $Command"
+        }
+        $text = ($process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()).TrimEnd()
+        if ($process.ExitCode -ne 0) { throw "Command failed with code $($process.ExitCode)`: $Command`n$text" }
+        return $text
+    } finally {
+        if ($cmdFile -and (Test-Path -LiteralPath $cmdFile)) { Remove-Item -LiteralPath $cmdFile -Force -ErrorAction SilentlyContinue }
     }
-    if (![string]::IsNullOrWhiteSpace($WorkingDirectory)) { $psi.WorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path }
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $process = [System.Diagnostics.Process]::Start($psi)
-    if (!$process.WaitForExit($TimeoutSeconds * 1000)) {
-        try { $process.Kill($true) } catch { try { $process.Kill() } catch {} }
-        throw "Command timed out after $TimeoutSeconds seconds: $Command"
-    }
-    $text = ($process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()).TrimEnd()
-    if ($process.ExitCode -ne 0) { throw "Command failed with code $($process.ExitCode)`: $Command`n$text" }
-    return $text
 }
 
 function ConvertTo-SafeSlug([string]$Value) {
