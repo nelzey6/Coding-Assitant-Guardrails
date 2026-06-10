@@ -45,6 +45,10 @@ Options:
                              normal next-task priority/dependency selection; validates retry budget
   --max-retries <n>          Max automatic retries per task after the first attempt (default from policy, or 1)
   --merge-mode <mode>        Merge mode for pass/accept: ff-only | no-ff | cherry-pick | apply (default: ff-only)
+  --max-runtime-seconds <n>  Global wall-clock ceiling for the whole run; stops cleanly with a
+                             budget_exhausted event and needs_human handoff when exceeded (0 = off)
+  --max-agent-calls <n>      Global ceiling on planner+executor+verifier agent invocations; stops
+                             cleanly when exceeded (0 = off). Honest proxy where token counts are unobservable.
 
 Review flows:
   Default behavior still merges passing task branches into the active branch after verifier pass.
@@ -159,6 +163,8 @@ $checkTimeoutSeconds = 0
 $promptBudget = "normal"
 $maxRetries = ""
 $mergeMode = "ff-only"
+$maxRuntimeSeconds = 0
+$maxAgentCalls = 0
 $checks = @()
 if ($env:AGENTIC_CHECKS) { $checks += $env:AGENTIC_CHECKS }
 
@@ -207,6 +213,8 @@ for ($i = 0; $i -lt $cliArgs.Count; $i++) {
         "--retry" { $retryTaskId = Read-OptionValue $cliArgs $i "--retry"; $i++; continue }
         "--max-retries" { $maxRetries = Read-OptionValue $cliArgs $i "--max-retries"; $i++; continue }
         "--merge-mode" { $mergeMode = Read-OptionValue $cliArgs $i "--merge-mode"; $i++; continue }
+        "--max-runtime-seconds" { $maxRuntimeSeconds = [int](Read-OptionValue $cliArgs $i "--max-runtime-seconds"); $i++; continue }
+        "--max-agent-calls" { $maxAgentCalls = [int](Read-OptionValue $cliArgs $i "--max-agent-calls"); $i++; continue }
         { $_ -in @("-h", "--help") } { Show-Usage; exit 0 }
         default { Write-Error "Unknown option: $($cliArgs[$i])"; Show-Usage; exit 2 }
     }
@@ -319,11 +327,28 @@ if (!$doctorOnly -and [string]::IsNullOrWhiteSpace($acceptTaskId)) {
 }
 $eventLogPath = Join-Path $runsRoot "events.jsonl"
 
+# Global circuit-breaker state. Wall-clock + agent-call count are honest proxies for cost
+# where Bedrock token counts are not observable from the harness.
+$script:runStartTime = Get-Date
+$script:agentCallCount = 0
+
 function Write-AgenticEvent([string]$Type, [hashtable]$Data = @{}) {
     $entry = [ordered]@{ ts = (Get-Date -Format o); type = $Type; state = $stateFile }
     foreach ($key in $Data.Keys) { $entry[$key] = $Data[$key] }
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $eventLogPath) | Out-Null
     Add-Content -LiteralPath $eventLogPath -Value (ConvertTo-Json -InputObject $entry -Depth 20 -Compress) -Encoding UTF8
+}
+
+function Get-CircuitBreakerTrip {
+    # Returns a reason string when a global budget is exceeded, else $null.
+    if ($maxRuntimeSeconds -gt 0) {
+        $elapsed = ((Get-Date) - $script:runStartTime).TotalSeconds
+        if ($elapsed -ge $maxRuntimeSeconds) { return "runtime budget exhausted ($([int]$elapsed)s >= ${maxRuntimeSeconds}s)" }
+    }
+    if ($maxAgentCalls -gt 0 -and $script:agentCallCount -ge $maxAgentCalls) {
+        return "agent-call budget exhausted ($($script:agentCallCount) >= $maxAgentCalls calls)"
+    }
+    return $null
 }
 
 function Get-RecentAgenticHistory([int]$Limit = 12) {
@@ -761,6 +786,7 @@ if (![string]::IsNullOrWhiteSpace($acceptTaskId)) {
 }
 
 function Invoke-Agent([string]$PromptFile, [string]$Template, [string]$WorkingDirectory = "") {
+    $script:agentCallCount++
     if (![string]::IsNullOrWhiteSpace($Template)) {
         $command = $Template.Replace("{prompt}", (Resolve-Path -LiteralPath $PromptFile).Path)
         if ($agentTimeoutSeconds -gt 0) { Write-Output (Invoke-ShellCommandCapture $command $WorkingDirectory $agentTimeoutSeconds) }
@@ -1314,6 +1340,17 @@ if ($planOnly) {
 }
 
 for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
+    $breakerTrip = Get-CircuitBreakerTrip
+    if ($breakerTrip) {
+        Write-AgenticEvent "budget_exhausted" @{ reason = $breakerTrip; agentCalls = $script:agentCallCount; iteration = $iteration }
+        $state = Read-StateJson
+        $pendingTask = Get-NextTask $state
+        if ($pendingTask) {
+            Set-TaskStatus ([string]$pendingTask.id) "needs_human" ([pscustomobject]@{ at = (Get-Date -Format o); phase = "budget"; reason = $breakerTrip; resultFile = "" })
+        }
+        Write-Error "Circuit breaker tripped before iteration $iteration`: $breakerTrip. Stopping cleanly; re-run with a higher budget to continue."
+        exit 1
+    }
     $state = Read-StateJson
     $task = Get-NextTask $state
     if ($null -eq $task) {
