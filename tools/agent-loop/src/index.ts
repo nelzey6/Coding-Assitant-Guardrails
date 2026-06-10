@@ -15,17 +15,28 @@ import {
   printWhyStuckResult,
   printDoctorResult,
   printResetResult,
+  printAcceptResult,
   type DoctorIssue,
   type ResetPlan,
+  type AcceptPlan,
 } from "./reporting/index.js";
-import { loadState, writeState, getTasks } from "./state/index.js";
+import { loadState, writeState, getTasks, clearTaskReviewState } from "./state/index.js";
 import { loadEvents, appendEvent } from "./events/index.js";
 import {
   safeSlug,
   gitBranchExists as toolsGitBranchExists,
   worktreeExists,
   removeWorktree,
+  removeWorktreeClean,
   deleteBranch,
+  isWorkingTreeClean,
+  workingTreeStatusShort,
+  revParse,
+  integrateBranch,
+  mergeModeLabel,
+  MERGE_MODES,
+  GitError,
+  type MergeMode,
 } from "./tools/index.js";
 
 function detectRepoRoot(): string {
@@ -248,6 +259,110 @@ program
       applied: apply,
     };
     printResetResult(plan, { json: !!opts.json });
+  });
+
+// ── accept ────────────────────────────────────────────────────────────────────
+
+program
+  .command("accept <id>")
+  .description(
+    "Integrate a passed task's review branch into the current branch, then clean up. Dry-run by default."
+  )
+  .option("--repo <path>", "Path to repo root")
+  .option("--runs-root <path>", "Path to runs/event log root (default: .agent-runs)")
+  .option("--worktree-root <path>", "Worktree root (default: .worktrees)")
+  .option("--merge-mode <mode>", "ff-only | no-ff | cherry-pick | apply (default: ff-only)", "ff-only")
+  .option("--allow-dirty", "Proceed even if the working tree is dirty")
+  .option("--apply", "Actually execute the accept (default is dry-run)")
+  .option("--json", "Output as JSON")
+  .action((id, opts) => {
+    const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
+    const runsRoot = opts.runsRoot ?? ".agent-runs";
+    const worktreeRoot = opts.worktreeRoot ?? ".worktrees";
+    const apply = !!opts.apply;
+    const mergeMode = opts.mergeMode as MergeMode;
+
+    if (!MERGE_MODES.includes(mergeMode)) {
+      console.error(`Invalid merge mode '${mergeMode}'. Expected one of: ${MERGE_MODES.join(", ")}`);
+      process.exit(2);
+    }
+
+    const state = loadState(repoRoot);
+    if (!state) { console.error("No agentic.json found."); process.exit(1); }
+
+    const task = getTasks(state).find((t) => t.id === id);
+    if (!task) { console.error(`Cannot accept '${id}': task not found in agentic.json.`); process.exit(1); }
+    if (task.status !== "passed") {
+      console.error(`Cannot accept '${id}': task status is '${task.status}', expected 'passed'.`);
+      process.exit(1);
+    }
+
+    if (!opts.allowDirty && !isWorkingTreeClean(repoRoot)) {
+      console.error(`Cannot accept '${id}': working tree is dirty. Commit/stash first, or pass --allow-dirty.`);
+      console.error(workingTreeStatusShort(repoRoot));
+      process.exit(1);
+    }
+
+    const safeId = safeSlug(id);
+    const branch = task.reviewBranch || `agentic/${safeId}`;
+    const worktree = task.reviewWorktree
+      ? resolve(repoRoot, task.reviewWorktree)
+      : join(repoRoot, worktreeRoot, safeId);
+
+    if (!toolsGitBranchExists(branch, repoRoot)) {
+      console.error(`Cannot accept '${id}': branch '${branch}' was not found.`);
+      process.exit(1);
+    }
+
+    const alreadyIntegrated = revParse(branch, repoRoot) === revParse("HEAD", repoRoot);
+    const willCleanup = mergeMode !== "apply";
+
+    const plan: AcceptPlan = {
+      taskId: id,
+      branch,
+      worktree,
+      mergeMode,
+      mergeLabel: mergeModeLabel(mergeMode, branch),
+      alreadyIntegrated,
+      willCleanup,
+      applied: apply,
+    };
+
+    if (apply) {
+      let integrated = false;
+      if (!alreadyIntegrated) {
+        try {
+          integrateBranch(mergeMode, branch, id, repoRoot);
+          integrated = true;
+        } catch (err) {
+          const hint =
+            mergeMode === "apply"
+              ? " The apply/no-commit mode may leave conflict state; resolve it or run 'git cherry-pick --abort' before retrying."
+              : "";
+          const msg = err instanceof GitError ? err.message : String(err);
+          console.error(`Accept failed running '${plan.mergeLabel}'.${hint}\nWorktree '${worktree}' and branch '${branch}' left intact.\n${msg}`);
+          process.exit(1);
+        }
+      }
+      plan.integrated = integrated;
+
+      if (willCleanup) {
+        try {
+          if (worktreeExists(worktree)) removeWorktreeClean(worktree, repoRoot);
+          deleteBranch(branch, repoRoot);
+          clearTaskReviewState(state, id, new Date().toISOString());
+          writeState(repoRoot, state);
+        } catch (err) {
+          const msg = err instanceof GitError ? err.message : String(err);
+          console.error(`Accept integrated '${id}' but cleanup failed. Inspect worktree '${worktree}' and branch '${branch}'.\n${msg}`);
+          process.exit(1);
+        }
+      }
+
+      appendEvent(repoRoot, "task_accepted", { task: id, branch, mergeMode, cleanup: willCleanup }, runsRoot);
+    }
+
+    printAcceptResult(plan, { json: !!opts.json });
   });
 
 program.parseAsync(process.argv).catch((err) => {

@@ -397,6 +397,56 @@ export function printResetResult(plan: ResetPlan, opts: ReportOptions): void {
   }
 }
 
+// ── Accept reporting ──────────────────────────────────────────────────────────
+
+export interface AcceptPlan {
+  taskId: string;
+  branch: string;
+  worktree: string;
+  mergeMode: string;
+  mergeLabel: string;
+  alreadyIntegrated: boolean; // branch HEAD == current HEAD, nothing to merge
+  willCleanup: boolean; // false for apply mode (leaves worktree/branch intact)
+  applied: boolean;
+  integrated?: boolean; // set on apply: whether a merge/cherry-pick actually ran
+}
+
+export function printAcceptResult(plan: AcceptPlan, opts: ReportOptions): void {
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(plan, null, 2) + "\n");
+    return;
+  }
+
+  const verb = plan.applied ? "Accepted" : "Would accept";
+  console.log(`${verb} task: ${plan.taskId}  (mode: ${plan.mergeMode})`);
+  console.log("");
+
+  if (plan.alreadyIntegrated) {
+    console.log(`  • no tracked branch changes — ${plan.branch} is already at HEAD`);
+  } else {
+    console.log(`  • integrate: ${plan.mergeLabel}`);
+  }
+
+  if (plan.willCleanup) {
+    console.log(`  ${plan.applied ? "✓" : "•"} remove worktree: ${plan.worktree}`);
+    console.log(`  ${plan.applied ? "✓" : "•"} delete branch:   ${plan.branch}`);
+    console.log(`  ${plan.applied ? "✓" : "•"} stamp acceptedAt, clear review state`);
+  } else {
+    console.log(`  • apply mode: changes staged with no commit; worktree and branch left intact for review`);
+  }
+  console.log("");
+
+  if (plan.applied) {
+    if (plan.mergeMode === "apply") {
+      console.log(`Applied '${plan.taskId}' without committing. Inspect staged/unstaged changes, then remove the worktree/branch when done.`);
+    } else {
+      console.log(`Done. '${plan.taskId}' integrated and cleaned up.`);
+    }
+  } else {
+    console.log("Dry run — nothing changed. Re-run with --apply to execute.");
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function pad(s: string, len: number): string {

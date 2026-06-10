@@ -30,6 +30,7 @@ export interface Task {
   failureHistory?: FailureRecord[];
   reviewBranch?: string;
   reviewWorktree?: string;
+  acceptedAt?: string;
   lastRunDir?: string;
   attempts?: number;
 }
@@ -112,4 +113,16 @@ export function getBlockedDependencySummary(state: AgenticState): string {
 export function getTaskAttempts(task: Task): number {
   if (typeof task.attempts === "number") return task.attempts;
   return task.failureHistory?.length ?? 0;
+}
+
+// Mutates the matching task in place: clears review branch/worktree pointers and
+// stamps acceptedAt. Mirrors the PS1 Clear-TaskReviewState. Caller writes state.
+export function clearTaskReviewState(state: AgenticState, taskId: string, acceptedAt: string): void {
+  for (const task of getTasks(state)) {
+    if (task.id === taskId) {
+      task.reviewBranch = "";
+      task.reviewWorktree = "";
+      task.acceptedAt = acceptedAt;
+    }
+  }
 }
