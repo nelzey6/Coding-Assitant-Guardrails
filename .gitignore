@@ -3,3 +3,7 @@
 agentic.json
 .vscode/settings.json
 .claude/settings.local.json
+# adrs/ intentionally not ignored — ADRs are committed
+tools/agent-loop/node_modules/
+tools/agent-loop/dist/
+plan.md

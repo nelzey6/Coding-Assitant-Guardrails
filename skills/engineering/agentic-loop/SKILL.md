@@ -122,6 +122,16 @@ or with another CLI:
 pwsh -File scripts/agentic/agentic-loop.ps1 --tool custom --command 'my-agent run --prompt-file {prompt}'
 ```
 
+### Pre-flight validation
+
+Before invoking the harness, run the TS CLI pre-flight check:
+
+```bash
+cd tools/agent-loop && npx tsx src/index.ts validate
+```
+
+If this exits non-zero, stop and report the violations before running the PS1. The validator checks that all promotable skills (`engineering/`, `productivity/`, `misc/`) are registered in `.claude-plugin/plugin.json` and linked in both the top-level and bucket `README.md` files, and that excluded skills (`personal/`, `in-progress/`, `deprecated/`) are absent from those surfaces.
+
 Do not start a multi-iteration autonomous harness unless the user explicitly asks to run it. If the harness is unavailable, use this skill to prepare or update `agentic.json` and report the intended harness command.
 
 ## Worktree execution

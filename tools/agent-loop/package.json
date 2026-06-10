@@ -1,0 +1,21 @@
+{
+  "name": "@coding-assistant-guardrails/agent-loop",
+  "version": "0.1.0",
+  "description": "Deterministic pre-flight CLI for the agentic loop: validate repo consistency and scaffold plans.",
+  "type": "module",
+  "scripts": {
+    "agent": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "marked": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
