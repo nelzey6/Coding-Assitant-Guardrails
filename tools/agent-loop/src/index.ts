@@ -23,15 +23,6 @@ import {
 import { loadState, writeState, getTasks, clearTaskReviewState } from "./state/index.js";
 import { loadEvents, appendEvent } from "./events/index.js";
 import {
-  getTaskScope,
-  testPathInScope,
-  getOutOfScopeFiles,
-  testFastVerifierAllowed,
-  testTaskIsHighRisk,
-  convertToScopeRegex,
-} from "./scope/index.js";
-import { parseMetricLines, formatMetricsForPrompt, invokeChecks } from "./checks/index.js";
-import {
   safeSlug,
   gitBranchExists as toolsGitBranchExists,
   worktreeExists,

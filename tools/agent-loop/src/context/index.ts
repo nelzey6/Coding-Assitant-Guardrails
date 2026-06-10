@@ -26,11 +26,13 @@ export interface AgenticState {
   goal?: string;
   phase?: string;
   maxIterations?: number;
+  checks?: string[];
   tasks?: AgenticTask[];
   decisions?: string[];
   assumptions?: string[];
   openQuestions?: string[];
   blockers?: string[];
+  promptPolicy?: { lessons?: string[] };
 }
 
 export interface AgenticTask {
