@@ -12,7 +12,7 @@ try {
     git -C $tmp config user.name "Agentic Smoke"
     Set-Content -Path (Join-Path $tmp "README.md") -Value "# Smoke" -Encoding UTF8
     @'
-{"version":1,"goal":"controls smoke","phase":"execution","maxIterations":1,"checks":["test -f smoke-output.txt"],"tasks":[{"id":"task-001","title":"Create smoke output","kind":"implementation","workflow":"tdd","status":"pending","priority":1,"acceptanceCriteria":["smoke-output.txt exists"],"validation":[],"dependsOn":[],"failureHistory":[]}],"decisions":[],"assumptions":[],"openQuestions":[],"blockers":[],"promptPolicy":{"lessons":[]}}
+{"version":1,"goal":"controls smoke","phase":"execution","maxIterations":1,"checks":["test -f smoke-output.txt"],"tasks":[{"id":"task-001","title":"Create smoke output","kind":"maintenance","workflow":"tdd","status":"pending","priority":1,"acceptanceCriteria":["smoke-output.txt exists"],"validation":[],"dependsOn":[],"failureHistory":[],"scope":["smoke-output.txt"]}],"decisions":[],"assumptions":[],"openQuestions":[],"blockers":[],"promptPolicy":{"lessons":[]}}
 '@ | Set-Content -Path (Join-Path $tmp "agentic.json") -Encoding UTF8
     $fake = Join-Path $tmp "fake-agent.ps1"
     @'

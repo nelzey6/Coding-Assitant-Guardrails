@@ -32,7 +32,9 @@ Options:
   --summary                  Print a compact human checkpoint summary and exit; dirty-tree safe
   --doctor                   Diagnose stale review metadata and missing branches/worktrees without mutating state
   --reset-task <task-id>     Remove a task worktree/branch and mark it needs_retry for a clean rerun
-  --fast-verifier            Skip the verifier agent after checks pass; opt-in for low-risk tasks only
+  --fast-verifier            Skip the verifier agent after checks pass; honored only for low-risk
+                             tasks (kind maintenance/discovery/investigation with a declared scope).
+                             High-risk tasks force the full verifier and record verifier_skip_denied.
   --no-finalize-docs         Skip the default final PROJECT.md/CONTEXT.md refresh after all tasks pass
   --agent-timeout-seconds <n>   Timeout for executor/verifier/finalizer agent commands (custom/template commands only)
   --check-timeout-seconds <n>   Timeout for each validation/check command
@@ -817,6 +819,20 @@ function Get-TaskScope($Task) {
     return @()
 }
 
+function Test-FastVerifierAllowed($Task) {
+    # Fast-verifier (skip the separate verifier agent) is permitted only for low-risk tasks:
+    # the task must be a non-implementation kind AND declare a scope, so item 1's rail is active.
+    # Returns @{ allowed = [bool]; reason = "..." }.
+    $kind = [string]$Task.kind
+    if ($kind -notin @("maintenance", "discovery", "investigation")) {
+        return @{ allowed = $false; reason = "kind '$kind' is not low-risk (only maintenance/discovery/investigation may skip the verifier)" }
+    }
+    if ((Get-TaskScope $Task).Count -eq 0) {
+        return @{ allowed = $false; reason = "task declares no scope, so the diff-scope rail cannot bound the change" }
+    }
+    return @{ allowed = $true; reason = "low-risk kind with declared scope" }
+}
+
 function ConvertTo-ScopeRegex([string]$Glob) {
     # Translate a forward-slash glob into an anchored regex.
     # ** matches across path separators; * matches within a single segment; ? matches one non-slash char.
@@ -1397,8 +1413,13 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
             Write-AgenticEvent "scope_passed" @{ task = $taskId; scope = @($taskScope) }
         }
 
-        if ($fastVerifier) {
-            $result = [pscustomobject]@{ verdict = "pass"; summary = "fast-verifier: checks passed; separate verifier skipped by explicit operator flag"; issues = @(); humanGates = @(); recommendedStatus = "passed"; artifacts = @() }
+        $fastVerifierGate = if ($fastVerifier) { Test-FastVerifierAllowed $task } else { @{ allowed = $false; reason = "fast-verifier not requested" } }
+        if ($fastVerifier -and !$fastVerifierGate.allowed) {
+            Write-AgenticEvent "verifier_skip_denied" @{ task = $taskId; reason = $fastVerifierGate.reason }
+            Write-Host "fast-verifier denied for $taskId; running full verifier: $($fastVerifierGate.reason)"
+        }
+        if ($fastVerifier -and $fastVerifierGate.allowed) {
+            $result = [pscustomobject]@{ verdict = "pass"; summary = "fast-verifier: checks passed; separate verifier skipped (low-risk task: $($fastVerifierGate.reason))"; issues = @(); humanGates = @(); recommendedStatus = "passed"; artifacts = @() }
             $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $verifierResult -Encoding UTF8
             Set-Content -LiteralPath $verifierLog -Value "fast-verifier: skipped separate verifier after checks passed." -Encoding UTF8
             Write-AgenticEvent "verifier_skipped" @{ task = $taskId; resultFile = $verifierResult; log = $verifierLog; reason = "fast-verifier" }
