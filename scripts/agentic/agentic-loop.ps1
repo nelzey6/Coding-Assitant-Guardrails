@@ -49,6 +49,9 @@ Options:
                              budget_exhausted event and needs_human handoff when exceeded (0 = off)
   --max-agent-calls <n>      Global ceiling on planner+executor+verifier agent invocations; stops
                              cleanly when exceeded (0 = off). Honest proxy where token counts are unobservable.
+  --verifier-votes <n>       Number of independent verifier votes (default 1; auto-raised to 3 for
+                             high-risk tasks). High-risk = implementation/architecture kind, or a
+                             scope matching a human-gate path. Majority pass is required to pass.
 
 Review flows:
   Default behavior still merges passing task branches into the active branch after verifier pass.
@@ -178,6 +181,7 @@ $maxRetries = ""
 $mergeMode = "ff-only"
 $maxRuntimeSeconds = 0
 $maxAgentCalls = 0
+$verifierVotes = 0
 $checks = @()
 if ($env:AGENTIC_CHECKS) { $checks += $env:AGENTIC_CHECKS }
 
@@ -228,6 +232,7 @@ for ($i = 0; $i -lt $cliArgs.Count; $i++) {
         "--merge-mode" { $mergeMode = Read-OptionValue $cliArgs $i "--merge-mode"; $i++; continue }
         "--max-runtime-seconds" { $maxRuntimeSeconds = [int](Read-OptionValue $cliArgs $i "--max-runtime-seconds"); $i++; continue }
         "--max-agent-calls" { $maxAgentCalls = [int](Read-OptionValue $cliArgs $i "--max-agent-calls"); $i++; continue }
+        "--verifier-votes" { $verifierVotes = [int](Read-OptionValue $cliArgs $i "--verifier-votes"); $i++; continue }
         { $_ -in @("-h", "--help") } { Show-Usage; exit 0 }
         default { Write-Error "Unknown option: $($cliArgs[$i])"; Show-Usage; exit 2 }
     }
@@ -872,6 +877,39 @@ function Test-FastVerifierAllowed($Task) {
     return @{ allowed = $true; reason = "low-risk kind with declared scope" }
 }
 
+function Get-HumanGatePathGlobs {
+    # Path patterns whose presence in a task's scope marks the task high-risk for verification.
+    # Complements (does not replace) the prose humanGates the LLM verifier still evaluates.
+    if ($policy -and ($policy.PSObject.Properties.Name -contains "humanGatePaths") -and $policy.humanGatePaths) {
+        return @($policy.humanGatePaths | ForEach-Object { [string]$_ })
+    }
+    return @("**/migrations/**", "**/auth/**", "**/billing/**", "**/payment*/**", "**/*.sql")
+}
+
+function Test-TaskIsHighRisk($Task) {
+    # High-risk requires a declared scope: without it the adversarial vote has nothing to bound
+    # the change against, and legacy/scopeless tasks keep the original single-verifier behavior.
+    $scope = Get-TaskScope $Task
+    if ($scope.Count -eq 0) { return $false }
+    if ([string]$Task.kind -in @("implementation", "architecture")) { return $true }
+    $gateGlobs = Get-HumanGatePathGlobs
+    foreach ($scopeGlob in $scope) {
+        foreach ($gate in $gateGlobs) {
+            # A scope glob is risky if it could touch a gated path. Compare on the literal prefix.
+            if (Test-PathInScope ($scopeGlob -replace '[*?].*$', '') $gateGlobs) { return $true }
+            if (Test-PathInScope ($gate -replace '[*?].*$', '') @($scopeGlob)) { return $true }
+        }
+    }
+    return $false
+}
+
+function Resolve-VerifierVotes($Task) {
+    # Explicit operator override wins; otherwise high-risk tasks default to 3 votes, others to 1.
+    if ($verifierVotes -gt 0) { return $verifierVotes }
+    if (Test-TaskIsHighRisk $Task) { return 3 }
+    return 1
+}
+
 function ConvertTo-ScopeRegex([string]$Glob) {
     # Translate a forward-slash glob into an anchored regex.
     # ** matches across path separators; * matches within a single segment; ? matches one non-slash char.
@@ -1244,7 +1282,7 @@ function Complete-AgenticRun {
     Write-Output "<promise>COMPLETE</promise>"
 }
 
-function New-VerifierPrompt($Task, [string]$WorktreePath, [string]$CheckOutput, [string]$ResultFile, [string]$PromptFile) {
+function New-VerifierPrompt($Task, [string]$WorktreePath, [string]$CheckOutput, [string]$ResultFile, [string]$PromptFile, [bool]$Adversarial = $false) {
     $taskJson = $Task | ConvertTo-Json -Depth 20
     $limits = Get-PromptBudgetLimits
     $diffStat = (& git -C $WorktreePath diff --stat HEAD) -join "`n"
@@ -1256,9 +1294,17 @@ function New-VerifierPrompt($Task, [string]$WorktreePath, [string]$CheckOutput, 
     $checkOutputForPrompt = Limit-TextForPrompt $CheckOutput ([int]$limits.CheckBytes) 80
     $gates = if ($policy -and $policy.humanGates) { ($policy.humanGates | ConvertTo-Json -Depth 10) } else { "[]" }
     $recentHistory = Get-RecentAgenticHistory ([int]$limits.EventLimit)
+    $adversarialBlock = if ($Adversarial) { @"
+This task is high-risk and you are one of several independent adversarial reviewers.
+Your job is to REFUTE the change: actively look for the reason it is wrong, incomplete, or unsafe.
+Default to fail or needs_human when you cannot positively confirm the change is correct and in scope.
+Only return pass if, after genuinely trying to break it, you find no defensible objection.
+
+"@ } else { "" }
     $content = @"
 You are the verifier for one agentic task.
 
+$adversarialBlock
 Review the task, acceptance criteria, workflow, git diff, checks, and human gates. Write JSON only to this path: $ResultFile
 
 Allowed verdicts: pass, fail, needs_human.
@@ -1474,12 +1520,50 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
             Set-Content -LiteralPath $verifierLog -Value "fast-verifier: skipped separate verifier after checks passed." -Encoding UTF8
             Write-AgenticEvent "verifier_skipped" @{ task = $taskId; resultFile = $verifierResult; log = $verifierLog; reason = "fast-verifier" }
         } else {
-            New-VerifierPrompt $task $worktreePath $checkOutput $verifierResultForPrompt $verifierPrompt
             $verifierTemplate = if (![string]::IsNullOrWhiteSpace($verifierCommandTemplate)) { $verifierCommandTemplate } else { $commandTemplate }
-            Write-AgenticEvent "verifier_started" @{ task = $taskId; prompt = $verifierPrompt; resultFile = $verifierResult; log = $verifierLog }
-            Invoke-AgentWithLog $verifierPrompt $verifierTemplate $worktreePath $verifierLog
-            if (!(Test-Path -LiteralPath $verifierResult)) { throw "Verifier did not write $verifierResult" }
-            $result = Get-Content -LiteralPath $verifierResult -Raw | ConvertFrom-Json
+            $votes = Resolve-VerifierVotes $task
+            $adversarial = $votes -gt 1
+            if ($votes -le 1) {
+                # Single verifier: keep the canonical prompt/result/log paths unchanged.
+                New-VerifierPrompt $task $worktreePath $checkOutput $verifierResultForPrompt $verifierPrompt $false
+                Write-AgenticEvent "verifier_started" @{ task = $taskId; prompt = $verifierPrompt; resultFile = $verifierResult; log = $verifierLog; votes = 1 }
+                Invoke-AgentWithLog $verifierPrompt $verifierTemplate $worktreePath $verifierLog
+                if (!(Test-Path -LiteralPath $verifierResult)) { throw "Verifier did not write $verifierResult" }
+                $result = Get-Content -LiteralPath $verifierResult -Raw | ConvertFrom-Json
+            } else {
+                # Adversarial multi-vote: N independent refute-first verifiers; majority pass required.
+                Write-AgenticEvent "verifier_votes_started" @{ task = $taskId; votes = $votes; adversarial = $true }
+                $voteResults = @()
+                for ($v = 1; $v -le $votes; $v++) {
+                    $vPrompt = Join-Path $runDirAbs "verifier-vote-$v.md"
+                    $vResult = Join-Path $runDirAbs "verifier-vote-$v.json"
+                    $vLog = Join-Path $runDirAbs "verifier-vote-$v.log"
+                    New-VerifierPrompt $task $worktreePath $checkOutput $vResult $vPrompt $adversarial
+                    Write-AgenticEvent "verifier_started" @{ task = $taskId; prompt = $vPrompt; resultFile = $vResult; log = $vLog; vote = $v; votes = $votes }
+                    Invoke-AgentWithLog $vPrompt $verifierTemplate $worktreePath $vLog
+                    if (!(Test-Path -LiteralPath $vResult)) { throw "Verifier vote $v did not write $vResult" }
+                    $vr = Get-Content -LiteralPath $vResult -Raw | ConvertFrom-Json
+                    $voteResults += $vr
+                    Write-AgenticEvent "verifier_vote" @{ task = $taskId; vote = $v; verdict = [string]$vr.verdict; summary = [string]$vr.summary }
+                }
+                $passCount = @($voteResults | Where-Object { [string]$_.verdict -eq "pass" }).Count
+                $needsHumanCount = @($voteResults | Where-Object { [string]$_.verdict -eq "needs_human" }).Count
+                $majority = [math]::Floor($votes / 2) + 1
+                # A majority of pass votes is required; any needs_human escalates conservatively.
+                $finalVerdict = if ($needsHumanCount -gt 0 -and $passCount -lt $majority) { "needs_human" } elseif ($passCount -ge $majority) { "pass" } else { "fail" }
+                $issues = @($voteResults | ForEach-Object { @($_.issues) } | Where-Object { $_ })
+                $result = [pscustomobject]@{
+                    verdict = $finalVerdict
+                    summary = "adversarial $votes-vote verdict: $passCount pass / $($votes - $passCount - $needsHumanCount) fail / $needsHumanCount needs_human (majority=$majority) -> $finalVerdict"
+                    issues = $issues
+                    humanGates = @()
+                    recommendedStatus = (if ($finalVerdict -eq "pass") { "passed" } elseif ($finalVerdict -eq "needs_human") { "needs_human" } else { "needs_retry" })
+                    artifacts = @()
+                }
+                $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $verifierResult -Encoding UTF8
+                Set-Content -LiteralPath $verifierLog -Value $result.summary -Encoding UTF8
+                Write-AgenticEvent "verifier_votes_finished" @{ task = $taskId; votes = $votes; passCount = $passCount; needsHuman = $needsHumanCount; verdict = $finalVerdict }
+            }
         }
         $verdict = [string]$result.verdict
         Write-AgenticEvent "verifier_finished" @{ task = $taskId; verdict = $verdict; summary = [string]$result.summary; resultFile = $verifierResult }
