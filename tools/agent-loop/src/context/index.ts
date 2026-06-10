@@ -43,6 +43,11 @@ export interface AgenticTask {
   acceptanceCriteria?: string[];
   validation?: string[];
   dependsOn?: string[];
+  scope?: string[];
+  reviewBranch?: string;
+  reviewWorktree?: string;
+  failureHistory?: unknown[];
+  artifacts?: unknown[];
 }
 
 export interface RepoContext {

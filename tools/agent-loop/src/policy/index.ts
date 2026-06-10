@@ -7,6 +7,7 @@ export interface WorkflowPolicy {
   defaultExecutionWorkflow: string;
   workflows: Record<string, WorkflowDef>;
   humanGates: string[];
+  humanGatePaths?: string[];
   autonomousLoop: AutonomousLoopConfig;
   verifierRules?: Record<string, unknown>;
 }
