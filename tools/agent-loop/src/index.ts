@@ -21,6 +21,10 @@ import {
   type AcceptPlan,
 } from "./reporting/index.js";
 import { loadState, writeState, getTasks, clearTaskReviewState } from "./state/index.js";
+import { runAgenticLoop, LoopError, type LoopConfig } from "./loop/index.js";
+import type { AgentConfig, AgentTool } from "./agent/index.js";
+
+function collect(val: string, acc: string[]): string[] { return [...acc, val]; }
 import { loadEvents, appendEvent } from "./events/index.js";
 import {
   safeSlug,
@@ -363,6 +367,104 @@ program
     }
 
     printAcceptResult(plan, { json: !!opts.json });
+  });
+
+// ── run ───────────────────────────────────────────────────────────────────────
+
+program
+  .command("run")
+  .description(
+    "Run the autonomous agentic loop: plan (if needed) then execute tasks until done or budget exhausted."
+  )
+  .option("--repo <path>",                   "Path to repo root (default: auto-detected from cwd)")
+  .option("--state <file>",                  "State file name relative to repo root (default: agentic.json)")
+  .option("--runs-root <path>",              "Event log / run artifact root (default: .agent-runs)")
+  .option("--worktree-root <path>",          "Worktree root (default: .worktrees)")
+  .option("--tool <name>",                   "Agent tool: claude | pi | custom (default: claude)", "claude")
+  .option("--command <template>",            "Shell command template; {prompt} is replaced with the prompt file path")
+  .option("--verifier-command <template>",   "Separate command template for the verifier agent (defaults to --command)")
+  .option("--agent-timeout <seconds>",       "Seconds before an agent invocation is killed (0 = none)", "0")
+  .option("--check-timeout <seconds>",       "Seconds before a check command is killed (0 = none)", "0")
+  .option("--max-iterations <n>",            "Maximum loop iterations (default: 10)", "10")
+  .option("--max-retries <n>",               "Maximum retries per task before escalating to needs_human (default: 3)", "3")
+  .option("--max-runtime-seconds <n>",       "Hard runtime budget in seconds (0 = none)", "0")
+  .option("--max-agent-calls <n>",           "Hard agent-call budget (0 = none)", "0")
+  .option("--verifier-votes <n>",            "Override verifier vote count (0 = auto)", "0")
+  .option("--checks <cmd>",                  "Extra check command (repeatable)", collect, [])
+  .option("--prompt-budget <level>",         "Prompt context budget: low | medium | high (default: medium)", "medium")
+  .option("--merge-mode <mode>",             "ff-only | no-ff | cherry-pick (default: ff-only)", "ff-only")
+  .option("--no-commit",                     "Do not commit changes in the worktree after a pass")
+  .option("--no-merge",                      "Do not merge the worktree branch back after a pass")
+  .option("--review-branch",                 "Keep changes on a review branch instead of merging (implies --no-merge)")
+  .option("--auto-accept-passed",            "Automatically integrate and clean up passed tasks")
+  .option("--cleanup-passed",                "Remove the worktree after a task passes")
+  .option("--plan-only",                     "Run the planner then exit without executing tasks")
+  .option("--retry <id>",                    "Retry a specific task id (must be needs_retry or failed)")
+  .option("--fast-verifier",                 "Skip the verifier agent for low-risk tasks that pass checks")
+  .option("--no-finalize-docs",              "Skip the finalize-docs agent after all tasks pass")
+  .action((opts) => {
+    const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
+
+    const agentTool = (opts.tool ?? "claude") as AgentTool;
+    const agentConfig: AgentConfig = {
+      tool: agentTool,
+      commandTemplate: opts.command ?? "",
+      timeoutSeconds: parseInt(opts.agentTimeout ?? "0", 10),
+    };
+    const verifierConfig: AgentConfig = {
+      tool: agentTool,
+      commandTemplate: opts.verifierCommand ?? opts.command ?? "",
+      timeoutSeconds: parseInt(opts.agentTimeout ?? "0", 10),
+    };
+
+    const mergeModeRaw = opts.mergeMode ?? "ff-only";
+    if (!["ff-only", "no-ff", "cherry-pick"].includes(mergeModeRaw)) {
+      console.error(`Invalid --merge-mode '${mergeModeRaw}'. Expected: ff-only | no-ff | cherry-pick`);
+      process.exit(2);
+    }
+
+    const budgetRaw = opts.promptBudget ?? "medium";
+    if (!["low", "medium", "high"].includes(budgetRaw)) {
+      console.error(`Invalid --prompt-budget '${budgetRaw}'. Expected: low | medium | high`);
+      process.exit(2);
+    }
+
+    const loopConfig: LoopConfig = {
+      repoRoot,
+      stateFile:           opts.state           ?? "agentic.json",
+      runsRoot:            opts.runsRoot         ?? ".agent-runs",
+      worktreeRoot:        opts.worktreeRoot     ?? ".worktrees",
+      agent:               agentConfig,
+      verifierAgent:       verifierConfig,
+      maxIterations:       parseInt(opts.maxIterations    ?? "10", 10),
+      maxRetries:          parseInt(opts.maxRetries       ?? "3",  10),
+      maxRuntimeSeconds:   parseInt(opts.maxRuntimeSeconds ?? "0", 10),
+      maxAgentCalls:       parseInt(opts.maxAgentCalls    ?? "0",  10),
+      verifierVotes:       parseInt(opts.verifierVotes    ?? "0",  10),
+      checkTimeoutSeconds: parseInt(opts.checkTimeout     ?? "0",  10),
+      extraChecks:         (opts.checks as string[]) ?? [],
+      budget:              budgetRaw as "low" | "medium" | "high",
+      mergeMode:           mergeModeRaw as "ff-only" | "no-ff" | "cherry-pick",
+      planOnly:            !!opts.planOnly,
+      retryTaskId:         opts.retry            ?? "",
+      commit:              opts.commit           !== false,
+      merge:               opts.merge            !== false && !opts.reviewBranch,
+      reviewBranchMode:    !!opts.reviewBranch,
+      autoAcceptPassed:    !!opts.autoAcceptPassed,
+      cleanupPassed:       !!opts.cleanupPassed,
+      fastVerifier:        !!opts.fastVerifier,
+      finalizeDocs:        opts.finalizeDocs     !== false,
+    };
+
+    try {
+      runAgenticLoop(loopConfig);
+    } catch (err) {
+      if (err instanceof LoopError) {
+        console.error(err.message);
+        process.exit(err.exitCode);
+      }
+      throw err;
+    }
   });
 
 program.parseAsync(process.argv).catch((err) => {

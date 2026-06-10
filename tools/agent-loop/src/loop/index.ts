@@ -48,6 +48,12 @@ export interface LoopConfig {
   maxRetries?: number;
   maxRuntimeSeconds?: number;
   maxAgentCalls?: number;
+  /** Override verifier vote count (0 = auto-resolve from risk). */
+  verifierVotes?: number;
+  /** Timeout in seconds for each check command (0 = no timeout). */
+  checkTimeoutSeconds?: number;
+  /** Extra check commands appended to state.checks (from --checks CLI flag). */
+  extraChecks?: string[];
   budget?: PromptBudget;
   planOnly?: boolean;
   retryTaskId?: string;
@@ -221,27 +227,30 @@ function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter: { cou
 // Main entry point. Throws LoopError with an appropriate exitCode on terminal failures.
 export function runAgenticLoop(config: LoopConfig): void {
   const cfg: Required<LoopConfig> = {
-    stateFile:         config.stateFile        ?? "agentic.json",
-    runsRoot:          config.runsRoot          ?? ".agent-runs",
-    worktreeRoot:      config.worktreeRoot      ?? ".worktrees",
-    maxIterations:     config.maxIterations     ?? 10,
-    maxRetries:        config.maxRetries        ?? 3,
-    maxRuntimeSeconds: config.maxRuntimeSeconds ?? 0,
-    maxAgentCalls:     config.maxAgentCalls     ?? 0,
-    budget:            config.budget            ?? "medium",
-    planOnly:          config.planOnly          ?? false,
-    retryTaskId:       config.retryTaskId       ?? "",
-    commit:            config.commit            ?? false,
-    merge:             config.merge             ?? false,
-    mergeMode:         config.mergeMode         ?? "ff-only",
-    reviewBranchMode:  config.reviewBranchMode  ?? false,
-    autoAcceptPassed:  config.autoAcceptPassed  ?? false,
-    cleanupPassed:     config.cleanupPassed     ?? false,
-    fastVerifier:      config.fastVerifier      ?? false,
-    finalizeDocs:      config.finalizeDocs      ?? false,
-    repoRoot:          config.repoRoot,
-    agent:             config.agent,
-    verifierAgent:     config.verifierAgent     ?? config.agent,
+    stateFile:          config.stateFile          ?? "agentic.json",
+    runsRoot:           config.runsRoot           ?? ".agent-runs",
+    worktreeRoot:       config.worktreeRoot       ?? ".worktrees",
+    maxIterations:      config.maxIterations      ?? 10,
+    maxRetries:         config.maxRetries         ?? 3,
+    maxRuntimeSeconds:  config.maxRuntimeSeconds  ?? 0,
+    maxAgentCalls:      config.maxAgentCalls      ?? 0,
+    verifierVotes:      config.verifierVotes      ?? 0,
+    checkTimeoutSeconds: config.checkTimeoutSeconds ?? 0,
+    extraChecks:        config.extraChecks        ?? [],
+    budget:             config.budget             ?? "medium",
+    planOnly:           config.planOnly           ?? false,
+    retryTaskId:        config.retryTaskId        ?? "",
+    commit:             config.commit             ?? false,
+    merge:              config.merge              ?? false,
+    mergeMode:          config.mergeMode          ?? "ff-only",
+    reviewBranchMode:   config.reviewBranchMode   ?? false,
+    autoAcceptPassed:   config.autoAcceptPassed   ?? false,
+    cleanupPassed:      config.cleanupPassed      ?? false,
+    fastVerifier:       config.fastVerifier       ?? false,
+    finalizeDocs:       config.finalizeDocs       ?? false,
+    repoRoot:           config.repoRoot,
+    agent:              config.agent,
+    verifierAgent:      config.verifierAgent      ?? config.agent,
   };
 
   const policy = loadPolicy(cfg.repoRoot);
@@ -368,11 +377,12 @@ export function runAgenticLoop(config: LoopConfig): void {
       }
 
       // Checks
-      const taskChecks = getTaskChecks(task, loadState(cfg.repoRoot, cfg.stateFile)!);
+      const baseChecks = getTaskChecks(task, loadState(cfg.repoRoot, cfg.stateFile)!);
+      const taskChecks = [...new Set([...baseChecks, ...cfg.extraChecks])];
       appendEvent(cfg.repoRoot, "checks_started", { task: taskId, commands: taskChecks, log: checksLog }, cfg.runsRoot, cfg.stateFile);
       let checkOutput: string;
       try {
-        checkOutput = invokeChecks(worktreePath, taskChecks);
+        checkOutput = invokeChecks(worktreePath, taskChecks, cfg.checkTimeoutSeconds || 120);
         writeChecksLog(checksLog, checkOutput);
         const metrics = parseMetricLines(checkOutput);
         appendEvent(cfg.repoRoot, "checks_passed", { task: taskId, log: checksLog, metrics }, cfg.runsRoot, cfg.stateFile);
@@ -422,7 +432,7 @@ export function runAgenticLoop(config: LoopConfig): void {
         writeFileSync(verifierLog, "fast-verifier: skipped separate verifier after checks passed.", "utf-8");
         appendEvent(cfg.repoRoot, "verifier_skipped", { task: taskId, resultFile: verifierResult, log: verifierLog, reason: "fast-verifier" }, cfg.runsRoot, cfg.stateFile);
       } else {
-        const votes = resolveVerifierVotes(task, policy);
+        const votes = resolveVerifierVotes(task, policy, cfg.verifierVotes);
         const adversarial = votes > 1;
 
         if (votes <= 1) {
