@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 
 export type TaskStatus =
@@ -50,6 +50,11 @@ export function loadState(repoRoot: string, stateFile = "agentic.json"): Agentic
   const path = join(repoRoot, stateFile);
   if (!existsSync(path)) return null;
   return JSON.parse(readFileSync(path, "utf-8")) as AgenticState;
+}
+
+export function writeState(repoRoot: string, state: AgenticState, stateFile = "agentic.json"): void {
+  const path = join(repoRoot, stateFile);
+  writeFileSync(path, JSON.stringify(state, null, 2) + "\n", "utf-8");
 }
 
 export function getTasks(state: AgenticState): Task[] {

@@ -362,6 +362,41 @@ export function printDoctorResult(result: DoctorResult, opts: ReportOptions): vo
   }
 }
 
+// ── Reset-task reporting ──────────────────────────────────────────────────────
+
+export interface ResetPlan {
+  taskId: string;
+  branch: string;
+  worktree: string;
+  worktreeWillRemove: boolean;
+  branchWillDelete: boolean;
+  newStatus: string;
+  applied: boolean;
+}
+
+export function printResetResult(plan: ResetPlan, opts: ReportOptions): void {
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(plan, null, 2) + "\n");
+    return;
+  }
+
+  const verb = plan.applied ? "Reset" : "Would reset";
+  console.log(`${verb} task: ${plan.taskId}`);
+  console.log("");
+
+  const mark = (will: boolean) => (plan.applied ? "✓" : will ? "•" : "—");
+  console.log(`  ${mark(plan.worktreeWillRemove)} remove worktree: ${plan.worktree}${plan.worktreeWillRemove ? "" : " (not present)"}`);
+  console.log(`  ${mark(plan.branchWillDelete)} delete branch:   ${plan.branch}${plan.branchWillDelete ? "" : " (not present)"}`);
+  console.log(`  ${plan.applied ? "✓" : "•"} set status:      ${plan.newStatus}`);
+  console.log("");
+
+  if (plan.applied) {
+    console.log(`Done. Suggested next: pwsh -File scripts/agentic/agentic-loop.ps1 --retry ${plan.taskId}`);
+  } else {
+    console.log("Dry run — nothing changed. Re-run with --apply to execute.");
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function pad(s: string, len: number): string {

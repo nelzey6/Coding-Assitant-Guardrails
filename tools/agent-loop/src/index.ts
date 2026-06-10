@@ -14,11 +14,19 @@ import {
   printLastFailureResult,
   printWhyStuckResult,
   printDoctorResult,
+  printResetResult,
   type DoctorIssue,
+  type ResetPlan,
 } from "./reporting/index.js";
-import { loadState, getTasks } from "./state/index.js";
-import { loadEvents } from "./events/index.js";
-import { execSync } from "child_process";
+import { loadState, writeState, getTasks } from "./state/index.js";
+import { loadEvents, appendEvent } from "./events/index.js";
+import {
+  safeSlug,
+  gitBranchExists as toolsGitBranchExists,
+  worktreeExists,
+  removeWorktree,
+  deleteBranch,
+} from "./tools/index.js";
 
 function detectRepoRoot(): string {
   let dir = process.cwd();
@@ -158,15 +166,6 @@ program
 
 // ── doctor ────────────────────────────────────────────────────────────────────
 
-function gitBranchExists(branch: string): boolean {
-  try {
-    const out = execSync(`git branch --list ${branch}`, { encoding: "utf-8" });
-    return out.trim().length > 0;
-  } catch {
-    return false;
-  }
-}
-
 program
   .command("doctor")
   .description("Diagnose stale review metadata: missing branches and worktrees. Exits non-zero on issues.")
@@ -180,7 +179,7 @@ program
     const issues: DoctorIssue[] = [];
     for (const task of getTasks(state)) {
       if (task.reviewBranch) {
-        if (!gitBranchExists(task.reviewBranch)) {
+        if (!toolsGitBranchExists(task.reviewBranch, repoRoot)) {
           issues.push({ taskId: task.id, kind: "missing-branch", value: task.reviewBranch });
         }
       }
@@ -194,6 +193,61 @@ program
     const result = { issues, passed: issues.length === 0 };
     printDoctorResult(result, { json: !!opts.json });
     if (!result.passed) process.exit(1);
+  });
+
+// ── reset-task ────────────────────────────────────────────────────────────────
+
+program
+  .command("reset-task <id>")
+  .description(
+    "Reset a task for a clean rerun: remove its worktree, delete its branch, mark it needs_retry. Dry-run by default."
+  )
+  .option("--repo <path>", "Path to repo root")
+  .option("--runs-root <path>", "Path to runs/event log root (default: .agent-runs)")
+  .option("--worktree-root <path>", "Worktree root (default: .worktrees)")
+  .option("--apply", "Actually execute the reset (default is dry-run)")
+  .option("--json", "Output as JSON")
+  .action((id, opts) => {
+    const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
+    const runsRoot = opts.runsRoot ?? ".agent-runs";
+    const worktreeRoot = opts.worktreeRoot ?? ".worktrees";
+    const apply = !!opts.apply;
+
+    const state = loadState(repoRoot);
+    if (!state) { console.error("No agentic.json found."); process.exit(1); }
+
+    const task = getTasks(state).find((t) => t.id === id);
+    if (!task) { console.error(`Task '${id}' not found in agentic.json.`); process.exit(1); }
+
+    const safeId = safeSlug(id);
+    const branch = task.reviewBranch || `agentic/${safeId}`;
+    const worktree = task.reviewWorktree
+      ? resolve(repoRoot, task.reviewWorktree)
+      : join(repoRoot, worktreeRoot, safeId);
+
+    const worktreeWillRemove = worktreeExists(worktree);
+    const branchWillDelete = toolsGitBranchExists(branch, repoRoot);
+
+    if (apply) {
+      if (worktreeWillRemove) removeWorktree(worktree, repoRoot);
+      if (branchWillDelete) deleteBranch(branch, repoRoot);
+      task.status = "needs_retry";
+      if (task.reviewBranch !== undefined) task.reviewBranch = "";
+      if (task.reviewWorktree !== undefined) task.reviewWorktree = "";
+      writeState(repoRoot, state);
+      appendEvent(repoRoot, "task_reset", { task: id, branch, worktree, status: "needs_retry" }, runsRoot);
+    }
+
+    const plan: ResetPlan = {
+      taskId: id,
+      branch,
+      worktree,
+      worktreeWillRemove,
+      branchWillDelete,
+      newStatus: "needs_retry",
+      applied: apply,
+    };
+    printResetResult(plan, { json: !!opts.json });
   });
 
 program.parseAsync(process.argv).catch((err) => {

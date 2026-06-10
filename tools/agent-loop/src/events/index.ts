@@ -1,5 +1,5 @@
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
+import { readFileSync, appendFileSync, mkdirSync, existsSync } from "fs";
+import { join, dirname } from "path";
 
 export interface AgenticEvent {
   ts: string;
@@ -31,6 +31,21 @@ export function loadEvents(repoRoot: string, runsRoot = ".agent-runs"): AgenticE
         return [];
       }
     });
+}
+
+// Append an event to events.jsonl, matching the PS1 Write-AgenticEvent shape:
+// { ts, type, state, ...data } as one compact JSON line.
+export function appendEvent(
+  repoRoot: string,
+  type: string,
+  data: Record<string, unknown> = {},
+  runsRoot = ".agent-runs",
+  stateFile = "agentic.json"
+): void {
+  const logPath = eventLogPath(join(repoRoot, runsRoot));
+  mkdirSync(dirname(logPath), { recursive: true });
+  const entry = { ts: new Date().toISOString(), type, state: stateFile, ...data };
+  appendFileSync(logPath, JSON.stringify(entry) + "\n", "utf-8");
 }
 
 export function getFailureEvents(events: AgenticEvent[], limit = 20): AgenticEvent[] {
