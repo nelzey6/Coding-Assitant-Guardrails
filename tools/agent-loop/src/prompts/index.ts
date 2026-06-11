@@ -4,6 +4,7 @@ import { execFileSync } from "child_process";
 import type { AgenticState, Task } from "../state/index.js";
 import type { WorkflowPolicy } from "../policy/index.js";
 import { appendEvent, getRecentEvents, formatEventLine, loadEvents } from "../events/index.js";
+import { git as gitTool } from "../tools/index.js";
 
 export type PromptBudget = "low" | "medium" | "high";
 
@@ -13,11 +14,15 @@ export interface BudgetLimits {
   eventLimit: number;
 }
 
+const BUDGET_LOW:    BudgetLimits = { checkBytes:  6_000, diffBytes:  12_000, eventLimit:  6 };
+const BUDGET_MEDIUM: BudgetLimits = { checkBytes: 12_000, diffBytes:  20_000, eventLimit: 12 };
+const BUDGET_HIGH:   BudgetLimits = { checkBytes: 50_000, diffBytes: 100_000, eventLimit: 20 };
+
 export function getPromptBudgetLimits(budget: PromptBudget): BudgetLimits {
   switch (budget) {
-    case "low":  return { checkBytes: 6_000,  diffBytes: 12_000,  eventLimit: 6 };
-    case "high": return { checkBytes: 50_000, diffBytes: 100_000, eventLimit: 20 };
-    default:     return { checkBytes: 12_000, diffBytes: 20_000,  eventLimit: 12 };
+    case "low":  return BUDGET_LOW;
+    case "high": return BUDGET_HIGH;
+    default:     return BUDGET_MEDIUM;
   }
 }
 
@@ -71,7 +76,7 @@ export function writePromptWithEvent(
 
 function git(args: string[], cwd?: string): string {
   try {
-    return execFileSync("git", args, { encoding: "utf-8", cwd, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    return gitTool(args, cwd);
   } catch {
     return "";
   }

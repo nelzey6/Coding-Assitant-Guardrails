@@ -23,7 +23,7 @@ import {
   type VerifierResult,
 } from "../state/index.js";
 import { appendEvent } from "../events/index.js";
-import { safeSlug, createWorktree, worktreeExists, removeWorktree } from "../tools/index.js";
+import { safeSlug, createWorktree, worktreeExists, removeWorktree, git as gitTool, GitError } from "../tools/index.js";
 import { invokeAgent, invokeAgentWithLog, getTaskChecks, type AgentConfig } from "../agent/index.js";
 import { invokeChecks, parseMetricLines } from "../checks/index.js";
 import { getTaskScope, getOutOfScopeFiles, testFastVerifierAllowed, testTaskIsHighRisk, isTaskUnscoped } from "../scope/index.js";
@@ -104,10 +104,10 @@ interface TaskGrillResult {
 
 function git(args: string[], cwd?: string): string {
   try {
-    return execFileSync("git", args, { encoding: "utf-8", cwd, stdio: ["ignore", "pipe", "pipe"] }).trim();
-  } catch (err: any) {
-    const out = [err?.stdout, err?.stderr].filter(Boolean).join("\n").trim();
-    throw new LoopError(`git ${args.join(" ")} failed: ${out || err?.message}`);
+    return gitTool(args, cwd);
+  } catch (err) {
+    const msg = err instanceof GitError ? err.message : String(err);
+    throw new LoopError(msg);
   }
 }
 

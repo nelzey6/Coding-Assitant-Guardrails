@@ -1,14 +1,12 @@
-import { spawnSync } from "child_process";
-import { mkdirSync, writeFileSync, unlinkSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
-import { randomBytes } from "crypto";
+import { runShellScript } from "../tools/shell.js";
 
 export interface MetricMap {
   [key: string]: number;
 }
 
 const METRIC_RE = /^METRIC\s+([\w.u]+)=([^\s]+)\s*$/gm;
+const DEFAULT_CHECK_TIMEOUT_SECONDS = 120;
+
 const FORBIDDEN_METRIC_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 export function parseMetricLines(text: string): MetricMap {
@@ -38,63 +36,13 @@ function mergeMetrics(target: MetricMap, source: MetricMap): void {
 }
 
 function runCommand(command: string, cwd: string, timeoutSeconds: number): string {
-  const isWindows = process.platform === "win32";
-  const id = randomBytes(8).toString("hex");
-
-  if (isWindows) {
-    const scriptPath = join(tmpdir(), `agentic-cmd-${id}.ps1`);
-    // Append exit $LASTEXITCODE so PowerShell -File propagates the command's exit code.
-    writeFileSync(scriptPath, `${command}\nexit $LASTEXITCODE`, "utf-8");
-    try {
-      const result = spawnSync(
-        "powershell.exe",
-        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
-        { cwd, encoding: "utf-8", timeout: timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined }
-      );
-      const text = ((result.stdout ?? "") + (result.stderr ?? "")).trimEnd();
-      if (result.error) {
-        if ((result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
-          throw new Error(`Command timed out after ${timeoutSeconds} seconds: ${command}`);
-        }
-        throw new Error(`Command failed: ${command}\n${result.error.message}`);
-      }
-      if (result.status !== 0) {
-        throw new Error(`Command failed with code ${result.status}: ${command}\n${text}`);
-      }
-      return text;
-    } finally {
-      try { unlinkSync(scriptPath); } catch { /* ignore */ }
-    }
-  } else {
-    const scriptPath = join(tmpdir(), `agentic-cmd-${id}.sh`);
-    writeFileSync(scriptPath, command, "utf-8");
-    try {
-      const result = spawnSync(
-        "sh",
-        [scriptPath],
-        { cwd, encoding: "utf-8", timeout: timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined }
-      );
-      const text = ((result.stdout ?? "") + (result.stderr ?? "")).trimEnd();
-      if (result.error) {
-        if ((result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
-          throw new Error(`Command timed out after ${timeoutSeconds} seconds: ${command}`);
-        }
-        throw new Error(`Command failed: ${command}\n${result.error.message}`);
-      }
-      if (result.status !== 0) {
-        throw new Error(`Command failed with code ${result.status}: ${command}\n${text}`);
-      }
-      return text;
-    } finally {
-      try { unlinkSync(scriptPath); } catch { /* ignore */ }
-    }
-  }
+  return runShellScript(command, cwd, timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined, "pipe");
 }
 
 export function invokeChecks(
   workingDirectory: string,
   checksToRun: string[],
-  timeoutSeconds = 120
+  timeoutSeconds = DEFAULT_CHECK_TIMEOUT_SECONDS
 ): string {
   const log: string[] = [];
   const allMetrics: MetricMap = {};

@@ -25,6 +25,10 @@ import { runAgenticLoop, LoopError, type LoopConfig } from "./loop/index.js";
 import type { AgentConfig, AgentTool } from "./agent/index.js";
 
 function collect(val: string, acc: string[]): string[] { return [...acc, val]; }
+
+const DEFAULT_RUNS_ROOT = ".agent-runs";
+const DEFAULT_WORKTREE_ROOT = ".worktrees";
+const DEFAULT_STATE_FILE = "agentic.json";
 import { loadEvents, appendEvent } from "./events/index.js";
 import {
   safeSlug,
@@ -121,7 +125,7 @@ program
   .option("--json", "Output as JSON")
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
-    const runsRoot = opts.runsRoot ?? ".agent-runs";
+    const runsRoot = opts.runsRoot ?? DEFAULT_RUNS_ROOT;
     const state = loadState(repoRoot);
     if (!state) { console.error("No agentic.json found."); process.exit(1); }
     const events = loadEvents(repoRoot, runsRoot);
@@ -138,7 +142,7 @@ program
   .option("--json", "Output as JSON")
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
-    const runsRoot = opts.runsRoot ?? ".agent-runs";
+    const runsRoot = opts.runsRoot ?? DEFAULT_RUNS_ROOT;
     const state = loadState(repoRoot);
     if (!state) { console.error("No agentic.json found."); process.exit(1); }
     const events = loadEvents(repoRoot, runsRoot);
@@ -155,7 +159,7 @@ program
   .option("--json", "Output as JSON")
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
-    const runsRoot = opts.runsRoot ?? ".agent-runs";
+    const runsRoot = opts.runsRoot ?? DEFAULT_RUNS_ROOT;
     const state = loadState(repoRoot);
     if (!state) { console.error("No agentic.json found."); process.exit(1); }
     const events = loadEvents(repoRoot, runsRoot);
@@ -172,7 +176,7 @@ program
   .option("--json", "Output as JSON")
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
-    const runsRoot = opts.runsRoot ?? ".agent-runs";
+    const runsRoot = opts.runsRoot ?? DEFAULT_RUNS_ROOT;
     const state = loadState(repoRoot);
     if (!state) { console.error("No agentic.json found."); process.exit(1); }
     const events = loadEvents(repoRoot, runsRoot);
@@ -224,8 +228,8 @@ program
   .option("--json", "Output as JSON")
   .action((id, opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
-    const runsRoot = opts.runsRoot ?? ".agent-runs";
-    const worktreeRoot = opts.worktreeRoot ?? ".worktrees";
+    const runsRoot = opts.runsRoot ?? DEFAULT_RUNS_ROOT;
+    const worktreeRoot = opts.worktreeRoot ?? DEFAULT_WORKTREE_ROOT;
     const apply = !!opts.apply;
 
     const state = loadState(repoRoot);
@@ -281,8 +285,8 @@ program
   .option("--json", "Output as JSON")
   .action((id, opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
-    const runsRoot = opts.runsRoot ?? ".agent-runs";
-    const worktreeRoot = opts.worktreeRoot ?? ".worktrees";
+    const runsRoot = opts.runsRoot ?? DEFAULT_RUNS_ROOT;
+    const worktreeRoot = opts.worktreeRoot ?? DEFAULT_WORKTREE_ROOT;
     const apply = !!opts.apply;
     const mergeMode = opts.mergeMode as MergeMode;
 
@@ -436,9 +440,9 @@ program
 
     const loopConfig: LoopConfig = {
       repoRoot,
-      stateFile:           opts.state           ?? "agentic.json",
-      runsRoot:            opts.runsRoot         ?? ".agent-runs",
-      worktreeRoot:        opts.worktreeRoot     ?? ".worktrees",
+      stateFile:           opts.state           ?? DEFAULT_STATE_FILE,
+      runsRoot:            opts.runsRoot         ?? DEFAULT_RUNS_ROOT,
+      worktreeRoot:        opts.worktreeRoot     ?? DEFAULT_WORKTREE_ROOT,
       agent:               agentConfig,
       verifierAgent:       verifierConfig,
       maxIterations:       parseInt(opts.maxIterations    ?? "10", 10),

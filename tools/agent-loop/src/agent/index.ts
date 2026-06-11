@@ -1,9 +1,8 @@
 import { spawnSync } from "child_process";
-import { mkdirSync, readFileSync, appendFileSync, createWriteStream, writeFileSync, unlinkSync } from "fs";
-import { dirname, resolve, join } from "path";
-import { tmpdir } from "os";
-import { randomBytes } from "crypto";
+import { mkdirSync, readFileSync, appendFileSync } from "fs";
+import { dirname, resolve } from "path";
 import type { AgenticTask, AgenticState } from "../context/index.js";
+import { runShellScript } from "../tools/shell.js";
 
 export type AgentTool = "claude" | "pi" | "custom";
 
@@ -24,64 +23,24 @@ export class AgentError extends Error {
   }
 }
 
-// On Windows, produce a PS1 script body from a shell command line:
-// 1. Quoted-path executables need the `& ` call operator.
-// 2. PowerShell -File does NOT propagate $LASTEXITCODE automatically; we must do it.
-function psScript(command: string): string {
-  const trimmed = command.trimStart();
-  const invocation = trimmed.startsWith('"') ? `& ${command}` : command;
-  return `${invocation}\nexit $LASTEXITCODE`;
+function toAgentError(err: unknown, command: string): AgentError {
+  const msg = err instanceof Error ? err.message : String(err);
+  return new AgentError(msg.includes(command) ? msg : `${msg}: ${command}`);
 }
 
 function shellRun(command: string, cwd: string, timeoutSeconds: number): void {
-  const isWindows = process.platform === "win32";
-  const id = randomBytes(8).toString("hex");
-  const timeout = timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined;
-  const scriptPath = isWindows
-    ? join(tmpdir(), `agentic-agent-${id}.ps1`)
-    : join(tmpdir(), `agentic-agent-${id}.sh`);
-  writeFileSync(scriptPath, isWindows ? psScript(command) : command, "utf-8");
   try {
-    const result = isWindows
-      ? spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath], { cwd, timeout, stdio: "inherit" as const })
-      : spawnSync("sh", [scriptPath], { cwd, timeout, stdio: "inherit" as const });
-    if (result.error) {
-      const code = (result.error as NodeJS.ErrnoException).code;
-      if (code === "ETIMEDOUT") throw new AgentError(`Agent timed out after ${timeoutSeconds}s: ${command}`);
-      throw new AgentError(`Agent failed: ${result.error.message}`);
-    }
-    if (result.status !== 0) {
-      throw new AgentError(`Agent exited with code ${result.status}: ${command}`);
-    }
-  } finally {
-    try { unlinkSync(scriptPath); } catch { /* ignore */ }
+    runShellScript(command, cwd, timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined, "inherit");
+  } catch (err) {
+    throw toAgentError(err, command);
   }
 }
 
 function shellCapture(command: string, cwd: string, timeoutSeconds: number): string {
-  const isWindows = process.platform === "win32";
-  const id = randomBytes(8).toString("hex");
-  const timeout = timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined;
-  const scriptPath = isWindows
-    ? join(tmpdir(), `agentic-agent-${id}.ps1`)
-    : join(tmpdir(), `agentic-agent-${id}.sh`);
-  writeFileSync(scriptPath, isWindows ? psScript(command) : command, "utf-8");
   try {
-    const result = isWindows
-      ? spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath], { cwd, encoding: "utf-8" as const, timeout })
-      : spawnSync("sh", [scriptPath], { cwd, encoding: "utf-8" as const, timeout });
-    const text = ((result.stdout ?? "") + (result.stderr ?? "")).trimEnd();
-    if (result.error) {
-      const code = (result.error as NodeJS.ErrnoException).code;
-      if (code === "ETIMEDOUT") throw new AgentError(`Agent timed out after ${timeoutSeconds}s: ${command}`);
-      throw new AgentError(`Agent failed: ${result.error.message}\n${text}`);
-    }
-    if (result.status !== 0) {
-      throw new AgentError(`Agent exited with code ${result.status}: ${command}\n${text}`);
-    }
-    return text;
-  } finally {
-    try { unlinkSync(scriptPath); } catch { /* ignore */ }
+    return runShellScript(command, cwd, timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined, "pipe");
+  } catch (err) {
+    throw toAgentError(err, command);
   }
 }
 

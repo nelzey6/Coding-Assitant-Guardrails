@@ -95,7 +95,10 @@ export function loadContext(repoRoot: string): RepoContext {
   const agentsText = readTextOrNull(join(root, "AGENTS.md")) ?? "";
 
   const agenticRaw = readTextOrNull(join(root, "agentic.json"));
-  const agenticState: AgenticState | null = agenticRaw ? JSON.parse(agenticRaw) : null;
+  let agenticState: AgenticState | null = null;
+  if (agenticRaw) {
+    try { agenticState = JSON.parse(agenticRaw) as AgenticState; } catch { /* malformed — treat as missing */ }
+  }
 
   const allBuckets: Bucket[] = [...PROMOTABLE_BUCKETS, ...EXCLUDED_BUCKETS];
   const buckets: BucketStructure[] = allBuckets.map((bucket) => {

@@ -18,12 +18,13 @@ export class GitError extends Error {
   }
 }
 
-function git(args: string[], cwd?: string): string {
+export function git(args: string[], cwd?: string): string {
   try {
     return execFileSync("git", args, { encoding: "utf-8", cwd, stdio: ["ignore", "pipe", "pipe"] }).trim();
-  } catch (err: any) {
-    const out = [err?.stdout, err?.stderr].filter(Boolean).join("\n").trim();
-    throw new GitError(`git ${args.join(" ")} failed: ${out || err?.message}`, out);
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    const out = [e?.stdout, e?.stderr].filter(Boolean).join("\n").trim();
+    throw new GitError(`git ${args.join(" ")} failed: ${out || (e?.message ?? String(err))}`, out);
   }
 }
 

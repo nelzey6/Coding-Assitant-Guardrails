@@ -37,13 +37,7 @@ function parsePluginSkillNames(pluginJsonPath: string): Set<string> {
 function parseMarkdownLinks(filePath: string): string[] {
   if (!existsSync(filePath)) return [];
   const text = readFileSync(filePath, "utf-8");
-  const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
-  const links: string[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = linkRegex.exec(text)) !== null) {
-    links.push(match[2]);
-  }
-  return links;
+  return [...text.matchAll(/\[([^\]]+)\]\(([^)]+)\)/g)].map((m) => m[2]);
 }
 
 // Check whether a README file contains a link to a skill's SKILL.md
@@ -161,7 +155,7 @@ export function runValidation(ctx: RepoContext): ValidationResult {
       });
     }
 
-    if (ctx.topReadmeExists && readmeMentionsSkill(ctx.topReadmePath, skill.name)) {
+    if (ctx.topReadmeExists && readmeLinksToSkillMd(ctx.topReadmePath, skill.name)) {
       violations.push({
         severity: "error",
         surface: "top-readme",
