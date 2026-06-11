@@ -136,7 +136,12 @@ cd tools/agent-loop && npx tsx src/index.ts validate
 
 If this exits non-zero, stop and report the violations before running an autonomous loop. The validator checks that all promotable skills (`engineering/`, `productivity/`, `misc/`) are registered in `.claude-plugin/plugin.json` and linked in both the top-level and bucket `README.md` files, and that excluded skills (`personal/`, `in-progress/`, `deprecated/`) are absent from those surfaces.
 
-**Always invoke the harness when this skill is used.** Prepare `agentic.json`, then run the TS runner (or the installed `agentic-loop` shim) immediately. Only fall back to plan-only mode if the user explicitly passes `--plan-only`, the harness binary is not on PATH, or a pre-flight `validate` check exits non-zero.
+**Execution mode depends on the runtime context:**
+
+- **Inside Claude Code / Codex (in-session):** Claude Code *is* the executor — do not try to spawn the harness as a subprocess. Instead, prepare `agentic.json`, then execute each pending task directly in this conversation (plan → task-grill → execute → verify per task), updating task status in `agentic.json` as you go. Print the equivalent harness command at the end so the user can re-run unattended from a terminal.
+- **From a terminal (unattended):** Run `agentic-loop run --tool claude` directly. The harness spawns fresh `claude` CLI processes for each phase. This is the intended path for fully autonomous multi-task runs outside a conversation.
+
+Never try to spawn `agentic-loop run` as a subprocess from inside Claude Code — `claude` cannot nest itself.
 
 ### Resuming after a plan-only stop
 
@@ -148,7 +153,7 @@ agentic-loop --tool claude
 
 The harness picks up all `pending` and `needs_retry` tasks with satisfied dependencies and continues the loop. No replanning needed unless the user asks for it.
 
-When this skill is invoked and `agentic.json` already has a task list, treat it as a resume request — run the harness immediately without re-planning.
+When this skill is invoked inside Claude Code and `agentic.json` already has pending tasks, treat it as a resume request — pick up the next pending task and execute it directly in the conversation without re-planning.
 
 ## Worktree execution
 
