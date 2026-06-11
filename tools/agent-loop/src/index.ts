@@ -404,6 +404,8 @@ program
   .option("--fast-verifier",                 "Skip the verifier agent for low-risk tasks that pass checks")
   .option("--rebase-before-verify",          "Rebase worktree on loop-start HEAD before verifier; re-runs checks to catch integration issues")
   .option("--no-finalize-docs",              "Skip the finalize-docs agent after all tasks pass")
+  .option("--goal-review",                   "Run a goal-review agent after all tasks pass; halts with needs_human if gaps detected")
+  .option("--architect-checkpoint-interval <n>", "Run an architect checkpoint every N passed tasks (0 = disabled, default: 0)", "0")
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
 
@@ -455,9 +457,11 @@ program
       reviewBranchMode:    !!opts.reviewBranch,
       autoAcceptPassed:    !!opts.autoAcceptPassed,
       cleanupPassed:       !!opts.cleanupPassed,
-      fastVerifier:        !!opts.fastVerifier,
-      rebaseBeforeVerify:  !!opts.rebaseBeforeVerify,
-      finalizeDocs:        opts.finalizeDocs     !== false,
+      fastVerifier:                !!opts.fastVerifier,
+      rebaseBeforeVerify:          !!opts.rebaseBeforeVerify,
+      finalizeDocs:                opts.finalizeDocs !== false,
+      goalReview:                  !!opts.goalReview,
+      architectCheckpointInterval: parseInt(opts.architectCheckpointInterval ?? "0", 10),
     };
 
     try {

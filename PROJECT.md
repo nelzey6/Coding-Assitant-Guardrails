@@ -141,6 +141,8 @@ Current TS rails:
 - Convergence detection: if a replan produces the same task IDs as the previous replan, the loop emits `replan_convergence_failure` and halts.
 - `--rebase-before-verify`: optional gate that rebases the worktree on loop-start HEAD and re-runs checks before the verifier, catching post-merge integration failures early.
 - After each `ready` task-grill verdict, `assumptionsStillValid` and `assumptionsChanged` fields from the result are persisted back into `state.assumptions` (tagged `[valid]`/`[changed]`) and emitted as an `assumptions_updated` event. The current assumption list is forwarded into every subsequent task-grill prompt so drift is visible across turns.
+- `--goal-review` (opt-in): after all tasks pass, a goal-review agent judges the cumulative diff against `state.goal` and emits `goal_review_finished`. A `needs_human` verdict halts the loop before finalize-docs.
+- `--architect-checkpoint-interval <n>` (opt-in, default 0 = disabled): every N passed tasks, an architect checkpoint agent reviews the plan and cumulative diff for drift. Verdicts: `continue` (proceed), `replan` (call planner again, counts against replan budget), `needs_human` (halt).
 - `accept` and `reset-task` are dry-run by default and require `--apply` to mutate.
 
 Known gaps before calling the TS runner production-default:
@@ -148,8 +150,7 @@ Known gaps before calling the TS runner production-default:
 - `run` does not yet enforce the policy clean-main-worktree gate.
 - CLI defaults do not fully honor policy defaults such as retry count and merge mode.
 - `promptPolicy.lessons` exists in state but is not yet updated as structured learning memory.
-- Architect-level checkpointing across multiple passed tasks is not yet implemented.
-- Final goal review (cumulative diff vs. original goal) after all tasks pass is not yet implemented.
+- Architect checkpoints (`--architect-checkpoint-interval`) do not yet cover the `replan` verdict path in smoke tests.
 - Installer shims still install the PowerShell harness, not the TS runner.
 
 ## Validation Coverage
@@ -171,6 +172,8 @@ Known gaps before calling the TS runner production-default:
 - replan budget exhaustion (`replan_budget_exhausted`) via `--max-replans`
 - replan convergence detection (`replan_convergence_failure`) when plan produces identical task IDs
 - assumption ledger: task-grill `assumptionsStillValid`/`assumptionsChanged` persisted to `state.assumptions` with `[valid]`/`[changed]` tags and emitted as `assumptions_updated` event
+- goal review: `--goal-review` pass verdict allows completion, `needs_human` halts before finalize-docs
+- architect checkpoint: `--architect-checkpoint-interval 2` fires after N passed tasks, `continue` verdict proceeds
 
 Missing TS smoke coverage:
 

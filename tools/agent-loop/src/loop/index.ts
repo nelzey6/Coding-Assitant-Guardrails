@@ -34,6 +34,8 @@ import {
   writeExecutorPrompt,
   writeVerifierPrompt,
   writeFinalizeDocsPrompt,
+  writeGoalReviewPrompt,
+  writeArchitectCheckpointPrompt,
   validatePlannerResult,
   getPromptBudgetLimits,
   writeFailureAnalysis,
@@ -62,6 +64,10 @@ export interface LoopConfig {
   maxReplans?: number;
   /** Extra check commands appended to state.checks (from --checks CLI flag). */
   extraChecks?: string[];
+  /** Run a goal-review agent after all tasks pass, before finalize-docs. Halts on needs_human. */
+  goalReview?: boolean;
+  /** Run an architect checkpoint every N passed tasks (0 = disabled). */
+  architectCheckpointInterval?: number;
   budget?: PromptBudget;
   planOnly?: boolean;
   retryTaskId?: string;
@@ -245,6 +251,117 @@ function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter: { cou
   appendEvent(cfg.repoRoot, "finalize_docs_finished", { runDir, summary: summaryFile, docsChanged: !!docChanges }, cfg.runsRoot, cfg.stateFile);
 }
 
+interface GoalReviewResult {
+  verdict: "pass" | "needs_human";
+  summary?: string;
+  gaps?: string[];
+}
+
+// Run goal-review phase: one agent call judging cumulative diff vs state.goal.
+// Throws LoopError if the agent returns needs_human.
+function runGoalReviewPhase(
+  cfg: Required<LoopConfig>,
+  agentCallCounter: { count: number },
+  loopBaseRef: string
+): void {
+  const ts = timestamp();
+  const runDir = join(cfg.repoRoot, cfg.runsRoot, `agentic-${ts}-goal-review`);
+  mkdirSync(runDir, { recursive: true });
+
+  const promptFile = join(runDir, "goal-review.md");
+  const logFile    = join(runDir, "goal-review.log");
+  const resultFile = join(runDir, "goal-review-result.json");
+
+  const state = loadState(cfg.repoRoot, cfg.stateFile)!;
+  writeGoalReviewPrompt(promptFile, {
+    repoRoot: cfg.repoRoot,
+    runsRoot: cfg.runsRoot,
+    stateFile: cfg.stateFile,
+    budget: cfg.budget,
+    state,
+    loopBaseRef,
+    resultFile,
+  });
+
+  appendEvent(cfg.repoRoot, "goal_review_started", { runDir, prompt: promptFile, resultFile }, cfg.runsRoot, cfg.stateFile);
+  console.log("=== Agentic goal review ===");
+  agentCallCounter.count++;
+  invokeAgentWithLog(promptFile, cfg.agent, cfg.repoRoot, logFile);
+
+  if (!existsSync(resultFile)) throw new LoopError(`Goal review agent did not write ${resultFile}`);
+  const result = JSON.parse(readFileSync(resultFile, "utf-8")) as GoalReviewResult;
+  appendEvent(cfg.repoRoot, "goal_review_finished", { runDir, verdict: result.verdict, summary: result.summary, gaps: result.gaps }, cfg.runsRoot, cfg.stateFile);
+
+  if (result.verdict === "needs_human") {
+    throw new LoopError(`Goal review returned needs_human: ${result.summary ?? "(no summary)"}. Gaps: ${(result.gaps ?? []).join("; ") || "(none listed)"}`);
+  }
+  console.log(`Goal review passed: ${result.summary ?? "ok"}`);
+}
+
+interface ArchitectCheckpointResult {
+  verdict: "continue" | "replan" | "needs_human";
+  assessment?: string;
+  suggestedChanges?: string[];
+}
+
+// Run architect checkpoint: review plan + cumulative diff for drift after N passed tasks.
+// Returns true if the loop should continue, false if it should halt (throws on needs_human).
+// Triggers runPlannerPhase on replan verdict.
+function runArchitectCheckpointPhase(
+  cfg: Required<LoopConfig>,
+  policy: WorkflowPolicy,
+  agentCallCounter: { count: number },
+  loopBaseRef: string,
+  sessionReplanCountRef: { count: number }
+): void {
+  const ts = timestamp();
+  const runDir = join(cfg.repoRoot, cfg.runsRoot, `agentic-${ts}-architect-checkpoint`);
+  mkdirSync(runDir, { recursive: true });
+
+  const promptFile = join(runDir, "architect-checkpoint.md");
+  const logFile    = join(runDir, "architect-checkpoint.log");
+  const resultFile = join(runDir, "architect-checkpoint-result.json");
+
+  const state = loadState(cfg.repoRoot, cfg.stateFile)!;
+  const passedCount = (state.tasks ?? []).filter((t) => t.status === "passed").length;
+  writeArchitectCheckpointPrompt(promptFile, {
+    repoRoot: cfg.repoRoot,
+    runsRoot: cfg.runsRoot,
+    stateFile: cfg.stateFile,
+    budget: cfg.budget,
+    state,
+    loopBaseRef,
+    passedCount,
+    resultFile,
+  });
+
+  appendEvent(cfg.repoRoot, "architect_checkpoint_started", { runDir, prompt: promptFile, resultFile, passedCount }, cfg.runsRoot, cfg.stateFile);
+  console.log(`=== Agentic architect checkpoint (${passedCount} tasks passed) ===`);
+  agentCallCounter.count++;
+  invokeAgentWithLog(promptFile, cfg.agent, cfg.repoRoot, logFile);
+
+  if (!existsSync(resultFile)) throw new LoopError(`Architect checkpoint agent did not write ${resultFile}`);
+  const result = JSON.parse(readFileSync(resultFile, "utf-8")) as ArchitectCheckpointResult;
+  appendEvent(cfg.repoRoot, "architect_checkpoint_finished", { runDir, verdict: result.verdict, assessment: result.assessment }, cfg.runsRoot, cfg.stateFile);
+
+  if (result.verdict === "needs_human") {
+    throw new LoopError(`Architect checkpoint returned needs_human: ${result.assessment ?? "(no assessment)"}`);
+  }
+
+  if (result.verdict === "replan") {
+    sessionReplanCountRef.count++;
+    if (cfg.maxReplans > 0 && sessionReplanCountRef.count > cfg.maxReplans) {
+      throw new LoopError(`Replan budget exhausted at architect checkpoint (${sessionReplanCountRef.count} replans >= maxReplans ${cfg.maxReplans})`);
+    }
+    console.log(`Architect checkpoint requested replan: ${result.assessment ?? ""}`);
+    appendEvent(cfg.repoRoot, "architect_checkpoint_replan", { assessment: result.assessment, suggestedChanges: result.suggestedChanges }, cfg.runsRoot, cfg.stateFile);
+    runPlannerPhase(cfg, policy, agentCallCounter);
+    return;
+  }
+
+  console.log(`Architect checkpoint: continue. ${result.assessment ?? ""}`);
+}
+
 // Main entry point. Throws LoopError with an appropriate exitCode on terminal failures.
 export function runAgenticLoop(config: LoopConfig): void {
   const cfg: Required<LoopConfig> = {
@@ -269,8 +386,10 @@ export function runAgenticLoop(config: LoopConfig): void {
     autoAcceptPassed:   config.autoAcceptPassed   ?? false,
     cleanupPassed:      config.cleanupPassed      ?? false,
     fastVerifier:       config.fastVerifier       ?? false,
-    rebaseBeforeVerify: config.rebaseBeforeVerify ?? false,
-    finalizeDocs:       config.finalizeDocs       ?? false,
+    rebaseBeforeVerify:          config.rebaseBeforeVerify          ?? false,
+    finalizeDocs:                config.finalizeDocs                ?? false,
+    goalReview:                  config.goalReview                  ?? false,
+    architectCheckpointInterval: config.architectCheckpointInterval ?? 0,
     repoRoot:           config.repoRoot,
     agent:              config.agent,
     verifierAgent:      config.verifierAgent      ?? config.agent,
@@ -292,8 +411,9 @@ export function runAgenticLoop(config: LoopConfig): void {
       if (cfg.planOnly) { console.log("<promise>PLANNED</promise>"); return; }
     }
   }
-  // Track replan count across the session (loaded fresh each iteration below)
-  let sessionReplanCount = 0;
+  // Track replan count and architect checkpoint state across the session.
+  const sessionReplanCountRef = { count: 0 };
+  let passedSinceLastCheckpoint = 0;
   if (cfg.planOnly) { console.log("<promise>PLANNED</promise>"); return; }
 
   // ── Execution loop ────────────────────────────────────────────────────────
@@ -335,6 +455,7 @@ export function runAgenticLoop(config: LoopConfig): void {
       if (hasUnfinishedTasks(state)) {
         throw new LoopError(`No runnable task available. Blocked by dependencies:\n${getBlockedDependencySummary(state)}`);
       }
+      if (cfg.goalReview) runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
       if (cfg.finalizeDocs && cfg.merge) runFinalizeDocsPhase(cfg, agentCallCounter);
       console.log("<promise>COMPLETE</promise>");
       return;
@@ -410,11 +531,11 @@ export function runAgenticLoop(config: LoopConfig): void {
           ].filter(Boolean).join("; ");
 
           // Replan budget guard
-          sessionReplanCount++;
-          if (cfg.maxReplans > 0 && sessionReplanCount > cfg.maxReplans) {
-            const budgetReason = `replan budget exhausted (${sessionReplanCount - 1} replans >= maxReplans ${cfg.maxReplans}); stopping to avoid thrash. Last reason: ${reason}`;
+          sessionReplanCountRef.count++;
+          if (cfg.maxReplans > 0 && sessionReplanCountRef.count > cfg.maxReplans) {
+            const budgetReason = `replan budget exhausted (${sessionReplanCountRef.count - 1} replans >= maxReplans ${cfg.maxReplans}); stopping to avoid thrash. Last reason: ${reason}`;
             setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "task_grill", reason: budgetReason, resultFile: taskGrillResult });
-            appendEvent(cfg.repoRoot, "replan_budget_exhausted", { task: taskId, sessionReplanCount, maxReplans: cfg.maxReplans, reason: budgetReason }, cfg.runsRoot, cfg.stateFile);
+            appendEvent(cfg.repoRoot, "replan_budget_exhausted", { task: taskId, sessionReplanCount: sessionReplanCountRef.count, maxReplans: cfg.maxReplans, reason: budgetReason }, cfg.runsRoot, cfg.stateFile);
             copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
             throw new LoopError(`Replan budget exhausted for ${taskId}: ${budgetReason}`);
           }
@@ -424,7 +545,7 @@ export function runAgenticLoop(config: LoopConfig): void {
           const prevReplanTaskIds = (preReplanState.lastReplanTaskIds ?? []).slice().sort().join(",");
 
           setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "blocked", { at: new Date().toISOString(), phase: "task_grill", reason, resultFile: taskGrillResult });
-          appendEvent(cfg.repoRoot, "task_replan_requested", { task: taskId, reason, resultFile: taskGrillResult, sessionReplanCount }, cfg.runsRoot, cfg.stateFile);
+          appendEvent(cfg.repoRoot, "task_replan_requested", { task: taskId, reason, resultFile: taskGrillResult, sessionReplanCount: sessionReplanCountRef.count }, cfg.runsRoot, cfg.stateFile);
 
           const replanTask = getTasks(loadState(cfg.repoRoot, cfg.stateFile)!).find((t) => t.id === taskId);
           const newTaskIds = runPlannerPhase(cfg, policy, agentCallCounter, replanTask ? getLastFailureAnalysisFile(replanTask) : "");
@@ -434,7 +555,7 @@ export function runAgenticLoop(config: LoopConfig): void {
           if (prevReplanTaskIds.length > 0 && newTaskIdsKey === prevReplanTaskIds) {
             const thrashReason = `replan produced the same task set as the previous replan (${newTaskIdsKey}); stopping to avoid infinite loop`;
             const afterState = loadState(cfg.repoRoot, cfg.stateFile)!;
-            appendEvent(cfg.repoRoot, "replan_convergence_failure", { task: taskId, taskIds: newTaskIdsKey, sessionReplanCount }, cfg.runsRoot, cfg.stateFile);
+            appendEvent(cfg.repoRoot, "replan_convergence_failure", { task: taskId, taskIds: newTaskIdsKey, sessionReplanCount: sessionReplanCountRef.count }, cfg.runsRoot, cfg.stateFile);
             for (const t of getTasks(afterState).filter((t) => t.status === "pending" || t.status === "needs_retry")) {
               setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, t.id, "needs_human", { at: new Date().toISOString(), phase: "replan_convergence", reason: thrashReason, resultFile: "" });
             }
@@ -707,6 +828,14 @@ export function runAgenticLoop(config: LoopConfig): void {
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         appendProgress(join(cfg.repoRoot, cfg.runsRoot), taskId, verifierResultObj.summary ?? "", handoverFile);
         if (cfg.cleanupPassed && worktreeExists(worktreePath)) removeWorktree(worktreePath, cfg.repoRoot);
+
+        // Architect checkpoint: trigger every N passed tasks if configured.
+        passedSinceLastCheckpoint++;
+        if (cfg.architectCheckpointInterval > 0 && passedSinceLastCheckpoint >= cfg.architectCheckpointInterval) {
+          passedSinceLastCheckpoint = 0;
+          runArchitectCheckpointPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef);
+        }
+
         if (cfg.retryTaskId) { console.log("<promise>COMPLETE</promise>"); return; }
 
       } else if (verifierResultObj.verdict === "needs_human") {
@@ -741,6 +870,7 @@ export function runAgenticLoop(config: LoopConfig): void {
     if (hasUnfinishedTasks(finalState)) {
       throw new LoopError(`Reached max iterations or no runnable task. Blocked by dependencies:\n${getBlockedDependencySummary(finalState)}`);
     }
+    if (cfg.goalReview) runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
     if (cfg.finalizeDocs && cfg.merge) runFinalizeDocsPhase(cfg, agentCallCounter);
     console.log("<promise>COMPLETE</promise>");
     return;

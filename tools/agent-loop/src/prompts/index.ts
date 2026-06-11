@@ -616,6 +616,131 @@ export function writeFailureAnalysis(opts: WriteFailureAnalysisOptions): Failure
   return analysis;
 }
 
+export interface GoalReviewPromptOptions {
+  repoRoot: string;
+  runsRoot: string;
+  stateFile: string;
+  budget: PromptBudget;
+  state: AgenticState;
+  loopBaseRef: string;
+  resultFile: string;
+}
+
+export function writeGoalReviewPrompt(promptFile: string, opts: GoalReviewPromptOptions): void {
+  const { repoRoot, runsRoot, stateFile, budget, state, loopBaseRef, resultFile } = opts;
+
+  const limits = getPromptBudgetLimits(budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const passedTasks = (state.tasks ?? []).filter((t) => t.status === "passed");
+  const passedSummary = passedTasks.length
+    ? passedTasks.map((t) => `- ${t.id}: ${t.title ?? "(no title)"}`).join("\n")
+    : "(none)";
+  const diffStat = loopBaseRef
+    ? git(["diff", "--stat", loopBaseRef, "HEAD"], repoRoot)
+    : git(["diff", "--stat", "HEAD"], repoRoot);
+
+  const content = [
+    "You are the goal reviewer for a completed agentic loop run.",
+    "",
+    "Your job: judge whether the work completed actually achieves the stated goal.",
+    "Be critical. Look for gaps, missing pieces, and wrong scope.",
+    "",
+    "Read AGENTS.md / CLAUDE.md and inspect repo state and diffs before deciding.",
+    "",
+    `Write your verdict JSON only to: ${resultFile}`,
+    "",
+    "Allowed verdicts: pass, needs_human.",
+    `Schema: { "verdict": "pass|needs_human", "summary": "...", "gaps": [] }`,
+    "",
+    "- pass: the cumulative work clearly satisfies the goal; no material gaps.",
+    "- needs_human: one or more significant gaps exist between the completed work and the goal.",
+    "",
+    `Goal: ${state.goal ?? "(no goal recorded)"}`,
+    "",
+    "Passed tasks:",
+    passedSummary,
+    "",
+    "Current assumptions:",
+    (state.assumptions?.length ? state.assumptions.join("\n") : "(none)"),
+    "",
+    "Cumulative diff stat since loop start:",
+    diffStat || "(no diff)",
+    "",
+    `Recent harness history:`,
+    recentHistory,
+  ].join("\n");
+
+  mkdirSync(dirname(promptFile), { recursive: true });
+  writeFileSync(promptFile, content, "utf-8");
+}
+
+export interface ArchitectCheckpointPromptOptions {
+  repoRoot: string;
+  runsRoot: string;
+  stateFile: string;
+  budget: PromptBudget;
+  state: AgenticState;
+  loopBaseRef: string;
+  passedCount: number;
+  resultFile: string;
+}
+
+export function writeArchitectCheckpointPrompt(promptFile: string, opts: ArchitectCheckpointPromptOptions): void {
+  const { repoRoot, runsRoot, stateFile, budget, state, loopBaseRef, passedCount, resultFile } = opts;
+
+  const limits = getPromptBudgetLimits(budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const tasks = state.tasks ?? [];
+  const passedTasks = tasks.filter((t) => t.status === "passed");
+  const remainingTasks = tasks.filter((t) => !["passed", "blocked"].includes(t.status ?? ""));
+  const diffStat = loopBaseRef
+    ? git(["diff", "--stat", loopBaseRef, "HEAD"], repoRoot)
+    : git(["diff", "--stat", "HEAD"], repoRoot);
+
+  const content = [
+    "You are the architect reviewer for an in-progress agentic loop.",
+    "",
+    `${passedCount} task(s) have passed since the last checkpoint. Review the plan and cumulative diff for drift.`,
+    "",
+    "Ask yourself:",
+    "- Is the remaining plan still correct given what has actually been built?",
+    "- Does the cumulative diff reveal that the plan is heading in the wrong direction?",
+    "- Are there missing tasks the plan failed to account for?",
+    "- Is the goal still achievable with the current plan, or does the plan need a rethink?",
+    "",
+    "Read AGENTS.md / CLAUDE.md and inspect repo state before deciding.",
+    "",
+    `Write your verdict JSON only to: ${resultFile}`,
+    "",
+    "Allowed verdicts: continue, replan, needs_human.",
+    `Schema: { "verdict": "continue|replan|needs_human", "assessment": "...", "suggestedChanges": [] }`,
+    "",
+    "- continue: plan is on track; proceed.",
+    "- replan: the remaining plan needs significant rethinking; the harness will call the planner.",
+    "- needs_human: drift is too severe or risky to resolve autonomously.",
+    "",
+    `Goal: ${state.goal ?? "(no goal recorded)"}`,
+    "",
+    "Passed tasks:",
+    passedTasks.length ? passedTasks.map((t) => `- ${t.id}: ${t.title ?? ""}`).join("\n") : "(none)",
+    "",
+    "Remaining tasks:",
+    remainingTasks.length ? remainingTasks.map((t) => `- [${t.status}] ${t.id}: ${t.title ?? ""}`).join("\n") : "(none — all done)",
+    "",
+    "Current assumptions:",
+    (state.assumptions?.length ? state.assumptions.join("\n") : "(none)"),
+    "",
+    "Cumulative diff stat since loop start:",
+    diffStat || "(no diff)",
+    "",
+    `Recent harness history:`,
+    recentHistory,
+  ].join("\n");
+
+  mkdirSync(dirname(promptFile), { recursive: true });
+  writeFileSync(promptFile, content, "utf-8");
+}
+
 export interface FinalizeDocsPromptOptions {
   repoRoot: string;
   runsRoot: string;
