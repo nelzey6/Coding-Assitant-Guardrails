@@ -108,52 +108,61 @@ Use the workflow policy's canonical skill mapping. In short:
 
 Do not copy these skills' detailed procedures into loop prompts. Tell the agent to read and follow the canonical installed skill.
 
-## Harness
+## How to run
 
-For full autonomous execution in this repository, prefer the TypeScript runner:
+### You are inside Claude Code right now
 
-```bash
-cd tools/agent-loop
-npm run agent -- run --tool claude --checks "npm test"
+Claude Code is the executor. Do **not** try to spawn the harness as a subprocess — `claude` cannot nest itself.
+
+Instead, when this skill is invoked, do the following directly in the conversation:
+
+1. If `agentic.json` has no tasks yet: plan the goal into tasks and write them to `agentic.json`.
+2. For each `pending` task in priority order:
+   - **Task-grill** — confirm the task is still understood, scoped, and safe.
+   - **Execute** — make the code changes in the repo.
+   - **Checks** — run the configured validation commands from `agentic.json`.
+   - **Verify** — review the diff and check output; decide pass/fail.
+   - Update `agentic.json` task status and print a progress summary to the conversation.
+3. If `agentic.json` already has `pending` tasks (resume case): skip planning, start executing immediately.
+
+Write all artifacts to `.agent-runs/agentic-<timestamp>-<task-id>/` and append every phase transition to `.agent-runs/events.jsonl`. After each task, print to the conversation: task ID, grill verdict, checks result, verifier verdict, and run dir path.
+
+### From a terminal (unattended, fresh agents per task)
+
+The harness spawns a brand-new `pi` process for each executor and verifier call. `pi` is the default tool.
+
+```powershell
+# Run everything (plan if needed, then execute all tasks)
+agentic-loop run --checks "npm test"
+
+# Plan only — review agentic.json before executing
+agentic-loop run --plan-only
+agentic-loop run                        # resume from the plan
+
+# Use Claude instead of pi
+agentic-loop run --tool claude --checks "npm test"
+
+# Keep task branches for human review instead of auto-merging
+agentic-loop run --no-merge --checks "npm test"
 ```
 
-or with another CLI:
+Inspect a running or stuck loop:
 
-```bash
-cd tools/agent-loop
-npm run agent -- run --tool custom --command 'my-agent run --prompt-file {prompt}'
+```powershell
+agentic-loop status        # task list + what's next
+agentic-loop why-stuck     # explain blocked/needs_human tasks
+agentic-loop last-failure  # most recent failure details
 ```
 
-The legacy PowerShell harness still exists under `scripts/agentic/agentic-loop.ps1` and may be the installed shim in product repos until packaging migrates to the TS runner.
+### Pre-flight validation (this repo only)
 
-### Pre-flight validation
-
-Before invoking a multi-iteration harness, run the TS CLI validation check:
+Before running an autonomous loop on this repository, verify the skill/README consistency:
 
 ```bash
 cd tools/agent-loop && npx tsx src/index.ts validate
 ```
 
-If this exits non-zero, stop and report the violations before running an autonomous loop. The validator checks that all promotable skills (`engineering/`, `productivity/`, `misc/`) are registered in `.claude-plugin/plugin.json` and linked in both the top-level and bucket `README.md` files, and that excluded skills (`personal/`, `in-progress/`, `deprecated/`) are absent from those surfaces.
-
-**Execution mode depends on the runtime context:**
-
-- **Inside Claude Code / Codex (in-session):** Claude Code *is* the executor — do not try to spawn the harness as a subprocess. Instead, prepare `agentic.json`, then execute each pending task directly in this conversation (plan → task-grill → execute → verify per task), updating task status in `agentic.json` as you go. Print the equivalent harness command at the end so the user can re-run unattended from a terminal.
-- **From a terminal (unattended):** Run `agentic-loop run --tool claude` directly. The harness spawns fresh `claude` CLI processes for each phase. This is the intended path for fully autonomous multi-task runs outside a conversation.
-
-Never try to spawn `agentic-loop run` as a subprocess from inside Claude Code — `claude` cannot nest itself.
-
-### Resuming after a plan-only stop
-
-If `agentic.json` already exists with `pending` tasks (e.g. from a prior `--plan-only` run or a stopped session), skip the planner and go straight to execution:
-
-```powershell
-agentic-loop --tool claude
-```
-
-The harness picks up all `pending` and `needs_retry` tasks with satisfied dependencies and continues the loop. No replanning needed unless the user asks for it.
-
-When this skill is invoked inside Claude Code and `agentic.json` already has pending tasks, treat it as a resume request — pick up the next pending task and execute it directly in the conversation without re-planning.
+Stop and report violations if this exits non-zero.
 
 ## Worktree execution
 

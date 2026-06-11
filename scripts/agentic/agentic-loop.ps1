@@ -9,7 +9,7 @@ Runs an agentic coding loop over agentic.json using fresh agent calls, worktrees
 
 Options:
   --goal <text>              Goal used to create agentic.json when missing or empty
-  --tool <name>              Tool adapter: claude | pi | custom (default: claude)
+  --tool <name>              Tool adapter: pi | claude | custom (default: pi)
   --command <template>       Executor command template. Use {prompt} for prompt file.
   --verifier-command <tpl>   Verifier command template. Defaults to --command/tool adapter.
   --max-iterations <n>       Max task iterations (default: agentic.json maxIterations, or 10)
@@ -148,7 +148,7 @@ function ConvertTo-SafeSlug([string]$Value) {
     return $slug.Trim('-')
 }
 
-$tool = if ($env:AGENTIC_TOOL) { $env:AGENTIC_TOOL } else { "claude" }
+$tool = if ($env:AGENTIC_TOOL) { $env:AGENTIC_TOOL } else { "pi" }
 $commandTemplate = if ($env:AGENTIC_COMMAND) { $env:AGENTIC_COMMAND } else { "" }
 $verifierCommandTemplate = if ($env:AGENTIC_VERIFIER_COMMAND) { $env:AGENTIC_VERIFIER_COMMAND } else { "" }
 $maxIterations = if ($env:AGENTIC_MAX_ITERATIONS) { $env:AGENTIC_MAX_ITERATIONS } else { "" }

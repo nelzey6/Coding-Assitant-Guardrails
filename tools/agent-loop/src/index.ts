@@ -384,7 +384,7 @@ program
   .option("--state <file>",                  "State file name relative to repo root (default: agentic.json)")
   .option("--runs-root <path>",              "Event log / run artifact root (default: .agent-runs)")
   .option("--worktree-root <path>",          "Worktree root (default: .worktrees)")
-  .option("--tool <name>",                   "Agent tool: claude | pi | custom (default: claude)", "claude")
+  .option("--tool <name>",                   "Agent tool: pi | claude | custom (default: pi)", "pi")
   .option("--command <template>",            "Shell command template; {prompt} is replaced with the prompt file path")
   .option("--verifier-command <template>",   "Separate command template for the verifier agent (defaults to --command)")
   .option("--agent-timeout <seconds>",       "Seconds before an agent invocation is killed (0 = none)", "0")
@@ -414,7 +414,7 @@ program
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
 
-    const agentTool = (opts.tool ?? "claude") as AgentTool;
+    const agentTool = (opts.tool ?? "pi") as AgentTool;
     const agentConfig: AgentConfig = {
       tool: agentTool,
       commandTemplate: opts.command ?? "",
