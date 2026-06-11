@@ -40,7 +40,7 @@ Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA
 | `tools/agent-loop/src/index.ts` | Commander CLI entry point. Defines `validate`, `plan`, diagnostics, `accept`, `reset-task`, and `run`. |
 | `tools/agent-loop/src/loop/index.ts` | Autonomous run engine. Owns planner, task-grill, executor, checks, scope rail, verifier, replan, commit/merge, handover, and finalize-docs phases. |
 | `tools/agent-loop/src/prompts/index.ts` | Prompt builders for planner, task-grill, executor, verifier, finalize-docs, and prompt budget trimming. |
-| `tools/agent-loop/src/state/index.ts` | `agentic.json` schema helpers, task selection, task status changes, attempts, failure history, planner result merge, and replan tracking (`replanCount`, `lastReplanTaskIds`). |
+| `tools/agent-loop/src/state/index.ts` | `agentic.json` schema helpers, task selection, task status changes, attempts, failure history (including `failureAnalysisFile` pointer), planner result merge, and replan tracking (`replanCount`, `lastReplanTaskIds`). |
 | `tools/agent-loop/src/agent/index.ts` | Agent invocation adapters for `claude`, `pi`, and custom command templates. |
 | `tools/agent-loop/src/checks/index.ts` | Validation command execution, timeout handling, structured `METRIC key=value` parsing. |
 | `tools/agent-loop/src/scope/index.ts` | Scope glob matching, out-of-scope diff detection, unscoped task detection, fast-verifier eligibility, high-risk task detection. |
@@ -135,6 +135,7 @@ Current TS rails:
 - Fast verifier is denied unless task kind is low-risk and scope is declared.
 - High-risk tasks can receive multiple adversarial verifier votes.
 - Check/verifier failures retry until budget, then escalate to `needs_human`.
+- On every failure (checks, scope, verifier, rebase-checks), the harness writes `failure-analysis.json` to the run dir with phase, attempt, truncated reason, and diff stat. The path is stored in the task's `failureHistory` and injected into the next task-grill and replan planner prompts to break blind-retry loops.
 - Runtime and agent-call budgets emit `budget_exhausted`.
 - Replan budget (`--max-replans`, default 5) caps how many times task-grill can trigger replanning per session; exhaustion emits `replan_budget_exhausted` and escalates to `needs_human`.
 - Convergence detection: if a replan produces the same task IDs as the previous replan, the loop emits `replan_convergence_failure` and halts.
@@ -146,7 +147,6 @@ Known gaps before calling the TS runner production-default:
 - `run` does not yet enforce the policy clean-main-worktree gate.
 - CLI defaults do not fully honor policy defaults such as retry count and merge mode.
 - `promptPolicy.lessons` exists in state but is not yet updated as structured learning memory.
-- Check/verifier failures do not yet produce a `failure-analysis.json` fed forward to the next task-grill or replan prompt.
 - Task-grill's `assumptionsStillValid`/`assumptionsChanged` output is not yet persisted back into `state.assumptions`.
 - Architect-level checkpointing across multiple passed tasks is not yet implemented.
 - Final goal review (cumulative diff vs. original goal) after all tasks pass is not yet implemented.
@@ -167,6 +167,7 @@ Known gaps before calling the TS runner production-default:
 - fast-verifier allowed for low-risk scoped task
 - check failure retry then pass
 - verifier failure retry budget exhaustion to `needs_human`
+- failure-analysis injected into task-grill prompt on retry
 - replan budget exhaustion (`replan_budget_exhausted`) via `--max-replans`
 - replan convergence detection (`replan_convergence_failure`) when plan produces identical task IDs
 

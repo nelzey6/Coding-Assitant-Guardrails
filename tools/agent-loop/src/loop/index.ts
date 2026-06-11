@@ -13,6 +13,7 @@ import {
   setTaskPassed,
   addTaskAttempt,
   getFailureStatusForTask,
+  getLastFailureAnalysisFile,
   mergePlannerResult,
   type AgenticState,
   type Task,
@@ -34,6 +35,7 @@ import {
   writeFinalizeDocsPrompt,
   validatePlannerResult,
   getPromptBudgetLimits,
+  writeFailureAnalysis,
   type PromptBudget,
 } from "../prompts/index.js";
 import { loadPolicy, type WorkflowPolicy } from "../policy/index.js";
@@ -127,7 +129,8 @@ function resolveVerifierVotes(task: Task, policy: WorkflowPolicy, forcedVotes = 
 function runPlannerPhase(
   cfg: Required<LoopConfig>,
   policy: WorkflowPolicy,
-  agentCallCounter: { count: number }
+  agentCallCounter: { count: number },
+  priorFailureAnalysisFile = ""
 ): string[] {
   const ts = timestamp();
   const plannerRunDir = join(cfg.repoRoot, cfg.runsRoot, `agentic-${ts}-planner`);
@@ -159,6 +162,7 @@ function runPlannerPhase(
     repoContextFile,
     grillTranscriptFile: grillFile,
     codeGraphFile,
+    priorFailureAnalysisFile,
   });
 
   appendEvent(cfg.repoRoot, "planner_started", { runDir: plannerRunDir, prompt: promptFile, resultFile, grillTranscript: grillFile }, cfg.runsRoot, cfg.stateFile);
@@ -350,9 +354,10 @@ export function runAgenticLoop(config: LoopConfig): void {
     const executorLog     = join(runDir, "executor.log");
     const checksLog       = join(runDir, "checks.log");
     const verifierLog     = join(runDir, "verifier.log");
-    const handoverFile    = join(runDir, "handover.md");
-    const stateBefore     = join(runDir, "state-before.json");
-    const stateAfter      = join(runDir, "state-after.json");
+    const handoverFile         = join(runDir, "handover.md");
+    const failureAnalysisFile  = join(runDir, "failure-analysis.json");
+    const stateBefore          = join(runDir, "state-before.json");
+    const stateAfter           = join(runDir, "state-after.json");
 
     console.log(`=== Agentic iteration ${iteration}/${cfg.maxIterations}: ${taskId} ===`);
     appendEvent(cfg.repoRoot, "iteration_started", { task: taskId, iteration, runDir, branch, worktree: worktreePath }, cfg.runsRoot, cfg.stateFile);
@@ -383,6 +388,7 @@ export function runAgenticLoop(config: LoopConfig): void {
         eventLogPath,
         codeGraphFile,
         policy,
+        priorFailureAnalysisFile: getLastFailureAnalysisFile(task),
       });
       appendEvent(cfg.repoRoot, "task_grill_started", { task: taskId, prompt: taskGrillPrompt, resultFile: taskGrillResult, log: taskGrillLog }, cfg.runsRoot, cfg.stateFile);
       agentCallCounter.count++;
@@ -416,7 +422,8 @@ export function runAgenticLoop(config: LoopConfig): void {
           setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "blocked", { at: new Date().toISOString(), phase: "task_grill", reason, resultFile: taskGrillResult });
           appendEvent(cfg.repoRoot, "task_replan_requested", { task: taskId, reason, resultFile: taskGrillResult, sessionReplanCount }, cfg.runsRoot, cfg.stateFile);
 
-          const newTaskIds = runPlannerPhase(cfg, policy, agentCallCounter);
+          const replanTask = getTasks(loadState(cfg.repoRoot, cfg.stateFile)!).find((t) => t.id === taskId);
+          const newTaskIds = runPlannerPhase(cfg, policy, agentCallCounter, replanTask ? getLastFailureAnalysisFile(replanTask) : "");
           const newTaskIdsKey = newTaskIds.slice().sort().join(",");
 
           // Non-convergence detection: if this replan produced the same task IDs as the previous replan, it's thrashing
@@ -499,7 +506,8 @@ export function runAgenticLoop(config: LoopConfig): void {
         const failureStatus = getFailureStatusForTask(task, "checks", cfg.maxRetries);
         const metrics = parseMetricLines(checkOutput);
         appendEvent(cfg.repoRoot, "checks_failed", { task: taskId, status: failureStatus, reason: checkOutput, log: checksLog, metrics }, cfg.runsRoot, cfg.stateFile);
-        setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, failureStatus, { at: new Date().toISOString(), phase: "checks", reason: checkOutput, resultFile: verifierResult });
+        writeFailureAnalysis({ taskId, phase: "checks", attempt: task.attempts ?? 1, rawOutput: checkOutput, worktreePath, outputFile: failureAnalysisFile });
+        setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, failureStatus, { at: new Date().toISOString(), phase: "checks", reason: checkOutput, resultFile: verifierResult, failureAnalysisFile });
         writeDiffArtifacts(worktreePath, runDir);
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         if (failureStatus === "needs_retry") { console.warn(`Checks failed for ${taskId}; marked ${failureStatus}.`); continue; }
@@ -517,7 +525,8 @@ export function runAgenticLoop(config: LoopConfig): void {
           const failureStatus = getFailureStatusForTask(task, "checks", cfg.maxRetries);
           appendEvent(cfg.repoRoot, "scope_violation", { task: taskId, status: failureStatus, outOfScope, scope: taskScope }, cfg.runsRoot, cfg.stateFile);
           writeChecksLog(checksLog, `${checkOutput}\n\nSCOPE VIOLATION: ${scopeReason}`);
-          setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, failureStatus, { at: new Date().toISOString(), phase: "scope", reason: scopeReason, resultFile: verifierResult });
+          writeFailureAnalysis({ taskId, phase: "scope", attempt: task.attempts ?? 1, rawOutput: scopeReason, worktreePath, outputFile: failureAnalysisFile });
+          setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, failureStatus, { at: new Date().toISOString(), phase: "scope", reason: scopeReason, resultFile: verifierResult, failureAnalysisFile });
           copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
           if (failureStatus === "needs_retry") { console.warn(scopeReason); continue; }
           throw new LoopError(`Scope violation for ${taskId}; marked ${failureStatus}. ${scopeReason}`);
@@ -554,7 +563,8 @@ export function runAgenticLoop(config: LoopConfig): void {
             checkOutput = err instanceof Error ? err.message : String(err);
             const rebaseCheckFailStatus = getFailureStatusForTask(task, "checks", cfg.maxRetries);
             appendEvent(cfg.repoRoot, "rebase_checks_failed", { task: taskId, status: rebaseCheckFailStatus, reason: checkOutput }, cfg.runsRoot, cfg.stateFile);
-            setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, rebaseCheckFailStatus, { at: new Date().toISOString(), phase: "rebase_checks", reason: checkOutput, resultFile: verifierResult });
+            writeFailureAnalysis({ taskId, phase: "rebase_checks", attempt: task.attempts ?? 1, rawOutput: checkOutput, worktreePath, outputFile: failureAnalysisFile });
+            setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, rebaseCheckFailStatus, { at: new Date().toISOString(), phase: "rebase_checks", reason: checkOutput, resultFile: verifierResult, failureAnalysisFile });
             writeDiffArtifacts(worktreePath, runDir);
             copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
             if (rebaseCheckFailStatus === "needs_retry") { console.warn(`Post-rebase checks failed for ${taskId}; marked ${rebaseCheckFailStatus}.`); continue; }
@@ -689,13 +699,15 @@ export function runAgenticLoop(config: LoopConfig): void {
         if (cfg.retryTaskId) { console.log("<promise>COMPLETE</promise>"); return; }
 
       } else if (verifierResultObj.verdict === "needs_human") {
-        setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "verifier", reason: verifierResultObj.summary ?? "", resultFile: verifierResult });
+        writeFailureAnalysis({ taskId, phase: "verifier", attempt: task.attempts ?? 1, rawOutput: [verifierResultObj.summary ?? "", ...(verifierResultObj.issues ?? [])].filter(Boolean).join("\n"), worktreePath, outputFile: failureAnalysisFile });
+        setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "verifier", reason: verifierResultObj.summary ?? "", resultFile: verifierResult, failureAnalysisFile });
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         throw new LoopError(`Verifier returned needs_human for ${taskId}. Worktree retained at ${worktreePath}.`);
 
       } else {
         const failureStatus = getFailureStatusForTask(task, "verifier", cfg.maxRetries);
-        setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, failureStatus, { at: new Date().toISOString(), phase: "verifier", reason: verifierResultObj.summary ?? "", resultFile: verifierResult });
+        writeFailureAnalysis({ taskId, phase: "verifier", attempt: task.attempts ?? 1, rawOutput: [verifierResultObj.summary ?? "", ...(verifierResultObj.issues ?? [])].filter(Boolean).join("\n"), worktreePath, outputFile: failureAnalysisFile });
+        setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, failureStatus, { at: new Date().toISOString(), phase: "verifier", reason: verifierResultObj.summary ?? "", resultFile: verifierResult, failureAnalysisFile });
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         if (failureStatus === "needs_retry") { console.warn(`Verifier failed ${taskId}; marked ${failureStatus}.`); continue; }
         throw new LoopError(`Verifier failed ${taskId}; marked ${failureStatus}. Worktree retained at ${worktreePath}.`);

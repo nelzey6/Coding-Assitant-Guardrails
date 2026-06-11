@@ -599,6 +599,75 @@ writeFileSync("output.txt", "done", "utf-8");
   }
 });
 
+// ── case 7b: failure-analysis injected into task-grill on retry ──────────────
+// Attempt 1: executor writes output.txt, checks fail (node exits 1).
+// Harness writes failure-analysis.json and marks needs_retry.
+// Attempt 2: task-grill prompt must contain "Prior attempt failure analysis".
+// Executor writes output.txt again, checks pass, task passes.
+
+runCase("failure-analysis: injected into task-grill on retry", () => {
+  const dir = tmpRepo("failure-analysis");
+  try {
+    writeState(dir, baseState(
+      { validation: ["node -e \"if(!require('fs').existsSync('output.txt'))process.exit(1)\""] },
+      { maxIterations: 3 }
+    ));
+
+    // Track whether task-grill on attempt 2 received the failure analysis.
+    // Write the fake agent directly (not via writeFakeAgent) so we own the task-grill handler.
+    const grillLogFile = join(dir, "grill-saw-failure-analysis.txt");
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  if (!m) throw new Error("no task-grill result path");
+  const resultPath = m[1].trim();
+  mkdirSync(dirname(resultPath), { recursive: true });
+  if (content.includes("Prior attempt failure analysis")) {
+    writeFileSync(${JSON.stringify(grillLogFile)}, "yes", "utf-8");
+  }
+  writeFileSync(resultPath, JSON.stringify({
+    verdict: "ready", understanding: "ok", evidence: [], assumptionsStillValid: [],
+    assumptionsChanged: [], scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: [], risks: [], executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+// Executor: only write output.txt on attempt 2
+if (content.includes('"attempts": 2') || content.includes('"attempts":2')) {
+  writeFileSync("output.txt", "done", "utf-8");
+}
+`, "utf-8");
+    const agent = agentPath;
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--max-retries", "2", "--no-merge"], 90_000);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+    assert(existsSync(grillLogFile), "task-grill on retry must have received prior failure analysis block");
+    const events = readEvents(dir);
+    assert(hasEvent(events, "checks_failed"), "expected checks_failed on first attempt");
+    assert(hasEvent(events, "task_passed"), "expected task_passed on second attempt");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── case 8: replan budget exhaustion ─────────────────────────────────────────
 // Agent: task-grill always returns needs_replan; planner always writes a new unique task
 // so convergence detection doesn't fire. Budget guard fires on replan #2 when maxReplans=1.

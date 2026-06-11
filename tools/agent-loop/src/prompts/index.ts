@@ -202,17 +202,40 @@ export interface PlannerPromptOptions {
   repoContextFile: string;
   grillTranscriptFile: string;
   codeGraphFile: string;
+  /** Path to failure-analysis.json from the task that triggered this replan, if any. */
+  priorFailureAnalysisFile?: string;
 }
 
 export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOptions): void {
   const {
     repoRoot, runsRoot, stateFile, budget, state, resolvedPolicyFile,
     plannerResultFile, repoContextFile, grillTranscriptFile, codeGraphFile,
+    priorFailureAnalysisFile = "",
   } = opts;
 
   const policyText = resolvedPolicyFile && existsSync(resolvedPolicyFile)
     ? readFileSync(resolvedPolicyFile, "utf-8")
     : "";
+
+  const priorFailureBlock = (() => {
+    if (!priorFailureAnalysisFile || !existsSync(priorFailureAnalysisFile)) return "";
+    try {
+      const fa = JSON.parse(readFileSync(priorFailureAnalysisFile, "utf-8"));
+      return [
+        "",
+        "A prior task attempt failed and triggered this replan. Use this failure context when designing the new plan:",
+        `- Failed task: ${fa.taskId ?? "unknown"}`,
+        `- Phase that failed: ${fa.phase ?? "unknown"}`,
+        `- Attempt number: ${fa.attempt ?? "unknown"}`,
+        `- Diff stat at failure:\n${fa.diffStat || "(none)"}`,
+        `- Failure reason (truncated):\n${fa.reason || "(none)"}`,
+        "",
+        "Design tasks that avoid repeating the same failure. If the failure reveals a misunderstanding of the codebase, investigate before proposing implementation tasks.",
+      ].join("\n");
+    } catch {
+      return "";
+    }
+  })();
 
   const content = [
     "You are the planner for an autonomous agentic coding loop.",
@@ -258,6 +281,7 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
       artifacts: ["path/to/grill-transcript.md"],
     }, null, 2),
     `Each task object: ${JSON.stringify({ id: "...", title: "...", kind: "...", workflow: "...", status: "pending", priority: 1, acceptanceCriteria: [], validation: [], dependsOn: [], failureHistory: [], artifacts: [], scope: ["scripts/agentic/**"] })}`,
+    priorFailureBlock,
     "",
     `Goal: ${state.goal ?? ""}`,
     "Policy:",
@@ -267,6 +291,7 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
   writePromptWithEvent(promptFile, content, "planner", repoRoot, runsRoot, stateFile, budget, {
     resultFile: plannerResultFile,
     codegraph: codeGraphFile,
+    priorFailureAnalysis: priorFailureAnalysisFile || undefined,
   });
 }
 
@@ -371,17 +396,38 @@ export interface TaskGrillPromptOptions {
   eventLogPath: string;
   codeGraphFile?: string;
   policy: WorkflowPolicy;
+  /** Path to failure-analysis.json from the most recent failed attempt, if any. */
+  priorFailureAnalysisFile?: string;
 }
 
 export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOptions): void {
   const {
     repoRoot, runsRoot, stateFile, budget, task, iteration, runDir,
     resultFile, eventLogPath: evLogPath, codeGraphFile = "", policy,
+    priorFailureAnalysisFile = "",
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
   const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
   const taskJson = JSON.stringify(task, null, 2);
+
+  const priorFailureBlock = (() => {
+    if (!priorFailureAnalysisFile || !existsSync(priorFailureAnalysisFile)) return "";
+    try {
+      const fa = JSON.parse(readFileSync(priorFailureAnalysisFile, "utf-8"));
+      return [
+        "",
+        "Prior attempt failure analysis (read carefully before deciding verdict):",
+        `- Phase that failed: ${fa.phase ?? "unknown"}`,
+        `- Attempt number: ${fa.attempt ?? "unknown"}`,
+        `- Failed at: ${fa.failedAt ?? "unknown"}`,
+        `- Diff stat at failure:\n${fa.diffStat || "(none)"}`,
+        `- Failure reason (truncated):\n${fa.reason || "(none)"}`,
+      ].join("\n");
+    } catch {
+      return "";
+    }
+  })();
 
   const content = [
     "You are the task-grill reviewer for one autonomous agentic loop turn.",
@@ -422,6 +468,7 @@ export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOp
     }, null, 2),
     "",
     "If verdict is not ready, explain why in risks or assumptionsChanged. The harness will stop before executor edits.",
+    priorFailureBlock,
     "",
     `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
     recentHistory,
@@ -437,6 +484,7 @@ export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOp
     task: task.id,
     resultFile,
     codegraph: codeGraphFile,
+    priorFailureAnalysis: priorFailureAnalysisFile || undefined,
   });
 }
 
@@ -524,6 +572,44 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
     diffInlined,
     checkBytes: Buffer.byteLength(checkOutput, "utf-8"),
   });
+}
+
+export interface FailureAnalysis {
+  taskId: string;
+  phase: string;
+  attempt: number;
+  failedAt: string;
+  reason: string;
+  diffStat: string;
+}
+
+export interface WriteFailureAnalysisOptions {
+  taskId: string;
+  phase: string;
+  attempt: number;
+  rawOutput: string;
+  worktreePath: string;
+  outputFile: string;
+}
+
+// Write a structured failure-analysis.json to the run dir at every failure point.
+// Harness-written (no agent call): captures phase, truncated output, diff stat, attempt.
+// Consumed by task-grill and planner prompts to break blind-retry loops.
+export function writeFailureAnalysis(opts: WriteFailureAnalysisOptions): FailureAnalysis {
+  const { taskId, phase, attempt, rawOutput, worktreePath, outputFile } = opts;
+  const diffStat = git(["diff", "--stat", "HEAD"], worktreePath);
+  const truncatedReason = limitTextForPrompt(rawOutput, 8_000, 100);
+  const analysis: FailureAnalysis = {
+    taskId,
+    phase,
+    attempt,
+    failedAt: new Date().toISOString(),
+    reason: truncatedReason,
+    diffStat,
+  };
+  mkdirSync(dirname(outputFile), { recursive: true });
+  writeFileSync(outputFile, JSON.stringify(analysis, null, 2), "utf-8");
+  return analysis;
 }
 
 export interface FinalizeDocsPromptOptions {

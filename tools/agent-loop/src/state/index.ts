@@ -15,6 +15,7 @@ export interface FailureRecord {
   phase: string;
   reason: string;
   resultFile?: string;
+  failureAnalysisFile?: string;
 }
 
 export interface Task {
@@ -229,6 +230,15 @@ export function addTaskAttempt(
   writeState(repoRoot, state, stateFile);
   appendEventToLog(repoRoot, runsRoot, stateFile, "task_attempt", { task: taskId, runDir });
   return state;
+}
+
+// Return the most recent failure-analysis.json path for a task, if recorded.
+export function getLastFailureAnalysisFile(task: Task): string {
+  const history = task.failureHistory ?? [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].failureAnalysisFile) return history[i].failureAnalysisFile!;
+  }
+  return "";
 }
 
 // Determine whether a failed phase should retry or escalate to needs_human.
