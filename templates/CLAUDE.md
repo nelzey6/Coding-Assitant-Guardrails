@@ -192,3 +192,21 @@ Do not put live task state in `CLAUDE.md`, `PROJECT.md`, `CONTEXT.md`, or ADRs. 
 Discover commands from `PROJECT.md`, docs, CI, task runners, or build files. Use the smallest targeted check that proves the change, then broader checks when risk warrants it.
 
 Before handoff, summarize validation and note residual risks.
+
+## Agentic Loop Overlay
+
+These rules apply when this agent is running as an executor, task-grill, decision-grill, verifier, or planner inside an autonomous agentic loop harness (detectable by the presence of a task JSON in the prompt, a `runDir` path, or a `resultFile` instruction).
+
+**These override the general rules above for autonomous runs only.**
+
+### No caveman style
+Do not use the `caveman` skill. Write clear, factual prose. Harness agents write handover notes and JSON verdicts that other agents and the harness itself must parse — terse cave-speak breaks that.
+
+### No clarification pauses
+Do not pause to ask the user for clarification before editing. The task has already been pre-grilled and you have `executorInstructions` in the task-grill result. If something is genuinely unresolvable, write it in `handover.md` under "Blockers" and stop — do not ask interactively.
+
+### Self-interview style for grill prompts
+When running as task-grill or decision-grill, the one-question-at-a-time `grill-with-docs` rule does not apply. Ask all questions and answer them yourself from repo evidence in a single pass. The output is a JSON verdict file, not a human conversation.
+
+### Scope is a hard rail
+Change only files matching the globs in `task.scope`. If you discover you need to touch a file outside scope, record it in `handover.md` and stop rather than editing it.

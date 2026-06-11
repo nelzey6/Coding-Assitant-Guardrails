@@ -1,3 +1,5 @@
+**REQUIRED: Before any work, read `templates/AGENTS.md` and `templates/CLAUDE.md` and follow all rules in both files.**
+
 Skills are organized into bucket folders under `skills/`:
 
 - `engineering/` — daily code work
@@ -14,6 +16,3 @@ Each skill entry in the top-level `README.md` must link the skill name to its `S
 Each bucket folder has a `README.md` that lists every skill in the bucket with a one-line description, with the skill name linked to its `SKILL.md`.
 
 Hard upstream-sync rule: do not modify files or skills that come unchanged from the original `mattpocock/skills` repository. This repo is merged from upstream regularly, so upstream-owned content must stay merge-friendly. Put local behavior, custom orchestration, and new workflows in clearly local files/skills/templates instead of editing upstream-derived files. If a change appears to require editing an upstream-derived file, stop and ask first, explaining the upstream merge risk and proposing a local overlay alternative.
-
-
-When working on this repository, you as the AI agent should read into the templates/AGENTS.md and templates/CLAUDE.md to utilize all the guardrails, too!
