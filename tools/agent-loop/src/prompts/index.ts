@@ -1,10 +1,36 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { execFileSync } from "child_process";
+import { homedir } from "os";
 import type { AgenticState, Task } from "../state/index.js";
 import type { WorkflowPolicy } from "../policy/index.js";
 import { appendEvent, getRecentEvents, formatEventLine, loadEvents } from "../events/index.js";
 import { git as gitTool } from "../tools/index.js";
+
+// Resolve a skill's SKILL.md path from the installed skills directories.
+// Checks ~/.claude/skills, ~/.codex/skills, and the repo's own skills/ folder.
+// Returns the path if found, or a fallback stub string if not.
+export function resolveSkillFile(skillName: string, repoRoot: string): { path: string; found: boolean } {
+  const candidates = [
+    join(homedir(), ".claude", "skills", skillName, "SKILL.md"),
+    join(homedir(), ".codex", "skills", skillName, "SKILL.md"),
+    join(repoRoot, "skills", "engineering", skillName, "SKILL.md"),
+    join(repoRoot, "skills", "productivity", skillName, "SKILL.md"),
+    join(repoRoot, "skills", "misc", skillName, "SKILL.md"),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return { path: p, found: true };
+  }
+  return { path: "", found: false };
+}
+
+// Returns an instruction block pointing at the skill file, with a fallback
+// summary when the file is not installed.
+export function skillInstruction(skillName: string, repoRoot: string, fallbackSummary: string): string {
+  const { path, found } = resolveSkillFile(skillName, repoRoot);
+  if (found) return `Read and follow the canonical skill at: ${path}`;
+  return `Skill file for '${skillName}' was not found. Follow this summary instead:\n${fallbackSummary}`;
+}
 
 export type PromptBudget = "low" | "medium" | "high";
 
@@ -242,17 +268,24 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     }
   })();
 
+  const grillSkill = skillInstruction("grill-with-docs", repoRoot,
+    "Restate the goal, inspect repo docs/code for answers, separate decisions/assumptions/open questions, update CONTEXT.md when durable context changes, stop with needs_human only for unresolved product/domain decisions."
+  );
+
   const content = [
     "You are the planner for an autonomous agentic coding loop.",
     "",
-    "Read and follow AGENTS.md / CLAUDE.md if present. Use grill-with-docs-style discovery by default before planning: restate the goal, inspect repo docs/code for answers, separate decisions/assumptions/open questions, update CONTEXT.md when durable domain/product context changes, and stop with needs_human only for unresolved product/domain decisions.",
+    "Read and follow AGENTS.md / CLAUDE.md if present.",
+    "",
+    "DISCOVERY PHASE — before planning, conduct a full grill-with-docs self-interview:",
+    grillSkill,
     "",
     `The harness provided a context packet at: ${repoContextFile}`,
     `The harness also generated optional CodeGraph context at: ${codeGraphFile}`,
     "Use CodeGraph context for orientation before broad manual search, then verify conclusions against source files. If the artifact says CodeGraph is unavailable, continue normally.",
     "Inspect deeper in the repository when needed.",
     "",
-    "When planning validation, propose focused task.validation commands that prove each task. If a task adds or changes a small smoke test/check that directly proves the change, include that newly added focused smoke command in the task.validation array so the harness runs it before verification. Prefer PowerShell Core examples in the form `pwsh -File path/to/smoke.ps1`; mention `powershell.exe` only for explicitly documented legacy Windows PowerShell compatibility.",
+    "When planning validation, propose focused task.validation commands that prove each task. If a task adds or changes a small smoke test/check that directly proves the change, include that command in task.validation so the harness runs it before verification. Prefer `pwsh -File path/to/smoke.ps1`; mention `powershell.exe` only as legacy fallback.",
     "",
     `Do not edit ${stateFile} directly. Write planner JSON only to: ${plannerResultFile}`,
     `Also write an autonomous grill transcript markdown file to: ${grillTranscriptFile}`,
@@ -270,11 +303,11 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "Allowed task kinds: discovery, investigation, implementation, architecture, maintenance, handoff.",
     "Each task must have: id, title, kind, workflow, status, priority, acceptanceCriteria, validation, dependsOn, failureHistory, artifacts, scope.",
     "Use one workflow per task. Use dependencies for workflow sequences. Use only canonical workflows from the policy.",
-    "Keep tasks small and independently verifiable: one logical change, one primary artifact/change area, and focused validation. Split broad goals into dependent tasks. If safe slicing is unclear or a task would need multiple unrelated changes, record the uncertainty in openQuestions or needs_human rather than creating a broad task.",
-    "Always set `scope` to the forward-slash glob list of files the task may change (for example [\"scripts/agentic/**\", \"tests/agentic/my-smoke.ps1\"]). The harness enforces scope as a hard pre-verifier rail: files changed outside scope fail the task. Keep scope tight (5 globs or fewer) so the rail is meaningful; if a task needs broad scope it is probably too large and should be split.",
-    "Task-size budget (enforced by the harness validator): at most 7 acceptanceCriteria, at most 5 scope globs, and implementation/architecture tasks must have at least one acceptanceCriterion. Tasks exceeding the budget are rejected; split them or record the difficulty in openQuestions/needs_human.",
+    "Keep tasks small and independently verifiable. Split broad goals into dependent tasks.",
+    "Always set `scope` to the forward-slash glob list of files the task may change. Keep scope tight (5 globs or fewer).",
+    "Task-size budget (enforced by the harness): at most 7 acceptanceCriteria, at most 5 scope globs, implementation/architecture tasks must have at least one acceptanceCriterion.",
     "",
-    "For every genuine design/product/architecture decision the plan forces, run a grill-with-docs self-interview: state the question, weigh 2-4 real options each with concrete repo/docs evidence, mark exactly one recommended, and answer it yourself instead of asking a human. The harness rejects shallow decisions (fewer than 2 evidenced options, or no recommended option). Set escalate:true on a decision only when evidence genuinely cannot settle it. If the goal forces no real decision, use an empty decisions array.",
+    "For every genuine design/product/architecture decision the plan forces, run a grill-with-docs self-interview: weigh 2-4 real options with concrete repo/docs evidence, mark one recommended, answer it yourself. Set escalate:true only when evidence genuinely cannot settle it.",
     "",
     "Planner result schema:",
     JSON.stringify({
@@ -315,13 +348,17 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
   });
 }
 
-export function getWorkflowBlock(workflow: string, policy: WorkflowPolicy): string {
+export function getWorkflowBlock(workflow: string, policy: WorkflowPolicy, repoRoot?: string): string {
+  const skillRef = repoRoot
+    ? skillInstruction(workflow, repoRoot, `Follow the ${workflow} workflow. Read and follow its canonical SKILL.md.`)
+    : `Required workflow: use ${workflow}. Read and follow the canonical SKILL.md for this workflow.`;
+
   const def = policy.workflows?.[workflow] as unknown as Record<string, unknown> | undefined;
   if (def) {
     const block = def["executorBlock"] as Record<string, unknown> | undefined;
     if (block) {
       const required = (block["requiredWorkflow"] as string | undefined) ?? workflow;
-      const lines = [`Required workflow: use ${required}.`];
+      const lines = [`Required workflow: use ${required}.`, skillRef];
       const loop = block["expectedLoop"] as string[] | undefined;
       if (loop?.length) {
         lines.push("Expected loop:");
@@ -330,7 +367,7 @@ export function getWorkflowBlock(workflow: string, policy: WorkflowPolicy): stri
       return lines.join("\n");
     }
   }
-  return `Required workflow: use ${workflow}. Read and follow the canonical SKILL.md for this workflow.`;
+  return skillRef;
 }
 
 export interface ExecutorPromptOptions {
@@ -389,7 +426,7 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
     recentHistory,
     "",
-    getWorkflowBlock(workflow, policy),
+    getWorkflowBlock(workflow, policy, repoRoot),
     "",
     "Task-grill result for this turn:",
     taskGrillResult ? JSON.stringify(taskGrillResult, null, 2) : "No task-grill result was provided.",
@@ -758,12 +795,15 @@ export function writeDecisionGrillPrompt(promptFile: string, opts: DecisionGrill
       ].join("\n")
     : "";
 
+  const grillSkill = skillInstruction("grill-with-docs", repoRoot,
+    "Ask the hard question, then answer it yourself from repo evidence. Weigh 2-4 real alternatives with concrete evidence. Pick one and justify. Do not rubber-stamp. Only escalate when evidence genuinely cannot settle the question."
+  );
+
   const content = [
     "You are running a grill-with-docs self-interview for one autonomous loop turn.",
     "",
-    "Before the executor edits, surface every genuine design/product/architecture decision this task forces — the kind a human reviewer would want weighed. For each one, you must play BOTH sides of grill-with-docs: ask the question, then answer it yourself from repo evidence instead of asking a human.",
-    "",
-    "Be sensitive to detail. Do not rubber-stamp the easy option. Inspect docs/code/tests for real evidence. Weigh genuine alternatives. Pick the one the evidence supports and say why a human is not needed.",
+    "Before the executor edits, surface every genuine design/product/architecture decision this task forces. Play BOTH sides:",
+    grillSkill,
     "",
     "Read AGENTS.md / CLAUDE.md, PROJECT.md, relevant source, and recent history. Do not edit files.",
     reGrillBlock,

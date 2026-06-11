@@ -7,3 +7,4 @@ agentic.json
 tools/agent-loop/node_modules/
 tools/agent-loop/dist/
 plan.md
+.codegraph/
