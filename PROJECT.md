@@ -39,7 +39,7 @@ Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA
 | --- | --- |
 | `tools/agent-loop/src/index.ts` | Commander CLI entry point. Defines `validate`, `plan`, diagnostics, `accept`, `reset-task`, and `run`. |
 | `tools/agent-loop/src/loop/index.ts` | Autonomous run engine. Owns planner, task-grill, executor, checks, scope rail, verifier, replan, commit/merge, handover, and finalize-docs phases. |
-| `tools/agent-loop/src/prompts/index.ts` | Prompt builders for planner, task-grill, executor, verifier, finalize-docs, and prompt budget trimming. |
+| `tools/agent-loop/src/prompts/index.ts` | Prompt builders for planner, task-grill, decision-grill, executor, verifier, goal-review, architect-checkpoint, finalize-docs; plus `validatePlannerResult`/`validateDecisions` and prompt budget trimming. |
 | `tools/agent-loop/src/state/index.ts` | `agentic.json` schema helpers, task selection, task status changes, attempts, failure history (including `failureAnalysisFile` pointer), planner result merge, and replan tracking (`replanCount`, `lastReplanTaskIds`). |
 | `tools/agent-loop/src/agent/index.ts` | Agent invocation adapters for `claude`, `pi`, and custom command templates. |
 | `tools/agent-loop/src/checks/index.ts` | Validation command execution, timeout handling, structured `METRIC key=value` parsing. |
@@ -143,6 +143,7 @@ Current TS rails:
 - After each `ready` task-grill verdict, `assumptionsStillValid` and `assumptionsChanged` fields from the result are persisted back into `state.assumptions` (tagged `[valid]`/`[changed]`) and emitted as an `assumptions_updated` event. The current assumption list is forwarded into every subsequent task-grill prompt so drift is visible across turns.
 - `--goal-review` (opt-in): after all tasks pass, a goal-review agent judges the cumulative diff against `state.goal` and emits `goal_review_finished`. A `needs_human` verdict halts the loop before finalize-docs.
 - `--architect-checkpoint-interval <n>` (opt-in, default 0 = disabled): every N passed tasks, an architect checkpoint agent reviews the plan and cumulative diff for drift. Verdicts: `continue` (proceed), `replan` (call planner again, counts against replan budget), `needs_human` (halt).
+- `--decision-grill` (opt-in): before each executor turn, a grill-with-docs self-interview surfaces genuine design/product decisions and answers them itself with evidence. The harness enforces a decision contract via `validateDecisions` (each decision needs 2-4 evidenced options, exactly one marked recommended, plus `whyItMatters`/`selfAnswer`/`confidence`/`escalate`). Shallow or low-confidence-without-escalate results trigger exactly one re-grill (`decision_grill_regrill`); if still inadequate, or any decision sets `escalate:true`/stays low-confidence, the task escalates to `needs_human`. Answered decisions are flattened into `state.decisions` and emitted as `decisions_recorded`. The planner result's `decisions` are validated by the same contract and normalized to strings on merge.
 - `accept` and `reset-task` are dry-run by default and require `--apply` to mutate.
 
 Known gaps before calling the TS runner production-default:
@@ -175,6 +176,9 @@ Known gaps before calling the TS runner production-default:
 - goal review: `--goal-review` pass verdict allows completion, `needs_human` halts before finalize-docs
 - architect checkpoint: `continue` verdict proceeds, `replan` verdict calls planner and continues with new task
 - planner from empty task list: plans then executes planned task
+- decision grill: well-formed self-answered decision recorded to `state.decisions` and task passes
+- decision grill: shallow decision (1 option) re-grilled once, then escalates to `needs_human` before executor edits
+- decision grill: low-confidence decision re-grilled once, answered with high confidence on the second pass
 
 Missing TS smoke coverage:
 

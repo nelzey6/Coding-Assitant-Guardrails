@@ -57,7 +57,8 @@ export interface AgenticState {
 export interface PlannerResult {
   verdict: "planned" | "needs_human" | "blocked";
   summary?: string;
-  decisions?: string[];
+  /** May be flat strings (legacy) or structured decision records (normalized to strings on merge). */
+  decisions?: Array<string | Record<string, unknown>>;
   assumptions?: string[];
   openQuestions?: string[];
   blockers?: string[];
@@ -254,6 +255,34 @@ export function updateAssumptionsFromGrill(
   appendEventToLog(repoRoot, runsRoot, stateFile, "assumptions_updated", { task: taskId, count: tagged.length, items: tagged });
 }
 
+// Flatten a (loosely-typed) decision record into the string form stored in state.decisions.
+// Kept here (rather than importing from prompts) so the state layer has no prompt dependency.
+export function flattenDecisionRecord(d: Record<string, unknown>, taskId: string): string {
+  const opts = Array.isArray(d["optionsConsidered"]) ? (d["optionsConsidered"] as Record<string, unknown>[]) : [];
+  const optStr = opts
+    .map((o) => `${o["recommended"] === true ? "*" : "-"} ${o["label"] ?? ""} (${o["evidence"] ?? ""})`)
+    .join(" | ");
+  return `[${taskId}] Q: ${d["question"] ?? ""} | why: ${d["whyItMatters"] ?? ""} | options: ${optStr} | chose: ${d["chosen"] ?? ""} | self-answer: ${d["selfAnswer"] ?? ""} | confidence: ${d["confidence"] ?? ""}`;
+}
+
+// Append self-grill decision records (flattened to strings) to state.decisions and emit an event.
+// Mirrors updateAssumptionsFromGrill. Returns the count recorded.
+export function recordDecisions(
+  repoRoot: string,
+  stateFile: string,
+  runsRoot: string,
+  taskId: string,
+  decisions: Record<string, unknown>[]
+): number {
+  if (!decisions.length) return 0;
+  const flat = decisions.map((d) => flattenDecisionRecord(d, taskId));
+  const state = loadState(repoRoot, stateFile)!;
+  state.decisions = [...(state.decisions ?? []), ...flat];
+  writeState(repoRoot, state, stateFile);
+  appendEventToLog(repoRoot, runsRoot, stateFile, "decisions_recorded", { task: taskId, count: flat.length, items: flat });
+  return flat.length;
+}
+
 // Return the most recent failure-analysis.json path for a task, if recorded.
 export function getLastFailureAnalysisFile(task: Task): string {
   const history = task.failureHistory ?? [];
@@ -282,7 +311,12 @@ export function mergePlannerResult(
   result: PlannerResult
 ): AgenticState {
   const state = loadState(repoRoot, stateFile)!;
-  if (result.decisions?.length) state.decisions = [...(state.decisions ?? []), ...result.decisions];
+  if (result.decisions?.length) {
+    const flat = result.decisions.map((d) =>
+      typeof d === "string" ? d : flattenDecisionRecord(d, "planner")
+    );
+    state.decisions = [...(state.decisions ?? []), ...flat];
+  }
   if (result.assumptions?.length) state.assumptions = [...(state.assumptions ?? []), ...result.assumptions];
   if (result.openQuestions?.length) state.openQuestions = [...(state.openQuestions ?? []), ...result.openQuestions];
   if (result.blockers?.length) state.blockers = [...(state.blockers ?? []), ...result.blockers];

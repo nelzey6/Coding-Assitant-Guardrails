@@ -1233,6 +1233,220 @@ writeFileSync("output.txt", "done", "utf-8");
   }
 });
 
+// ── case 16: decision grill — rich decision answered and recorded ─────────────
+// --decision-grill on. The decision-grill agent writes a well-formed decision
+// (2 options, one recommended, high confidence). It must be recorded to
+// state.decisions and the task must pass.
+
+runCase("decision grill: rich self-answered decision recorded, task passes", () => {
+  const dir = tmpRepo("decision-rich");
+  try {
+    writeState(dir, baseState({ scope: ["output.txt"] }));
+
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({
+    verdict: "ready", understanding: "ok", evidence: [], assumptionsStillValid: [],
+    assumptionsChanged: [], scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: [], risks: [], executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write decision JSON only to:")) {
+  const m = content.match(/Write decision JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ decisions: [{
+    question: "Reuse existing writer or add a new one?",
+    whyItMatters: "Affects coupling and future maintenance.",
+    optionsConsidered: [
+      { label: "Reuse existing writer", evidence: "src already exports writeFile helper", recommended: true },
+      { label: "Add a new writer module", evidence: "no existing helper found in scope", recommended: false }
+    ],
+    chosen: "Reuse existing writer",
+    selfAnswer: "Evidence shows a helper already exists; no human needed.",
+    confidence: "high",
+    escalate: false
+  }] }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+writeFileSync("output.txt", "done", "utf-8");
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+    const decisions: string[] = state.decisions ?? [];
+    assert(
+      decisions.some((d) => d.includes("Reuse existing writer") && d.includes("confidence: high")),
+      `expected recorded decision, got: ${JSON.stringify(decisions)}`
+    );
+    const events = readEvents(dir);
+    assert(hasEvent(events, "decision_grill_finished"), "expected decision_grill_finished event");
+    assert(hasEvent(events, "decisions_recorded"), "expected decisions_recorded event");
+    const ev = events.find((e: any) => e.type === "decision_grill_finished");
+    assert(ev?.verdict === "answered", `expected verdict=answered, got ${ev?.verdict}`);
+    assert(!hasEvent(events, "decision_grill_regrill"), "well-formed decision must not trigger a re-grill");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 17: decision grill — shallow decision re-grilled, then escalates ─────
+// First decision pass is shallow (1 option). Harness re-grills once. The second
+// pass is also shallow. The loop must escalate the task to needs_human.
+
+runCase("decision grill: shallow decision re-grilled once then escalates", () => {
+  const dir = tmpRepo("decision-shallow");
+  try {
+    writeState(dir, baseState({ scope: ["output.txt"] }));
+
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({
+    verdict: "ready", understanding: "ok", evidence: [], assumptionsStillValid: [],
+    assumptionsChanged: [], scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: [], risks: [], executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write decision JSON only to:")) {
+  const m = content.match(/Write decision JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  // Always shallow: only one option, so validateDecisions rejects both passes.
+  writeFileSync(p, JSON.stringify({ decisions: [{
+    question: "Which approach?",
+    whyItMatters: "It matters.",
+    optionsConsidered: [{ label: "the only one", evidence: "gut feeling", recommended: true }],
+    chosen: "the only one",
+    selfAnswer: "picked it",
+    confidence: "high",
+    escalate: false
+  }] }), "utf-8");
+  process.exit(0);
+}
+throw new Error("executor/verifier must not run after decision-grill escalation");
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill"], 90_000);
+    assert(r.status !== 0, "expected non-zero exit when decision grill escalates");
+    const state = readState(dir);
+    assert(state.tasks[0].status === "needs_human", `expected needs_human, got ${state.tasks[0].status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "decision_grill_regrill"), "expected a re-grill on the shallow decision");
+    const ev = events.find((e: any) => e.type === "decision_grill_finished");
+    assert(ev?.verdict === "needs_human", `expected verdict=needs_human, got ${ev?.verdict}`);
+    assert(!hasEvent(events, "executor_started"), "executor must not start after decision-grill escalation");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 18: decision grill — low-confidence re-grilled, then answered ────────
+// First pass: well-formed but low confidence (no escalate) → harness re-grills.
+// Second pass: same shape but high confidence → answered, task passes.
+
+runCase("decision grill: low-confidence re-grilled then answered on second pass", () => {
+  const dir = tmpRepo("decision-lowconf");
+  try {
+    writeState(dir, baseState({ scope: ["output.txt"] }));
+
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({
+    verdict: "ready", understanding: "ok", evidence: [], assumptionsStillValid: [],
+    assumptionsChanged: [], scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: [], risks: [], executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write decision JSON only to:")) {
+  const m = content.match(/Write decision JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  // The re-grill prompt carries the RE-GRILL banner; use it to switch to high confidence.
+  const isReGrill = content.includes("RE-GRILL:");
+  writeFileSync(p, JSON.stringify({ decisions: [{
+    question: "Which storage format?",
+    whyItMatters: "Affects downstream parsing.",
+    optionsConsidered: [
+      { label: "JSON", evidence: "existing files use JSON", recommended: true },
+      { label: "YAML", evidence: "no YAML parser in repo", recommended: false }
+    ],
+    chosen: "JSON",
+    selfAnswer: isReGrill ? "Confirmed by inspecting existing files." : "Leaning JSON but unsure.",
+    confidence: isReGrill ? "high" : "low",
+    escalate: false
+  }] }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+writeFileSync("output.txt", "done", "utf-8");
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill"], 90_000);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "decision_grill_regrill"), "expected a re-grill on the low-confidence decision");
+    const ev = events.find((e: any) => e.type === "decision_grill_finished");
+    assert(ev?.verdict === "answered", `expected verdict=answered after re-grill, got ${ev?.verdict}`);
+    const decisions: string[] = state.decisions ?? [];
+    assert(decisions.some((d) => d.includes("JSON") && d.includes("confidence: high")), `expected high-confidence decision recorded, got: ${JSON.stringify(decisions)}`);
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 
 const passed = results.filter((r) => r.ok).length;

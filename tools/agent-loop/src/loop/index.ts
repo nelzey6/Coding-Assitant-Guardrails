@@ -15,6 +15,7 @@ import {
   getFailureStatusForTask,
   getLastFailureAnalysisFile,
   updateAssumptionsFromGrill,
+  recordDecisions,
   mergePlannerResult,
   type AgenticState,
   type Task,
@@ -36,7 +37,9 @@ import {
   writeFinalizeDocsPrompt,
   writeGoalReviewPrompt,
   writeArchitectCheckpointPrompt,
+  writeDecisionGrillPrompt,
   validatePlannerResult,
+  validateDecisions,
   getPromptBudgetLimits,
   writeFailureAnalysis,
   type PromptBudget,
@@ -68,6 +71,8 @@ export interface LoopConfig {
   goalReview?: boolean;
   /** Run an architect checkpoint every N passed tasks (0 = disabled). */
   architectCheckpointInterval?: number;
+  /** Run a grill-with-docs self-interview before each executor turn; escalates low-confidence decisions. */
+  decisionGrill?: boolean;
   budget?: PromptBudget;
   planOnly?: boolean;
   retryTaskId?: string;
@@ -183,7 +188,10 @@ function runPlannerPhase(
   if (!existsSync(grillFile))  throw new LoopError(`Planner did not write ${grillFile}`);
 
   let plannerResult = JSON.parse(readFileSync(resultFile, "utf-8")) as Record<string, unknown>;
-  let errors = validatePlannerResult(plannerResult, policy);
+  let errors = [
+    ...validatePlannerResult(plannerResult, policy),
+    ...validateDecisions(plannerResult["decisions"] ?? []),
+  ];
 
   if (errors.length > 0) {
     const repairPrompt = join(plannerRunDir, "planner-repair.md");
@@ -205,7 +213,10 @@ function runPlannerPhase(
     invokeAgent(repairPrompt, cfg.agent, cfg.repoRoot);
     if (!existsSync(resultFile)) throw new LoopError(`Planner repair did not write ${resultFile}`);
     plannerResult = JSON.parse(readFileSync(resultFile, "utf-8")) as Record<string, unknown>;
-    errors = validatePlannerResult(plannerResult, policy);
+    errors = [
+      ...validatePlannerResult(plannerResult, policy),
+      ...validateDecisions(plannerResult["decisions"] ?? []),
+    ];
     if (errors.length > 0) throw new LoopError(`Planner result invalid after repair:\n${errors.join("\n")}`);
   }
 
@@ -362,6 +373,89 @@ function runArchitectCheckpointPhase(
   console.log(`Architect checkpoint: continue. ${result.assessment ?? ""}`);
 }
 
+interface DecisionGrillOutcome {
+  /** Decisions to record into state (accepted, non-escalating). */
+  accepted: Record<string, unknown>[];
+  /** A task-halting reason if the grill escalated; empty when the loop may continue. */
+  escalateReason: string;
+}
+
+// Run a grill-with-docs self-interview before the executor edits.
+// Validates the decision contract; re-grills ONCE if the result is shallow or low-confidence
+// without escalation; escalates to a halting reason if it's still inadequate or any decision
+// asks to escalate. Records accepted decisions into state.decisions.
+function runDecisionGrillPhase(
+  cfg: Required<LoopConfig>,
+  agentCallCounter: { count: number },
+  task: Task,
+  iteration: number,
+  runDir: string,
+  codeGraphFile: string,
+  worktreePath: string,
+  eventLogPath: string
+): DecisionGrillOutcome {
+  const promptFile = join(runDir, "decision-grill.md");
+  const resultFile = join(runDir, "decision-grill-result.json");
+  const logFile    = join(runDir, "decision-grill.log");
+
+  const runOnce = (priorShallowFeedback: string): { decisions: Record<string, unknown>[]; errors: string[] } => {
+    const state = loadState(cfg.repoRoot, cfg.stateFile)!;
+    writeDecisionGrillPrompt(promptFile, {
+      repoRoot: cfg.repoRoot, runsRoot: cfg.runsRoot, stateFile: cfg.stateFile,
+      budget: cfg.budget, state, task, iteration, runDir, resultFile, eventLogPath,
+      codeGraphFile, priorShallowFeedback,
+    });
+    appendEvent(cfg.repoRoot, "decision_grill_started", { task: task.id, prompt: promptFile, resultFile, reGrill: !!priorShallowFeedback }, cfg.runsRoot, cfg.stateFile);
+    agentCallCounter.count++;
+    invokeAgentWithLog(promptFile, cfg.agent, worktreePath, logFile);
+    if (!existsSync(resultFile)) throw new LoopError(`Decision grill did not write ${resultFile}`);
+    const parsed = JSON.parse(readFileSync(resultFile, "utf-8")) as { decisions?: Record<string, unknown>[] };
+    const decisions = parsed.decisions ?? [];
+    return { decisions, errors: validateDecisions(decisions) };
+  };
+
+  // Reasons to re-grill: schema-shallow, or any decision is low-confidence without choosing to escalate.
+  const needsReGrill = (decisions: Record<string, unknown>[], errors: string[]): string[] => {
+    const reasons = [...errors];
+    for (const d of decisions) {
+      if (d["confidence"] === "low" && d["escalate"] !== true) {
+        reasons.push(`decision "${String(d["question"] ?? "").slice(0, 80)}" is low-confidence; gather more evidence or set escalate:true`);
+      }
+    }
+    return reasons;
+  };
+
+  console.log(`=== Agentic decision grill: ${task.id} ===`);
+  let { decisions, errors } = runOnce("");
+  let reGrillReasons = needsReGrill(decisions, errors);
+
+  if (reGrillReasons.length > 0) {
+    appendEvent(cfg.repoRoot, "decision_grill_regrill", { task: task.id, reasons: reGrillReasons }, cfg.runsRoot, cfg.stateFile);
+    console.log(`Decision grill shallow/low-confidence; re-grilling once for ${task.id}.`);
+    ({ decisions, errors } = runOnce(reGrillReasons.join("\n")));
+    reGrillReasons = needsReGrill(decisions, errors);
+  }
+
+  // After the single re-grill: if the contract is still unmet, escalate.
+  if (errors.length > 0) {
+    const reason = `decision grill still inadequate after re-grill: ${errors.join("; ")}`;
+    appendEvent(cfg.repoRoot, "decision_grill_finished", { task: task.id, verdict: "needs_human", reason, count: decisions.length }, cfg.runsRoot, cfg.stateFile);
+    return { accepted: [], escalateReason: reason };
+  }
+
+  // Any decision that asks to escalate (or stayed low-confidence) halts the task for a human.
+  const escalating = decisions.filter((d) => d["escalate"] === true || (d["confidence"] === "low"));
+  if (escalating.length > 0) {
+    const reason = `decision grill escalated ${escalating.length} decision(s): ${escalating.map((d) => String(d["question"] ?? "")).join("; ")}`;
+    appendEvent(cfg.repoRoot, "decision_grill_finished", { task: task.id, verdict: "needs_human", reason, count: decisions.length }, cfg.runsRoot, cfg.stateFile);
+    return { accepted: [], escalateReason: reason };
+  }
+
+  appendEvent(cfg.repoRoot, "decision_grill_finished", { task: task.id, verdict: "answered", count: decisions.length }, cfg.runsRoot, cfg.stateFile);
+  console.log(`Decision grill answered ${decisions.length} decision(s) for ${task.id}.`);
+  return { accepted: decisions, escalateReason: "" };
+}
+
 // Main entry point. Throws LoopError with an appropriate exitCode on terminal failures.
 export function runAgenticLoop(config: LoopConfig): void {
   const cfg: Required<LoopConfig> = {
@@ -390,6 +484,7 @@ export function runAgenticLoop(config: LoopConfig): void {
     finalizeDocs:                config.finalizeDocs                ?? false,
     goalReview:                  config.goalReview                  ?? false,
     architectCheckpointInterval: config.architectCheckpointInterval ?? 0,
+    decisionGrill:               config.decisionGrill               ?? false,
     repoRoot:           config.repoRoot,
     agent:              config.agent,
     verifierAgent:      config.verifierAgent      ?? config.agent,
@@ -584,6 +679,19 @@ export function runAgenticLoop(config: LoopConfig): void {
         taskGrillResultObj.assumptionsStillValid ?? [],
         taskGrillResultObj.assumptionsChanged ?? []
       );
+
+      // Decision grill: self-interview genuine design forks before editing (opt-in).
+      if (cfg.decisionGrill) {
+        const outcome = runDecisionGrillPhase(
+          cfg, agentCallCounter, task, iteration, runDir, codeGraphFile, worktreePath, eventLogPath
+        );
+        if (outcome.escalateReason) {
+          setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "decision_grill", reason: outcome.escalateReason, resultFile: join(runDir, "decision-grill-result.json") });
+          copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+          throw new LoopError(`Decision grill halted ${taskId} before executor edits: ${outcome.escalateReason}`);
+        }
+        recordDecisions(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, outcome.accepted);
+      }
 
       // Warn when no scope is declared — the diff-scope rail cannot bound the change
       if (isTaskUnscoped(task as any)) {

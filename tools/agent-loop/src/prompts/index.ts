@@ -269,11 +269,26 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "Always set `scope` to the forward-slash glob list of files the task may change (for example [\"scripts/agentic/**\", \"tests/agentic/my-smoke.ps1\"]). The harness enforces scope as a hard pre-verifier rail: files changed outside scope fail the task. Keep scope tight (5 globs or fewer) so the rail is meaningful; if a task needs broad scope it is probably too large and should be split.",
     "Task-size budget (enforced by the harness validator): at most 7 acceptanceCriteria, at most 5 scope globs, and implementation/architecture tasks must have at least one acceptanceCriterion. Tasks exceeding the budget are rejected; split them or record the difficulty in openQuestions/needs_human.",
     "",
+    "For every genuine design/product/architecture decision the plan forces, run a grill-with-docs self-interview: state the question, weigh 2-4 real options each with concrete repo/docs evidence, mark exactly one recommended, and answer it yourself instead of asking a human. The harness rejects shallow decisions (fewer than 2 evidenced options, or no recommended option). Set escalate:true on a decision only when evidence genuinely cannot settle it. If the goal forces no real decision, use an empty decisions array.",
+    "",
     "Planner result schema:",
     JSON.stringify({
       verdict: "planned|needs_human|blocked",
       summary: "...",
-      decisions: [],
+      decisions: [
+        {
+          question: "...",
+          whyItMatters: "...",
+          optionsConsidered: [
+            { label: "...", evidence: "repo path / command / doc inspected", recommended: true },
+            { label: "...", evidence: "...", recommended: false },
+          ],
+          chosen: "...",
+          selfAnswer: "why I answered this myself without a human",
+          confidence: "high|medium|low",
+          escalate: false,
+        },
+      ],
       assumptions: [],
       openQuestions: [],
       blockers: [],
@@ -614,6 +629,162 @@ export function writeFailureAnalysis(opts: WriteFailureAnalysisOptions): Failure
   mkdirSync(dirname(outputFile), { recursive: true });
   writeFileSync(outputFile, JSON.stringify(analysis, null, 2), "utf-8");
   return analysis;
+}
+
+export interface DecisionOption {
+  label: string;
+  evidence: string;
+  recommended: boolean;
+}
+
+export interface DecisionRecord {
+  question: string;
+  whyItMatters: string;
+  optionsConsidered: DecisionOption[];
+  chosen: string;
+  selfAnswer: string;
+  confidence: "high" | "medium" | "low";
+  escalate: boolean;
+}
+
+// Validate self-grill decision records, returning error strings (empty = valid).
+// This is the detail-sensitivity rail: a decision the loop answers for itself must
+// weigh real alternatives with evidence and mark exactly one recommended option,
+// mirroring the grill-with-docs discipline (2-4 options, one Recommended, why-it-matters).
+export function validateDecisions(records: unknown): string[] {
+  const errors: string[] = [];
+  if (!Array.isArray(records)) return ["decisions must be an array"];
+
+  records.forEach((raw, i) => {
+    const d = raw as Partial<DecisionRecord> | null;
+    const tag = `decision[${i}]`;
+    if (!d || typeof d !== "object") { errors.push(`${tag} is not an object`); return; }
+    if (!String(d.question ?? "").trim()) errors.push(`${tag} missing question`);
+    if (!String(d.whyItMatters ?? "").trim()) errors.push(`${tag} missing whyItMatters (every self-answered decision must say why it matters)`);
+    if (!String(d.chosen ?? "").trim()) errors.push(`${tag} missing chosen`);
+    if (!String(d.selfAnswer ?? "").trim()) errors.push(`${tag} missing selfAnswer (explain why you answered this yourself without a human)`);
+    if (!["high", "medium", "low"].includes(d.confidence as string)) errors.push(`${tag} confidence must be high, medium, or low`);
+    if (typeof d.escalate !== "boolean") errors.push(`${tag} escalate must be a boolean`);
+
+    const opts = Array.isArray(d.optionsConsidered) ? d.optionsConsidered : [];
+    if (opts.length < 2) {
+      errors.push(`${tag} considered ${opts.length} option(s); weigh at least 2 real alternatives before answering yourself`);
+    }
+    if (opts.length > 4) {
+      errors.push(`${tag} considered ${opts.length} options; keep it to 2-4 focused alternatives`);
+    }
+    const recommendedCount = opts.filter((o) => o && (o as DecisionOption).recommended === true).length;
+    if (opts.length >= 2 && recommendedCount !== 1) {
+      errors.push(`${tag} must mark exactly one option recommended (found ${recommendedCount})`);
+    }
+    opts.forEach((o, j) => {
+      const opt = o as Partial<DecisionOption> | null;
+      if (!opt || !String(opt.label ?? "").trim()) errors.push(`${tag}.option[${j}] missing label`);
+      if (!opt || !String(opt.evidence ?? "").trim()) errors.push(`${tag}.option[${j}] missing evidence (cite repo/docs/code you inspected)`);
+    });
+  });
+
+  return errors;
+}
+
+// Render one validated decision record as the flat string stored in state.decisions,
+// mirroring the assumption-ledger tagging style so the ledger stays string[].
+export function formatDecisionRecord(d: DecisionRecord, taskId: string): string {
+  const opts = d.optionsConsidered
+    .map((o) => `${o.recommended ? "*" : "-"} ${o.label} (${o.evidence})`)
+    .join(" | ");
+  return `[${taskId}] Q: ${d.question} | why: ${d.whyItMatters} | options: ${opts} | chose: ${d.chosen} | self-answer: ${d.selfAnswer} | confidence: ${d.confidence}`;
+}
+
+export interface DecisionGrillPromptOptions {
+  repoRoot: string;
+  runsRoot: string;
+  stateFile: string;
+  budget: PromptBudget;
+  state: AgenticState;
+  task: Task;
+  iteration: number;
+  runDir: string;
+  resultFile: string;
+  eventLogPath: string;
+  codeGraphFile?: string;
+  /** When re-grilling after a shallow/low-confidence pass, the errors/reasons to fix. */
+  priorShallowFeedback?: string;
+}
+
+export function writeDecisionGrillPrompt(promptFile: string, opts: DecisionGrillPromptOptions): void {
+  const {
+    repoRoot, runsRoot, stateFile, budget, state, task, iteration, runDir,
+    resultFile, eventLogPath: evLogPath, codeGraphFile = "", priorShallowFeedback = "",
+  } = opts;
+
+  const limits = getPromptBudgetLimits(budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const taskJson = JSON.stringify(task, null, 2);
+
+  const reGrillBlock = priorShallowFeedback
+    ? [
+        "",
+        "RE-GRILL: your previous decision pass was rejected as too shallow or low-confidence.",
+        "Gather more concrete evidence from the repo before answering. Fix exactly these problems:",
+        priorShallowFeedback,
+        "If, after genuinely inspecting more evidence, you still cannot answer with at least medium confidence, set escalate=true for that decision.",
+        "",
+      ].join("\n")
+    : "";
+
+  const content = [
+    "You are running a grill-with-docs self-interview for one autonomous loop turn.",
+    "",
+    "Before the executor edits, surface every genuine design/product/architecture decision this task forces — the kind a human reviewer would want weighed. For each one, you must play BOTH sides of grill-with-docs: ask the question, then answer it yourself from repo evidence instead of asking a human.",
+    "",
+    "Be sensitive to detail. Do not rubber-stamp the easy option. Inspect docs/code/tests for real evidence. Weigh genuine alternatives. Pick the one the evidence supports and say why a human is not needed.",
+    "",
+    "Read AGENTS.md / CLAUDE.md, PROJECT.md, relevant source, and recent history. Do not edit files.",
+    reGrillBlock,
+    `Iteration: ${iteration}`,
+    `Run directory: ${runDir}`,
+    `CodeGraph context: ${codeGraphFile}`,
+    "",
+    `Write decision JSON only to: ${resultFile}`,
+    "",
+    "Contract (the harness enforces this — shallow decisions are rejected):",
+    "- Each decision needs 2-4 real options, each with concrete evidence you actually inspected.",
+    "- Exactly one option must be marked recommended:true.",
+    "- whyItMatters must explain the stakes; selfAnswer must justify deciding without a human.",
+    "- confidence is high/medium/low. Set escalate:true only when evidence genuinely cannot settle it.",
+    "- If the task forces NO real decision, write an empty decisions array.",
+    "",
+    "Schema:",
+    JSON.stringify({
+      decisions: [
+        {
+          question: "...",
+          whyItMatters: "...",
+          optionsConsidered: [
+            { label: "...", evidence: "repo path / command / doc inspected", recommended: true },
+            { label: "...", evidence: "...", recommended: false },
+          ],
+          chosen: "...",
+          selfAnswer: "why I answered this myself without a human",
+          confidence: "high|medium|low",
+          escalate: false,
+        },
+      ],
+    }, null, 2),
+    "",
+    `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
+    recentHistory,
+    "",
+    "Decisions already recorded this run:",
+    (state.decisions?.length ? state.decisions.join("\n") : "(none yet)"),
+    "",
+    "Task JSON:",
+    taskJson,
+  ].join("\n");
+
+  mkdirSync(dirname(promptFile), { recursive: true });
+  writeFileSync(promptFile, content, "utf-8");
 }
 
 export interface GoalReviewPromptOptions {
