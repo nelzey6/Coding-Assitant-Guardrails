@@ -410,7 +410,7 @@ program
   .option("--no-finalize-docs",              "Skip the finalize-docs agent after all tasks pass")
   .option("--goal-review",                   "Run a goal-review agent after all tasks pass; halts with needs_human if gaps detected")
   .option("--architect-checkpoint-interval <n>", "Run an architect checkpoint every N passed tasks (0 = disabled, default: 0)", "0")
-  .option("--decision-grill",                "Run a grill-with-docs self-interview before each executor turn; re-grills shallow/low-confidence decisions once, then escalates to needs_human")
+  .option("--no-decision-grill",             "Skip the per-task grill-with-docs self-interview (on by default)")
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
 
@@ -467,7 +467,7 @@ program
       finalizeDocs:                opts.finalizeDocs !== false,
       goalReview:                  !!opts.goalReview,
       architectCheckpointInterval: parseInt(opts.architectCheckpointInterval ?? "0", 10),
-      decisionGrill:               !!opts.decisionGrill,
+      decisionGrill:               opts.decisionGrill !== false,
     };
 
     try {

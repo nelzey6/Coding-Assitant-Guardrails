@@ -484,7 +484,7 @@ export function runAgenticLoop(config: LoopConfig): void {
     finalizeDocs:                config.finalizeDocs                ?? false,
     goalReview:                  config.goalReview                  ?? false,
     architectCheckpointInterval: config.architectCheckpointInterval ?? 0,
-    decisionGrill:               config.decisionGrill               ?? false,
+    decisionGrill:               config.decisionGrill               ?? true,
     repoRoot:           config.repoRoot,
     agent:              config.agent,
     verifierAgent:      config.verifierAgent      ?? config.agent,
