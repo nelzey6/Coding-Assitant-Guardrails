@@ -140,6 +140,7 @@ Current TS rails:
 - Replan budget (`--max-replans`, default 5) caps how many times task-grill can trigger replanning per session; exhaustion emits `replan_budget_exhausted` and escalates to `needs_human`.
 - Convergence detection: if a replan produces the same task IDs as the previous replan, the loop emits `replan_convergence_failure` and halts.
 - `--rebase-before-verify`: optional gate that rebases the worktree on loop-start HEAD and re-runs checks before the verifier, catching post-merge integration failures early.
+- After each `ready` task-grill verdict, `assumptionsStillValid` and `assumptionsChanged` fields from the result are persisted back into `state.assumptions` (tagged `[valid]`/`[changed]`) and emitted as an `assumptions_updated` event. The current assumption list is forwarded into every subsequent task-grill prompt so drift is visible across turns.
 - `accept` and `reset-task` are dry-run by default and require `--apply` to mutate.
 
 Known gaps before calling the TS runner production-default:
@@ -147,7 +148,6 @@ Known gaps before calling the TS runner production-default:
 - `run` does not yet enforce the policy clean-main-worktree gate.
 - CLI defaults do not fully honor policy defaults such as retry count and merge mode.
 - `promptPolicy.lessons` exists in state but is not yet updated as structured learning memory.
-- Task-grill's `assumptionsStillValid`/`assumptionsChanged` output is not yet persisted back into `state.assumptions`.
 - Architect-level checkpointing across multiple passed tasks is not yet implemented.
 - Final goal review (cumulative diff vs. original goal) after all tasks pass is not yet implemented.
 - Installer shims still install the PowerShell harness, not the TS runner.
@@ -170,6 +170,7 @@ Known gaps before calling the TS runner production-default:
 - failure-analysis injected into task-grill prompt on retry
 - replan budget exhaustion (`replan_budget_exhausted`) via `--max-replans`
 - replan convergence detection (`replan_convergence_failure`) when plan produces identical task IDs
+- assumption ledger: task-grill `assumptionsStillValid`/`assumptionsChanged` persisted to `state.assumptions` with `[valid]`/`[changed]` tags and emitted as `assumptions_updated` event
 
 Missing TS smoke coverage:
 

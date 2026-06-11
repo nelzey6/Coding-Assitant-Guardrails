@@ -803,6 +803,73 @@ throw new Error("executor/verifier must not run when convergence detected");
   }
 });
 
+// ── case 10: assumption ledger — grill results persisted to state.assumptions ──
+// Task-grill writes assumptionsStillValid and assumptionsChanged.
+// After the loop, state.assumptions must contain both tagged entries.
+
+runCase("assumption ledger: grill assumptionsStillValid/Changed persisted to state", () => {
+  const dir = tmpRepo("assumptions");
+  try {
+    writeState(dir, baseState());
+
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  if (!m) throw new Error("no task-grill result path");
+  const resultPath = m[1].trim();
+  mkdirSync(dirname(resultPath), { recursive: true });
+  writeFileSync(resultPath, JSON.stringify({
+    verdict: "ready",
+    understanding: "Task understood.",
+    evidence: ["task JSON"],
+    assumptionsStillValid: ["repo uses npm workspaces"],
+    assumptionsChanged: ["output path changed from dist/ to build/"],
+    scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: ["checks pass"],
+    risks: [],
+    executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+writeFileSync("output.txt", "done", "utf-8");
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+    const assumptions: string[] = state.assumptions ?? [];
+    assert(
+      assumptions.some((a: string) => a.startsWith("[valid]") && a.includes("npm workspaces")),
+      `expected [valid] assumption, got: ${JSON.stringify(assumptions)}`
+    );
+    assert(
+      assumptions.some((a: string) => a.startsWith("[changed]") && a.includes("output path")),
+      `expected [changed] assumption, got: ${JSON.stringify(assumptions)}`
+    );
+    const events = readEvents(dir);
+    assert(hasEvent(events, "assumptions_updated"), "expected assumptions_updated event");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 
 const passed = results.filter((r) => r.ok).length;

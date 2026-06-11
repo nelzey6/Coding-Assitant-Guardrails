@@ -14,6 +14,7 @@ import {
   addTaskAttempt,
   getFailureStatusForTask,
   getLastFailureAnalysisFile,
+  updateAssumptionsFromGrill,
   mergePlannerResult,
   type AgenticState,
   type Task,
@@ -86,6 +87,8 @@ interface TaskGrillResult {
   understanding?: string;
   risks?: string[];
   executorInstructions?: string;
+  assumptionsStillValid?: string[];
+  assumptionsChanged?: string[];
 }
 
 function git(args: string[], cwd?: string): string {
@@ -381,6 +384,7 @@ export function runAgenticLoop(config: LoopConfig): void {
         runsRoot: cfg.runsRoot,
         stateFile: cfg.stateFile,
         budget: cfg.budget,
+        state: loadState(cfg.repoRoot, cfg.stateFile) ?? undefined,
         task,
         iteration,
         runDir,
@@ -452,6 +456,13 @@ export function runAgenticLoop(config: LoopConfig): void {
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         throw new LoopError(`Task grill stopped ${taskId} before executor edits: ${reason}`);
       }
+
+      // Persist assumption verdicts from task-grill into state so future turns can see them.
+      updateAssumptionsFromGrill(
+        cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId,
+        taskGrillResultObj.assumptionsStillValid ?? [],
+        taskGrillResultObj.assumptionsChanged ?? []
+      );
 
       // Warn when no scope is declared — the diff-scope rail cannot bound the change
       if (isTaskUnscoped(task as any)) {

@@ -389,6 +389,7 @@ export interface TaskGrillPromptOptions {
   runsRoot: string;
   stateFile: string;
   budget: PromptBudget;
+  state?: AgenticState;
   task: Task;
   iteration: number;
   runDir: string;
@@ -472,6 +473,9 @@ export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOp
     "",
     `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
     recentHistory,
+    "",
+    "Current planner assumptions (tag [valid]/[changed] from prior grill turns):",
+    (opts.state?.assumptions?.length ? opts.state.assumptions.join("\n") : "(none recorded yet)"),
     "",
     "Workflow policy:",
     JSON.stringify(policy, null, 2),

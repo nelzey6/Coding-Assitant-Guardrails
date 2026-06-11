@@ -232,6 +232,28 @@ export function addTaskAttempt(
   return state;
 }
 
+// Persist task-grill assumption verdicts back into state.assumptions.
+// Items from assumptionsStillValid are tagged "[valid]"; from assumptionsChanged "[changed]".
+// Writes state and appends an assumptions_updated event.
+export function updateAssumptionsFromGrill(
+  repoRoot: string,
+  stateFile: string,
+  runsRoot: string,
+  taskId: string,
+  assumptionsStillValid: string[],
+  assumptionsChanged: string[]
+): void {
+  const tagged = [
+    ...assumptionsStillValid.map((a) => `[valid] ${a}`),
+    ...assumptionsChanged.map((a) => `[changed] ${a}`),
+  ];
+  if (tagged.length === 0) return;
+  const state = loadState(repoRoot, stateFile)!;
+  state.assumptions = [...(state.assumptions ?? []), ...tagged];
+  writeState(repoRoot, state, stateFile);
+  appendEventToLog(repoRoot, runsRoot, stateFile, "assumptions_updated", { task: taskId, count: tagged.length, items: tagged });
+}
+
 // Return the most recent failure-analysis.json path for a task, if recorded.
 export function getLastFailureAnalysisFile(task: Task): string {
   const history = task.failureHistory ?? [];
