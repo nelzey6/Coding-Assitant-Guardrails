@@ -30,17 +30,16 @@ The main branch stays clean throughout. State persists in `agentic.json` so runs
 
 ## Quickstart
 
-### Option A — Inside Claude Code (conversational)
+### Step 1 — Clone this repo
 
+```bash
+git clone https://github.com/nelzey6/Coding-Assitant-Guardrails.git
+cd Coding-Assitant-Guardrails
 ```
-/agentic-loop <your goal>
-```
 
-Claude plans the goal and works through each task in the conversation, printing progress after each one. No terminal needed.
+### Step 2 — Install into your product repo
 
-### Option B — Terminal (fully unattended, fresh agent per task)
-
-Install into your product repo first:
+This copies skills, harness shims, and agent guidance templates into your target repo:
 
 ```powershell
 # Windows
@@ -52,9 +51,22 @@ Install into your product repo first:
 ./scripts/bootstrap/setup-ai-skills.sh --destination "$HOME/src/my-product"
 ```
 
-Then from your product repo:
+This seeds `AGENTS.md`, `CLAUDE.md`, `PROJECT.md`, `CONTEXT.md`, and the `agentic-loop` shim into your product repo. Run `--help` for all options.
+
+### Step 3 — Run the loop
+
+**Option A — Inside Claude Code (conversational, no terminal needed)**
+
+```
+/agentic-loop <your goal>
+```
+
+Claude plans the goal and works through each task in the conversation, printing progress after each one.
+
+**Option B — Terminal (fully unattended, fresh agent per task)**
 
 ```powershell
+# From your product repo root
 agentic-loop run --checks "npm test"
 ```
 
