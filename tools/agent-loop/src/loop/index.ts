@@ -23,7 +23,7 @@ import { appendEvent } from "../events/index.js";
 import { safeSlug, createWorktree, worktreeExists, removeWorktree } from "../tools/index.js";
 import { invokeAgent, invokeAgentWithLog, getTaskChecks, type AgentConfig } from "../agent/index.js";
 import { invokeChecks, parseMetricLines } from "../checks/index.js";
-import { getTaskScope, getOutOfScopeFiles, testFastVerifierAllowed, testTaskIsHighRisk } from "../scope/index.js";
+import { getTaskScope, getOutOfScopeFiles, testFastVerifierAllowed, testTaskIsHighRisk, isTaskUnscoped } from "../scope/index.js";
 import {
   writeCodeGraphContext,
   writeRepoContext,
@@ -51,8 +51,12 @@ export interface LoopConfig {
   maxAgentCalls?: number;
   /** Override verifier vote count (0 = auto-resolve from risk). */
   verifierVotes?: number;
+  /** Rebase worktree on loop-start HEAD before running the verifier (opt-in). */
+  rebaseBeforeVerify?: boolean;
   /** Timeout in seconds for each check command (0 = no timeout). */
   checkTimeoutSeconds?: number;
+  /** Maximum number of replans allowed before treating as needs_human (0 = no limit). */
+  maxReplans?: number;
   /** Extra check commands appended to state.checks (from --checks CLI flag). */
   extraChecks?: string[];
   budget?: PromptBudget;
@@ -119,11 +123,12 @@ function resolveVerifierVotes(task: Task, policy: WorkflowPolicy, forcedVotes = 
 }
 
 // Run the planner phase: build context, invoke planner agent, validate + merge result.
+// Returns the task IDs in the new plan (used by callers for convergence detection).
 function runPlannerPhase(
   cfg: Required<LoopConfig>,
   policy: WorkflowPolicy,
   agentCallCounter: { count: number }
-): void {
+): string[] {
   const ts = timestamp();
   const plannerRunDir = join(cfg.repoRoot, cfg.runsRoot, `agentic-${ts}-planner`);
   mkdirSync(plannerRunDir, { recursive: true });
@@ -192,7 +197,8 @@ function runPlannerPhase(
   }
 
   appendEvent(cfg.repoRoot, "planner_finished", { runDir: plannerRunDir, verdict: plannerResult["verdict"], resultFile, grillTranscript: grillFile }, cfg.runsRoot, cfg.stateFile);
-  mergePlannerResult(cfg.repoRoot, cfg.stateFile, plannerResult as unknown as PlannerResult);
+  const stateAfterPlan = mergePlannerResult(cfg.repoRoot, cfg.stateFile, plannerResult as unknown as PlannerResult);
+  return stateAfterPlan.lastReplanTaskIds ?? [];
 }
 
 // Run finalize-docs phase after all tasks pass.
@@ -244,6 +250,7 @@ export function runAgenticLoop(config: LoopConfig): void {
     maxAgentCalls:      config.maxAgentCalls      ?? 0,
     verifierVotes:      config.verifierVotes      ?? 0,
     checkTimeoutSeconds: config.checkTimeoutSeconds ?? 0,
+    maxReplans:         config.maxReplans         ?? 5,
     extraChecks:        config.extraChecks        ?? [],
     budget:             config.budget             ?? "medium",
     planOnly:           config.planOnly           ?? false,
@@ -255,6 +262,7 @@ export function runAgenticLoop(config: LoopConfig): void {
     autoAcceptPassed:   config.autoAcceptPassed   ?? false,
     cleanupPassed:      config.cleanupPassed      ?? false,
     fastVerifier:       config.fastVerifier       ?? false,
+    rebaseBeforeVerify: config.rebaseBeforeVerify ?? false,
     finalizeDocs:       config.finalizeDocs       ?? false,
     repoRoot:           config.repoRoot,
     agent:              config.agent,
@@ -265,6 +273,8 @@ export function runAgenticLoop(config: LoopConfig): void {
   const runStartTime = Date.now();
   const agentCallCounter = { count: 0 };
   const eventLogPath = join(cfg.repoRoot, cfg.runsRoot, "events.jsonl");
+  // Capture HEAD at loop start — used as rebase target when --rebase-before-verify is set.
+  const loopBaseRef = (() => { try { return git(["rev-parse", "HEAD"], cfg.repoRoot); } catch { return ""; } })();
 
   // ── Planner phase ─────────────────────────────────────────────────────────
   {
@@ -275,6 +285,8 @@ export function runAgenticLoop(config: LoopConfig): void {
       if (cfg.planOnly) { console.log("<promise>PLANNED</promise>"); return; }
     }
   }
+  // Track replan count across the session (loaded fresh each iteration below)
+  let sessionReplanCount = 0;
   if (cfg.planOnly) { console.log("<promise>PLANNED</promise>"); return; }
 
   // ── Execution loop ────────────────────────────────────────────────────────
@@ -386,9 +398,39 @@ export function runAgenticLoop(config: LoopConfig): void {
             taskGrillResultObj.understanding ?? "",
             ...(taskGrillResultObj.risks ?? []),
           ].filter(Boolean).join("; ");
+
+          // Replan budget guard
+          sessionReplanCount++;
+          if (cfg.maxReplans > 0 && sessionReplanCount > cfg.maxReplans) {
+            const budgetReason = `replan budget exhausted (${sessionReplanCount - 1} replans >= maxReplans ${cfg.maxReplans}); stopping to avoid thrash. Last reason: ${reason}`;
+            setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "task_grill", reason: budgetReason, resultFile: taskGrillResult });
+            appendEvent(cfg.repoRoot, "replan_budget_exhausted", { task: taskId, sessionReplanCount, maxReplans: cfg.maxReplans, reason: budgetReason }, cfg.runsRoot, cfg.stateFile);
+            copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+            throw new LoopError(`Replan budget exhausted for ${taskId}: ${budgetReason}`);
+          }
+
+          // Capture last replan's task IDs before this replan overwrites them
+          const preReplanState = loadState(cfg.repoRoot, cfg.stateFile)!;
+          const prevReplanTaskIds = (preReplanState.lastReplanTaskIds ?? []).slice().sort().join(",");
+
           setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "blocked", { at: new Date().toISOString(), phase: "task_grill", reason, resultFile: taskGrillResult });
-          appendEvent(cfg.repoRoot, "task_replan_requested", { task: taskId, reason, resultFile: taskGrillResult }, cfg.runsRoot, cfg.stateFile);
-          runPlannerPhase(cfg, policy, agentCallCounter);
+          appendEvent(cfg.repoRoot, "task_replan_requested", { task: taskId, reason, resultFile: taskGrillResult, sessionReplanCount }, cfg.runsRoot, cfg.stateFile);
+
+          const newTaskIds = runPlannerPhase(cfg, policy, agentCallCounter);
+          const newTaskIdsKey = newTaskIds.slice().sort().join(",");
+
+          // Non-convergence detection: if this replan produced the same task IDs as the previous replan, it's thrashing
+          if (prevReplanTaskIds.length > 0 && newTaskIdsKey === prevReplanTaskIds) {
+            const thrashReason = `replan produced the same task set as the previous replan (${newTaskIdsKey}); stopping to avoid infinite loop`;
+            const afterState = loadState(cfg.repoRoot, cfg.stateFile)!;
+            appendEvent(cfg.repoRoot, "replan_convergence_failure", { task: taskId, taskIds: newTaskIdsKey, sessionReplanCount }, cfg.runsRoot, cfg.stateFile);
+            for (const t of getTasks(afterState).filter((t) => t.status === "pending" || t.status === "needs_retry")) {
+              setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, t.id, "needs_human", { at: new Date().toISOString(), phase: "replan_convergence", reason: thrashReason, resultFile: "" });
+            }
+            copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+            throw new LoopError(`Replan convergence failure: ${thrashReason}`);
+          }
+
           copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
           continue;
         }
@@ -402,6 +444,13 @@ export function runAgenticLoop(config: LoopConfig): void {
         setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, status, { at: new Date().toISOString(), phase: "task_grill", reason, resultFile: taskGrillResult });
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         throw new LoopError(`Task grill stopped ${taskId} before executor edits: ${reason}`);
+      }
+
+      // Warn when no scope is declared — the diff-scope rail cannot bound the change
+      if (isTaskUnscoped(task as any)) {
+        const warnMsg = `Task ${taskId} has no declared scope. The diff-scope rail is inactive for this task; all file changes will be allowed. Declare 'scope' globs in the task to enable scope enforcement.`;
+        console.warn(warnMsg);
+        appendEvent(cfg.repoRoot, "scope_missing_warning", { task: taskId, reason: warnMsg }, cfg.runsRoot, cfg.stateFile);
       }
 
       // Executor
@@ -474,6 +523,44 @@ export function runAgenticLoop(config: LoopConfig): void {
           throw new LoopError(`Scope violation for ${taskId}; marked ${failureStatus}. ${scopeReason}`);
         }
         appendEvent(cfg.repoRoot, "scope_passed", { task: taskId, scope: taskScope }, cfg.runsRoot, cfg.stateFile);
+      }
+
+      // Rebase-before-verify gate: rebase on loop-start HEAD, re-run checks to catch integration issues
+      if (cfg.rebaseBeforeVerify && loopBaseRef) {
+        const currentHead = (() => { try { return git(["rev-parse", "HEAD"], worktreePath); } catch { return ""; } })();
+        const baseRefResolved = (() => { try { return git(["rev-parse", loopBaseRef], cfg.repoRoot); } catch { return loopBaseRef; } })();
+        if (currentHead !== baseRefResolved) {
+          appendEvent(cfg.repoRoot, "rebase_before_verify_started", { task: taskId, loopBaseRef }, cfg.runsRoot, cfg.stateFile);
+          try {
+            git(["rebase", loopBaseRef], worktreePath);
+            appendEvent(cfg.repoRoot, "rebase_before_verify_passed", { task: taskId, loopBaseRef }, cfg.runsRoot, cfg.stateFile);
+          } catch (rebaseErr) {
+            try { git(["rebase", "--abort"], worktreePath); } catch { /* non-fatal */ }
+            const rebaseMsg = rebaseErr instanceof Error ? rebaseErr.message : String(rebaseErr);
+            const rebaseFailStatus = getFailureStatusForTask(task, "checks", cfg.maxRetries);
+            appendEvent(cfg.repoRoot, "rebase_before_verify_failed", { task: taskId, loopBaseRef, reason: rebaseMsg }, cfg.runsRoot, cfg.stateFile);
+            setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, rebaseFailStatus, { at: new Date().toISOString(), phase: "rebase_before_verify", reason: rebaseMsg, resultFile: verifierResult });
+            copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+            if (rebaseFailStatus === "needs_retry") { console.warn(`Rebase failed for ${taskId}; marked ${rebaseFailStatus}.`); continue; }
+            throw new LoopError(`Rebase-before-verify failed for ${taskId}; worktree retained at ${worktreePath}. ${rebaseMsg}`);
+          }
+          // Re-run checks post-rebase to catch integration failures
+          const rebaseCheckCmds = [...new Set([...getTaskChecks(task, loadState(cfg.repoRoot, cfg.stateFile)!), ...cfg.extraChecks])];
+          appendEvent(cfg.repoRoot, "rebase_checks_started", { task: taskId, commands: rebaseCheckCmds }, cfg.runsRoot, cfg.stateFile);
+          try {
+            checkOutput = invokeChecks(worktreePath, rebaseCheckCmds, cfg.checkTimeoutSeconds || 120);
+            appendEvent(cfg.repoRoot, "rebase_checks_passed", { task: taskId }, cfg.runsRoot, cfg.stateFile);
+          } catch (err) {
+            checkOutput = err instanceof Error ? err.message : String(err);
+            const rebaseCheckFailStatus = getFailureStatusForTask(task, "checks", cfg.maxRetries);
+            appendEvent(cfg.repoRoot, "rebase_checks_failed", { task: taskId, status: rebaseCheckFailStatus, reason: checkOutput }, cfg.runsRoot, cfg.stateFile);
+            setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, rebaseCheckFailStatus, { at: new Date().toISOString(), phase: "rebase_checks", reason: checkOutput, resultFile: verifierResult });
+            writeDiffArtifacts(worktreePath, runDir);
+            copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+            if (rebaseCheckFailStatus === "needs_retry") { console.warn(`Post-rebase checks failed for ${taskId}; marked ${rebaseCheckFailStatus}.`); continue; }
+            throw new LoopError(`Post-rebase checks failed for ${taskId}; marked ${rebaseCheckFailStatus}. Worktree retained at ${worktreePath}.\n${checkOutput}`);
+          }
+        }
       }
 
       // Fast-verifier gate

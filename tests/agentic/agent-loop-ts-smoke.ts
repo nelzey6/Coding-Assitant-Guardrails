@@ -351,6 +351,42 @@ writeFileSync("output.txt", "done", "utf-8");
   }
 });
 
+// ── case 1d: unscoped task emits warning event, still runs ───────────────────
+
+runCase("unscoped task: emits scope_missing_warning, task still runs", () => {
+  const dir = tmpRepo("unscoped");
+  try {
+    writeState(dir, baseState({ scope: [] }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+writeFileSync("output.txt", "done", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "scope_missing_warning"), "expected scope_missing_warning event for unscoped task");
+    assert(hasEvent(events, "task_passed"), "expected task to still pass despite missing scope");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── case 2: scope violation — out-of-scope file → task fails ─────────────────
 
 runCase("scope violation: out-of-scope file marks task failed", () => {
@@ -558,6 +594,141 @@ writeFileSync("output.txt", "done", "utf-8");
     assert(state.tasks[0].status === "needs_human", `expected needs_human, got ${state.tasks[0].status}`);
     const events = readEvents(dir);
     assert(hasEvent(events, "verifier_finished"), "expected verifier_finished");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 8: replan budget exhaustion ─────────────────────────────────────────
+// Agent: task-grill always returns needs_replan; planner always writes a new unique task
+// so convergence detection doesn't fire. Budget guard fires on replan #2 when maxReplans=1.
+
+runCase("replan budget: exhausted after maxReplans, task escalates to needs_human", () => {
+  const dir = tmpRepo("replan-budget");
+  try {
+    writeState(dir, baseState({ title: "Needs replan", scope: ["stale.txt"] }, { maxIterations: 5 }));
+
+    // This fake agent handles task-grill (via writeFakeAgent "Needs replan" title),
+    // planner (writes a fresh unique task each time), and never reaches executor/verifier.
+    const agentBody = `
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { dirname } from "path";
+const promptFile = process.argv[2];
+const content = readFileSync(promptFile, "utf-8");
+if (content.includes("Write planner JSON only to:")) {
+  const m = content.match(/Write planner JSON only to: (.+)/);
+  if (!m) throw new Error("no planner result path");
+  const resultPath = m[1].trim();
+  mkdirSync(dirname(resultPath), { recursive: true });
+  // Count previous planner results to generate a unique task id each call
+  const runDir = dirname(resultPath);
+  const countFile = resultPath + ".count";
+  let n = existsSync(countFile) ? parseInt(readFileSync(countFile, "utf-8")) + 1 : 1;
+  writeFileSync(countFile, String(n), "utf-8");
+  writeFileSync(resultPath, JSON.stringify({
+    verdict: "planned",
+    summary: "replan " + n,
+    decisions: [], assumptions: [], openQuestions: [], blockers: [], artifacts: [],
+    tasks: [{
+      id: "task-replan-" + n,
+      title: "Needs replan",
+      kind: "maintenance",
+      workflow: "tdd",
+      status: "pending",
+      priority: 1,
+      acceptanceCriteria: ["stale.txt exists"],
+      validation: [],
+      dependsOn: [],
+      failureHistory: [],
+      artifacts: [],
+      scope: ["stale.txt"]
+    }]
+  }), "utf-8");
+  const grillMatch = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/);
+  if (grillMatch) {
+    const gp = grillMatch[1].trim();
+    mkdirSync(dirname(gp), { recursive: true });
+    writeFileSync(gp, "# Grill\\nReplanned.", "utf-8");
+  }
+  process.exit(0);
+}
+throw new Error("executor/verifier must not run in replan-budget test");
+`;
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", agentBody);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    // maxReplans=1: first replan (sessionReplanCount=1) is allowed, second (count=2) triggers budget exhaustion
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "5", "--max-replans", "1", "--no-merge"], 90_000);
+    assert(r.status !== 0, "expected non-zero exit when replan budget exhausted");
+    const events = readEvents(dir);
+    assert(hasEvent(events, "replan_budget_exhausted"), "expected replan_budget_exhausted event");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 9: replan convergence detection ──────────────────────────────────────
+// Agent: task-grill always returns needs_replan; planner always produces the same task IDs.
+// Convergence detection fires on the second replan (same pending task set as before).
+
+runCase("replan convergence: identical plan detected, loop stops", () => {
+  const dir = tmpRepo("replan-conv");
+  try {
+    writeState(dir, baseState({ title: "Needs replan", scope: ["stale.txt"] }, { maxIterations: 5 }));
+
+    const agentBody = `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const promptFile = process.argv[2];
+const content = readFileSync(promptFile, "utf-8");
+if (content.includes("Write planner JSON only to:")) {
+  const m = content.match(/Write planner JSON only to: (.+)/);
+  if (!m) throw new Error("no planner result path");
+  const resultPath = m[1].trim();
+  mkdirSync(dirname(resultPath), { recursive: true });
+  writeFileSync(resultPath, JSON.stringify({
+    verdict: "planned",
+    summary: "same plan again",
+    decisions: [], assumptions: [], openQuestions: [], blockers: [], artifacts: [],
+    tasks: [{
+      id: "task-001",
+      title: "Needs replan",
+      kind: "maintenance",
+      workflow: "tdd",
+      status: "pending",
+      priority: 1,
+      acceptanceCriteria: ["stale.txt exists"],
+      validation: [],
+      dependsOn: [],
+      failureHistory: [],
+      artifacts: [],
+      scope: ["stale.txt"]
+    }]
+  }), "utf-8");
+  const grillMatch = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/);
+  if (grillMatch) {
+    const gp = grillMatch[1].trim();
+    mkdirSync(dirname(gp), { recursive: true });
+    writeFileSync(gp, "# Grill\\nSame plan.", "utf-8");
+  }
+  process.exit(0);
+}
+throw new Error("executor/verifier must not run when convergence detected");
+`;
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", agentBody);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    // maxReplans=5 so budget won't fire first; convergence fires when plan is identical
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "5", "--max-replans", "5", "--no-merge"], 90_000);
+    assert(r.status !== 0, "expected non-zero exit on convergence failure");
+    const events = readEvents(dir);
+    assert(hasEvent(events, "replan_convergence_failure"), "expected replan_convergence_failure event");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }

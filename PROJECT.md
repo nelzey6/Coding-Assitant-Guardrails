@@ -40,10 +40,10 @@ Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA
 | `tools/agent-loop/src/index.ts` | Commander CLI entry point. Defines `validate`, `plan`, diagnostics, `accept`, `reset-task`, and `run`. |
 | `tools/agent-loop/src/loop/index.ts` | Autonomous run engine. Owns planner, task-grill, executor, checks, scope rail, verifier, replan, commit/merge, handover, and finalize-docs phases. |
 | `tools/agent-loop/src/prompts/index.ts` | Prompt builders for planner, task-grill, executor, verifier, finalize-docs, and prompt budget trimming. |
-| `tools/agent-loop/src/state/index.ts` | `agentic.json` schema helpers, task selection, task status changes, attempts, failure history, and planner result merge. |
+| `tools/agent-loop/src/state/index.ts` | `agentic.json` schema helpers, task selection, task status changes, attempts, failure history, planner result merge, and replan tracking (`replanCount`, `lastReplanTaskIds`). |
 | `tools/agent-loop/src/agent/index.ts` | Agent invocation adapters for `claude`, `pi`, and custom command templates. |
 | `tools/agent-loop/src/checks/index.ts` | Validation command execution, timeout handling, structured `METRIC key=value` parsing. |
-| `tools/agent-loop/src/scope/index.ts` | Scope glob matching, out-of-scope diff detection, fast-verifier eligibility, high-risk task detection. |
+| `tools/agent-loop/src/scope/index.ts` | Scope glob matching, out-of-scope diff detection, unscoped task detection, fast-verifier eligibility, high-risk task detection. |
 | `tools/agent-loop/src/events/index.ts` | `.agent-runs/events.jsonl` append/load/format helpers. |
 | `tools/agent-loop/src/reporting/index.ts` | Human/JSON output for status, summary, last-failure, why-stuck, doctor, reset, and accept. |
 | `tools/agent-loop/src/policy/index.ts` | Loads workflow policy from `.agent-policy/workflow-policy.json` or `templates/agent-policy/workflow-policy.json`. |
@@ -79,15 +79,17 @@ The current TS run loop is:
 4. Create or reuse `.worktrees/<task-id>` on `agentic/<task-id>` or `agentic/review/<task-id>`.
 5. Run task-grill before executor edits.
 6. If task-grill returns `ready`, inject its result into executor prompt and run executor.
-7. If task-grill returns `needs_replan`, mark stale task `blocked`, record `task_replan_requested`, run planner again, and continue to replacement tasks.
+7. If task-grill returns `needs_replan`, mark stale task `blocked`, record `task_replan_requested`, enforce replan budget, check for plan convergence, run planner again, and continue to replacement tasks.
 8. If task-grill returns `needs_human` or `blocked`, stop before executor edits.
 9. Run configured checks from state-level `checks`, task `validation`, and CLI `--checks`.
-10. Enforce declared task `scope` by diffing changed files before verifier review.
-11. Run verifier unless `--fast-verifier` is requested and allowed for a low-risk scoped task.
-12. For high-risk tasks, run adversarial verifier votes unless overridden.
-13. On pass, optionally commit/merge or retain review branch/worktree.
-14. Write handover/progress artifacts.
-15. When no runnable tasks remain, treat `passed` and `blocked` as terminal statuses. If all unfinished work is terminal, complete.
+10. Emit `scope_missing_warning` event and warn if task declares no scope (loop proceeds but diff-scope rail is inactive).
+11. Enforce declared task `scope` by diffing changed files before verifier review.
+12. If `--rebase-before-verify` is set, rebase worktree on loop-start HEAD and re-run checks before the verifier.
+13. Run verifier unless `--fast-verifier` is requested and allowed for a low-risk scoped task.
+14. For high-risk tasks, run adversarial verifier votes unless overridden.
+15. On pass, optionally commit/merge or retain review branch/worktree.
+16. Write handover/progress artifacts.
+17. When no runnable tasks remain, treat `passed` and `blocked` as terminal statuses. If all unfinished work is terminal, complete.
 
 ## Task-Grill Contract
 
@@ -128,20 +130,26 @@ Current TS rails:
 - One task per isolated worktree/branch.
 - Harness owns task status, verifier result handling, commit, merge, and cleanup.
 - Task-grill must pass before executor runs.
+- Tasks with no declared `scope` emit `scope_missing_warning`; the diff-scope rail is inactive for them.
 - Scope rail blocks changed files outside declared task scope.
 - Fast verifier is denied unless task kind is low-risk and scope is declared.
 - High-risk tasks can receive multiple adversarial verifier votes.
 - Check/verifier failures retry until budget, then escalate to `needs_human`.
 - Runtime and agent-call budgets emit `budget_exhausted`.
+- Replan budget (`--max-replans`, default 5) caps how many times task-grill can trigger replanning per session; exhaustion emits `replan_budget_exhausted` and escalates to `needs_human`.
+- Convergence detection: if a replan produces the same task IDs as the previous replan, the loop emits `replan_convergence_failure` and halts.
+- `--rebase-before-verify`: optional gate that rebases the worktree on loop-start HEAD and re-runs checks before the verifier, catching post-merge integration failures early.
 - `accept` and `reset-task` are dry-run by default and require `--apply` to mutate.
 
 Known gaps before calling the TS runner production-default:
 
 - `run` does not yet enforce the policy clean-main-worktree gate.
 - CLI defaults do not fully honor policy defaults such as retry count and merge mode.
-- CodeGraph context generation in TS currently writes a fallback stub instead of invoking the helper.
 - `promptPolicy.lessons` exists in state but is not yet updated as structured learning memory.
+- Check/verifier failures do not yet produce a `failure-analysis.json` fed forward to the next task-grill or replan prompt.
+- Task-grill's `assumptionsStillValid`/`assumptionsChanged` output is not yet persisted back into `state.assumptions`.
 - Architect-level checkpointing across multiple passed tasks is not yet implemented.
+- Final goal review (cumulative diff vs. original goal) after all tasks pass is not yet implemented.
 - Installer shims still install the PowerShell harness, not the TS runner.
 
 ## Validation Coverage
@@ -152,17 +160,22 @@ Known gaps before calling the TS runner production-default:
 - task-grill result injection into executor prompt
 - task-grill `needs_human` stop before executor edits
 - task-grill `needs_replan` planner loop and replacement task execution
+- unscoped task emits `scope_missing_warning` but still completes
 - scope violation blocking
 - scope clean pass
 - fast-verifier denied for high-risk task
 - fast-verifier allowed for low-risk scoped task
 - check failure retry then pass
 - verifier failure retry budget exhaustion to `needs_human`
+- replan budget exhaustion (`replan_budget_exhausted`) via `--max-replans`
+- replan convergence detection (`replan_convergence_failure`) when plan produces identical task IDs
 
 Missing TS smoke coverage:
 
 - real `claude` / `pi` commands
 - planner phase from empty task list outside the replan case
+- `--rebase-before-verify` gate (requires real multi-commit git scenario)
+- CodeGraph context invocation (requires `codegraph` on PATH)
 - finalize-docs behavior
 - accept/apply/review-branch flows
 - doctor/reset commands

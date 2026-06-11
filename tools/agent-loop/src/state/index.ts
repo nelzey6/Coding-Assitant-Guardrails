@@ -49,6 +49,8 @@ export interface AgenticState {
   openQuestions?: string[];
   blockers?: string[];
   promptPolicy?: { lessons?: string[] };
+  replanCount?: number;
+  lastReplanTaskIds?: string[];
 }
 
 export interface PlannerResult {
@@ -241,6 +243,7 @@ export function getFailureStatusForTask(
 }
 
 // Merge a planner result into state: append metadata lists and transition phase.
+// Returns the new task IDs added by this plan (used for convergence detection).
 export function mergePlannerResult(
   repoRoot: string,
   stateFile: string,
@@ -252,8 +255,10 @@ export function mergePlannerResult(
   if (result.openQuestions?.length) state.openQuestions = [...(state.openQuestions ?? []), ...result.openQuestions];
   if (result.blockers?.length) state.blockers = [...(state.blockers ?? []), ...result.blockers];
   if (result.verdict === "planned") {
-    state.tasks = [...(state.tasks ?? []), ...(result.tasks ?? [])];
+    const newTasks = result.tasks ?? [];
+    state.tasks = [...(state.tasks ?? []), ...newTasks];
     state.phase = "execution";
+    state.lastReplanTaskIds = newTasks.map((t) => t.id);
   } else if (result.verdict === "needs_human") {
     state.phase = "needs_human";
   } else {

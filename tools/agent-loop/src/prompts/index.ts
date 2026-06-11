@@ -77,16 +77,56 @@ function git(args: string[], cwd?: string): string {
   }
 }
 
-// Generate the codegraph context file (calls the PS1 helper if available, else writes a stub).
+// Generate the codegraph context file by invoking the repo's context helper scripts.
+// Falls back to a stub when the helper is not found or fails.
 export function writeCodeGraphContext(outputFile: string, workingDirectory = "."): void {
   mkdirSync(dirname(outputFile), { recursive: true });
-  // The PS1 helper lives at scripts/context/codegraph-context.ps1 relative to scripts/agentic/
-  // In the TS port we just produce the fallback stub; the caller can override.
-  writeFileSync(
-    outputFile,
-    "# CodeGraph Context\n\nCodeGraph context helper was unavailable. Continue with normal repository inspection.",
-    "utf-8"
-  );
+
+  // Locate the repo root by walking up from workingDirectory
+  const findRepoRoot = (start: string): string => {
+    let dir = resolve(start);
+    for (let i = 0; i < 10; i++) {
+      if (existsSync(join(dir, ".git")) || existsSync(join(dir, "AGENTS.md"))) return dir;
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return resolve(start);
+  };
+  const repoRoot = findRepoRoot(workingDirectory);
+
+  const ps1Helper = join(repoRoot, "scripts", "context", "codegraph-context.ps1");
+  const shHelper  = join(repoRoot, "scripts", "context", "codegraph-context.sh");
+  const isWin = process.platform === "win32";
+
+  const stub = "# CodeGraph Context\n\nCodeGraph context helper was unavailable. Continue with normal repository inspection.";
+
+  // Try the platform-native helper first, then cross-platform fallback
+  const candidates: Array<{ cmd: string; args: string[] }> = [];
+  if (isWin && existsSync(ps1Helper)) {
+    candidates.push({ cmd: "pwsh", args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1Helper, "-Output", outputFile, "-WorkingDirectory", workingDirectory] });
+    candidates.push({ cmd: "powershell.exe", args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1Helper, "-Output", outputFile, "-WorkingDirectory", workingDirectory] });
+  }
+  if (!isWin && existsSync(shHelper)) {
+    candidates.push({ cmd: "bash", args: [shHelper, outputFile, workingDirectory] });
+  }
+  // Cross-platform fallback: pwsh on non-Windows if available
+  if (!isWin && existsSync(ps1Helper)) {
+    candidates.push({ cmd: "pwsh", args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1Helper, "-Output", outputFile, "-WorkingDirectory", workingDirectory] });
+  }
+
+  for (const { cmd, args } of candidates) {
+    try {
+      execFileSync(cmd, args, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
+      // Helper writes the file itself; verify it was created
+      if (existsSync(outputFile)) return;
+    } catch {
+      // Try next candidate
+    }
+  }
+
+  // All candidates failed or unavailable — write the stub
+  writeFileSync(outputFile, stub, "utf-8");
 }
 
 export interface RepoContextOptions {

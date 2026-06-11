@@ -23,6 +23,10 @@ export function getTaskScope(task: AgenticTask): string[] {
   return (task.scope as string[]).filter((s) => s && s.trim().length > 0);
 }
 
+export function isTaskUnscoped(task: AgenticTask): boolean {
+  return getTaskScope(task).length === 0;
+}
+
 // Translate a forward-slash glob into an anchored regex string.
 // ** matches across path separators; * matches within a segment; ? matches one non-slash char.
 export function convertToScopeRegex(glob: string): RegExp {

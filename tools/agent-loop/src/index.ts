@@ -389,6 +389,7 @@ program
   .option("--max-retries <n>",               "Maximum retries per task before escalating to needs_human (default: 3)", "3")
   .option("--max-runtime-seconds <n>",       "Hard runtime budget in seconds (0 = none)", "0")
   .option("--max-agent-calls <n>",           "Hard agent-call budget (0 = none)", "0")
+  .option("--max-replans <n>",               "Maximum replans allowed before escalating to needs_human (0 = no limit, default: 5)", "5")
   .option("--verifier-votes <n>",            "Override verifier vote count (0 = auto)", "0")
   .option("--checks <cmd>",                  "Extra check command (repeatable)", collect, [])
   .option("--prompt-budget <level>",         "Prompt context budget: low | medium | high (default: medium)", "medium")
@@ -401,6 +402,7 @@ program
   .option("--plan-only",                     "Run the planner then exit without executing tasks")
   .option("--retry <id>",                    "Retry a specific task id (must be needs_retry or failed)")
   .option("--fast-verifier",                 "Skip the verifier agent for low-risk tasks that pass checks")
+  .option("--rebase-before-verify",          "Rebase worktree on loop-start HEAD before verifier; re-runs checks to catch integration issues")
   .option("--no-finalize-docs",              "Skip the finalize-docs agent after all tasks pass")
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
@@ -440,6 +442,7 @@ program
       maxRetries:          parseInt(opts.maxRetries       ?? "3",  10),
       maxRuntimeSeconds:   parseInt(opts.maxRuntimeSeconds ?? "0", 10),
       maxAgentCalls:       parseInt(opts.maxAgentCalls    ?? "0",  10),
+      maxReplans:          parseInt(opts.maxReplans       ?? "5",  10),
       verifierVotes:       parseInt(opts.verifierVotes    ?? "0",  10),
       checkTimeoutSeconds: parseInt(opts.checkTimeout     ?? "0",  10),
       extraChecks:         (opts.checks as string[]) ?? [],
@@ -453,6 +456,7 @@ program
       autoAcceptPassed:    !!opts.autoAcceptPassed,
       cleanupPassed:       !!opts.cleanupPassed,
       fastVerifier:        !!opts.fastVerifier,
+      rebaseBeforeVerify:  !!opts.rebaseBeforeVerify,
       finalizeDocs:        opts.finalizeDocs     !== false,
     };
 
