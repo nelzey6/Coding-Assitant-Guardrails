@@ -78,7 +78,57 @@ function hasEvent(events: any[], type: string): boolean {
 // node directly (avoids shell quoting complexity with tsx).
 function writeFakeAgent(dir: string, name: string, body: string): string {
   const p = join(dir, name);
-  writeFileSync(p, `#!/usr/bin/env node\n${body}\n`, "utf-8");
+  writeFileSync(p, `#!/usr/bin/env node
+import { readFileSync as __readFileSync, writeFileSync as __writeFileSync, mkdirSync as __mkdirSync } from "fs";
+import { dirname as __dirname } from "path";
+const __promptFile = process.argv[2];
+const __promptContent = __readFileSync(__promptFile, "utf-8");
+if (__promptContent.includes("Write task-grill JSON only to:")) {
+  const m = __promptContent.match(/Write task-grill JSON only to: (.+)/);
+  if (!m) throw new Error("no task-grill result path");
+  const resultPath = m[1].trim();
+  __mkdirSync(__dirname(resultPath), { recursive: true });
+  if (__promptContent.includes('"title": "Stop before edit"')) {
+    __writeFileSync(resultPath, JSON.stringify({
+      verdict: "needs_human",
+      understanding: "Task is intentionally ambiguous in this smoke test.",
+      evidence: ["task JSON"],
+      assumptionsStillValid: [],
+      assumptionsChanged: ["acceptance proof missing"],
+      scopeDecision: { declaredScopeOk: false, requestedScopeChanges: [] },
+      acceptanceProof: [],
+      risks: ["stop before executor edits"],
+      executorInstructions: ""
+    }), "utf-8");
+  } else if (__promptContent.includes('"title": "Needs replan"')) {
+    __writeFileSync(resultPath, JSON.stringify({
+      verdict: "needs_replan",
+      understanding: "Task is stale and should be replaced before editing.",
+      evidence: ["task JSON"],
+      assumptionsStillValid: [],
+      assumptionsChanged: ["original task is stale"],
+      scopeDecision: { declaredScopeOk: false, requestedScopeChanges: ["output.txt"] },
+      acceptanceProof: [],
+      risks: ["planner must create replacement task"],
+      executorInstructions: ""
+    }), "utf-8");
+  } else {
+    __writeFileSync(resultPath, JSON.stringify({
+      verdict: "ready",
+      understanding: "Task understood for smoke execution.",
+      evidence: ["task JSON"],
+      assumptionsStillValid: [],
+      assumptionsChanged: [],
+      scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+      acceptanceProof: ["configured checks and verifier"],
+      risks: [],
+      executorInstructions: "Proceed with the task and respect declared scope."
+    }), "utf-8");
+  }
+  process.exit(0);
+}
+${body}
+`, "utf-8");
   return p;
 }
 
@@ -174,6 +224,7 @@ if (content.includes("Write JSON only to this path:")) {
   writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
   process.exit(0);
 }
+if (!content.includes("Task-grill result for this turn:")) throw new Error("executor prompt missing task-grill result");
 writeFileSync("output.txt", "done", "utf-8");
 `);
 
@@ -186,7 +237,114 @@ writeFileSync("output.txt", "done", "utf-8");
     const state = readState(dir);
     assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
     const events = readEvents(dir);
+    assert(hasEvent(events, "task_grill_finished"), "missing task_grill_finished event");
     assert(hasEvent(events, "verifier_finished"), "missing verifier_finished event");
+    assert(hasEvent(events, "task_passed"), "missing task_passed event");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 1b: task-grill can stop before executor edits ───────────────────────
+
+runCase("task-grill stop: needs_human before executor edits", () => {
+  const dir = tmpRepo("grill-stop");
+  try {
+    writeState(dir, baseState({ title: "Stop before edit", scope: ["output.txt"] }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+throw new Error("executor/verifier should not run after task-grill stop");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    assert(r.status !== 0, "expected non-zero exit when task-grill stops");
+    const state = readState(dir);
+    assert(state.tasks[0].status === "needs_human", `expected needs_human, got ${state.tasks[0].status}`);
+    assert(!existsSync(join(dir, ".worktrees", "task-001", "output.txt")), "executor must not create output.txt");
+    const events = readEvents(dir);
+    assert(hasEvent(events, "task_grill_finished"), "missing task_grill_finished event");
+    assert(!hasEvent(events, "executor_started"), "executor must not start after task-grill stop");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 1c: task-grill can route stale tasks back through planner ───────────
+
+runCase("task-grill replan: stale task is blocked and replacement task runs", () => {
+  const dir = tmpRepo("grill-replan");
+  try {
+    writeState(dir, baseState({ title: "Needs replan", scope: ["stale.txt"] }, { maxIterations: 3 }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const promptFile = process.argv[2];
+const content = readFileSync(promptFile, "utf-8");
+if (content.includes("Write planner JSON only to:")) {
+  const m = content.match(/Write planner JSON only to: (.+)/);
+  if (!m) throw new Error("no planner result path");
+  const resultPath = m[1].trim();
+  mkdirSync(dirname(resultPath), { recursive: true });
+  writeFileSync(resultPath, JSON.stringify({
+    verdict: "planned",
+    summary: "replacement task planned",
+    decisions: [],
+    assumptions: [],
+    openQuestions: [],
+    blockers: [],
+    artifacts: [],
+    tasks: [{
+      id: "task-002",
+      title: "Replanned task",
+      kind: "maintenance",
+      workflow: "tdd",
+      status: "pending",
+      priority: 2,
+      acceptanceCriteria: ["output.txt exists"],
+      validation: [],
+      dependsOn: [],
+      failureHistory: [],
+      artifacts: [],
+      scope: ["output.txt"]
+    }]
+  }), "utf-8");
+  const grillPathMatch = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/);
+  if (grillPathMatch) {
+    const grillPath = grillPathMatch[1].trim();
+    mkdirSync(dirname(grillPath), { recursive: true });
+    writeFileSync(grillPath, "# Autonomous Grill Transcript\\n\\nReplacement planned.", "utf-8");
+  }
+  process.exit(0);
+}
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  if (!m) throw new Error("no verifier result path");
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "replanned ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+if (!content.includes('"id": "task-002"')) throw new Error("executor should only run replacement task");
+writeFileSync("output.txt", "done", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--no-merge"], 90_000);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    const stale = state.tasks.find((t: any) => t.id === "task-001");
+    const replacement = state.tasks.find((t: any) => t.id === "task-002");
+    assert(stale?.status === "blocked", `expected stale task blocked, got ${stale?.status}`);
+    assert(replacement?.status === "passed", `expected replacement passed, got ${replacement?.status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "task_replan_requested"), "missing task_replan_requested event");
+    assert(hasEvent(events, "planner_finished"), "missing planner_finished event");
     assert(hasEvent(events, "task_passed"), "missing task_passed event");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });

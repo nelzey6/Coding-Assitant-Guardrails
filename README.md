@@ -38,7 +38,7 @@ After installation, in your product repo you can run:
 ```powershell
 agentic-loop --goal "Fix checkout reliability" --tool claude --plan-only
 agentic-loop --status
-agentic-loop --tool claude --checks "npm test" --review-branch
+agentic-loop --tool claude --checks "npm test" --no-merge
 ```
 
 Or use the installed skills directly from Codex/Claude, for example:
@@ -109,29 +109,32 @@ See the linked bucket READMEs and `SKILL.md` files for details.
 
 ## Agentic loop harness
 
-[`scripts/agentic/agentic-loop.ps1`](./scripts/agentic/agentic-loop.ps1) is the main autonomous coding harness. It is designed to be a safer, more inspectable `/goal`-style workflow.
+The typed agent loop lives in [`tools/agent-loop/`](./tools/agent-loop/). It is the current architecture for productive autonomous runs: typed state handling, task-grill before every executor turn, worktree isolation, scope rails, verifier gates, retry/replan flow, and operator diagnostics.
+
+The legacy PowerShell harness remains at [`scripts/agentic/agentic-loop.ps1`](./scripts/agentic/agentic-loop.ps1) and is still what the setup scripts install as the `agentic-loop` shim today. Treat it as the compatibility/reference harness while the TS runner becomes the primary autonomous implementation.
 
 High-level flow:
 
 1. Plan from a goal into `agentic.json` tasks using grill-with-docs-style discovery.
 2. Run one task at a time in a fresh git worktree/branch.
-3. Invoke a fresh executor agent with a generated prompt.
-4. Run configured checks and task validation commands.
-5. Invoke a fresh verifier agent unless `--fast-verifier` is explicitly used.
-6. Commit/merge or hold the result for human review.
-7. Persist state, events, handovers, logs, diffs, and summaries under `.agent-runs/`.
-8. On completion, refresh `PROJECT.md` through update-project-md-style finalization unless skipped.
+3. Run a fresh task-grill prompt that asks whether the current task is still understood, scoped, and safe.
+4. If task-grill returns `ready`, invoke a fresh executor agent with the task-grill result injected.
+5. If task-grill returns `needs_replan`, mark the stale task blocked, run planner again, and continue with replacement tasks.
+6. Run configured checks and task validation commands.
+7. Invoke a fresh verifier agent unless `--fast-verifier` is explicitly used and allowed.
+8. Commit/merge or hold the result for human inspection.
+9. Persist state, events, handovers, logs, diffs, task-grill artifacts, and summaries under `.agent-runs/`.
+10. On completion, refresh durable docs through update-project-md-style finalization unless skipped.
 
 Useful commands:
 
 ```powershell
-agentic-loop --goal "Implement retry for flaky checkout" --tool claude --plan-only
-agentic-loop --status
-agentic-loop --tool claude --checks "npm test" --review-branch
-agentic-loop --last-failure
-agentic-loop --why-stuck
-agentic-loop --summary
-agentic-loop --accept task-001
+cd tools/agent-loop
+npm run agent -- --help
+npm run agent -- validate
+npm run agent -- run --tool custom --command 'my-agent run --prompt-file {prompt}' --checks "npm test" --no-merge
+npm run agent -- status
+npm run agent -- why-stuck
 ```
 
 Important runtime files:
@@ -140,13 +143,15 @@ Important runtime files:
 | --- | --- |
 | `agentic.json` | Local task graph and loop state. |
 | `.agent-runs/events.jsonl` | Append-only lifecycle/event log. |
+| `.agent-runs/<run>/task-grill.md` | Prompt that re-checks task understanding before edits. |
+| `.agent-runs/<run>/task-grill-result.json` | Task-grill verdict: `ready`, `needs_replan`, `needs_human`, or `blocked`. |
 | `.agent-runs/<run>/executor.md` | Prompt given to a fresh executor agent. |
 | `.agent-runs/<run>/verifier.md` | Prompt given to a fresh verifier agent. |
 | `.agent-runs/<run>/handover.md` | Per-task future-self handover. |
 | `.agent-runs/<planner-run>/grill-transcript.md` | Visible autonomous planning Q/A/evidence/proposal trail. |
 | `.worktrees/<task-id>` | Isolated task worktree. |
 
-For the full command reference, review flows, retry/reset behavior, diagnostics, final docs behavior, and smoke tests, see [`scripts/agentic/README.md`](./scripts/agentic/README.md).
+For detailed TS architecture, module map, flow, safety rails, current gaps, and validation coverage, see [`PROJECT.md`](./PROJECT.md). For the legacy PowerShell command reference, inspection flows, retry/reset behavior, diagnostics, final docs behavior, and smoke tests, see [`scripts/agentic/README.md`](./scripts/agentic/README.md).
 
 ### CodeGraph context
 
@@ -163,7 +168,7 @@ ralph --tool claude --checks "npm test"
 ralph --tool pi --checks "npm test"
 ```
 
-Ralph keeps the same core principle as the agentic loop - persistent state on disk plus a fresh agent call per unit of work - but with less planning/verifier/review machinery. Use [`ralph-prd`](./skills/engineering/ralph-prd/SKILL.md) to produce the PRD package.
+Ralph keeps the same core principle as the agentic loop - persistent state on disk plus a fresh agent call per unit of work - but with less planning/verifier/human-inspection machinery. Use [`ralph-prd`](./skills/engineering/ralph-prd/SKILL.md) to produce the PRD package.
 
 For details, see [`scripts/ralph/README.md`](./scripts/ralph/README.md).
 
@@ -186,11 +191,13 @@ For details, see [`scripts/ralph/README.md`](./scripts/ralph/README.md).
 | [`templates/`](./templates/) | Product repo templates for agent guidance and policy. |
 | [`skills/`](./skills/) | Installed workflow skills grouped by bucket. |
 | [`scripts/bootstrap/`](./scripts/bootstrap/) | Machine/product-repo installers. |
-| [`scripts/agentic/`](./scripts/agentic/) | Agentic loop harness, setup script, and docs. |
+| [`tools/agent-loop/`](./tools/agent-loop/) | TypeScript agent loop CLI and autonomous runner. |
+| [`scripts/agentic/`](./scripts/agentic/) | Legacy PowerShell agentic loop harness, setup script, and docs. |
 | [`scripts/ralph/`](./scripts/ralph/) | Ralph harness, setup script, and docs. |
 | [`tests/agentic/`](./tests/agentic/) | Focused harness smoke tests. |
 | [`tests/ralph/`](./tests/ralph/) | Ralph smoke tests. |
-| [`docs/adr/`](./docs/adr/) | Architecture decisions. |
+| [`adrs/`](./adrs/) | Current root architecture decisions. |
+| [`docs/adr/`](./docs/adr/) | Older architecture decisions retained for history. |
 
 ## Updating from upstream
 

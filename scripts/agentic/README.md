@@ -1,6 +1,17 @@
 # Agentic loop harness
 
-`agentic-loop.ps1` is a richer sibling to Ralph. Ralph runs pre-sliced `prd.json` stories; the agentic loop runs `agentic.json` tasks with workflow routing, worktrees, checks, verifier results, and harness-owned merge decisions.
+`agentic-loop.ps1` is the legacy PowerShell agentic harness and current installed shim target. Ralph runs pre-sliced `prd.json` stories; the agentic loop runs `agentic.json` tasks with workflow routing, worktrees, checks, verifier results, and harness-owned merge decisions.
+
+The current typed architecture is the TypeScript runner under `tools/agent-loop/`. It adds per-task task-grill before executor edits and can route stale tasks back through planner via `needs_replan`. See root `PROJECT.md` for the detailed TS architecture and current gaps.
+
+Run the TS runner from this repository with:
+
+```powershell
+cd tools/agent-loop
+npm run agent -- run --tool custom --command 'my-agent run --prompt-file {prompt}' --checks "npm test"
+npm run agent -- status
+npm run agent -- why-stuck
+```
 
 ## Quick start
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0002](./0002-ts-agent-loop-autonomous-runner.md).
 
 ## Context
 
@@ -18,6 +18,8 @@ v1 of the TS CLI contains no LLM calls. All logic in `validate` and `plan` is de
 - `plan` scaffolds a task list from static heuristics applied to the task text and repo context; it writes `plan.md` and never calls an API.
 
 The PS1 remains the executor and LLM orchestrator. The TS CLI is a read-only pre-flight gate invoked by the `agentic-loop` skill before the PS1 runs.
+
+This was true for the initial TS CLI slice. The TS tool later grew a full autonomous `run` command with agent invocation, task-grill, verification, retry, and replan support. See ADR-0002 for the current architecture decision.
 
 ## Tradeoffs
 

@@ -110,7 +110,7 @@ export function getNextTask(state: AgenticState): Task | null {
 }
 
 export function hasUnfinishedTasks(state: AgenticState): boolean {
-  const finished: TaskStatus[] = ["passed"];
+  const finished: TaskStatus[] = ["passed", "blocked"];
   return getTasks(state).some((t) => !finished.includes(t.status as TaskStatus));
 }
 

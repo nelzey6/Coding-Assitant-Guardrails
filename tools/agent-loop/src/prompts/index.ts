@@ -259,12 +259,13 @@ export interface ExecutorPromptOptions {
   eventLogPath: string;
   codeGraphFile?: string;
   policy: WorkflowPolicy;
+  taskGrillResult?: unknown;
 }
 
 export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOptions): void {
   const {
     repoRoot, runsRoot, stateFile, budget, task, iteration, runDir,
-    eventLogPath: evLogPath, codeGraphFile = "", policy,
+    eventLogPath: evLogPath, codeGraphFile = "", policy, taskGrillResult,
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
@@ -305,12 +306,96 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     "",
     getWorkflowBlock(workflow, policy),
     "",
+    "Task-grill result for this turn:",
+    taskGrillResult ? JSON.stringify(taskGrillResult, null, 2) : "No task-grill result was provided.",
+    "",
     "Task JSON:",
     taskJson,
   ].join("\n");
 
   writePromptWithEvent(promptFile, content, "executor", repoRoot, runsRoot, stateFile, budget, {
     task: task.id,
+    codegraph: codeGraphFile,
+  });
+}
+
+export interface TaskGrillPromptOptions {
+  repoRoot: string;
+  runsRoot: string;
+  stateFile: string;
+  budget: PromptBudget;
+  task: Task;
+  iteration: number;
+  runDir: string;
+  resultFile: string;
+  eventLogPath: string;
+  codeGraphFile?: string;
+  policy: WorkflowPolicy;
+}
+
+export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOptions): void {
+  const {
+    repoRoot, runsRoot, stateFile, budget, task, iteration, runDir,
+    resultFile, eventLogPath: evLogPath, codeGraphFile = "", policy,
+  } = opts;
+
+  const limits = getPromptBudgetLimits(budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const taskJson = JSON.stringify(task, null, 2);
+
+  const content = [
+    "You are the task-grill reviewer for one autonomous agentic loop turn.",
+    "",
+    "Goal: decide whether the executor truly understands the next task in the current repository state before any edits happen.",
+    "",
+    `Iteration: ${iteration}`,
+    `Run directory: ${runDir}`,
+    `CodeGraph context: ${codeGraphFile}`,
+    "",
+    "Read AGENTS.md / CLAUDE.md, repo docs, relevant source, recent harness history, and the task JSON. Do not edit files.",
+    "",
+    "Ask yourself:",
+    "- Do I understand exactly what this task asks for now?",
+    "- What current repo evidence supports that understanding?",
+    "- Which planner assumptions are stale, risky, or unproven?",
+    "- Is declared scope still right and sufficient?",
+    "- What proof/check should the executor produce before verifier review?",
+    "- Should this task stop before editing because it needs human input, replanning, or is blocked?",
+    "",
+    `Write task-grill JSON only to: ${resultFile}`,
+    "",
+    "Allowed verdicts: ready, needs_replan, needs_human, blocked.",
+    "Schema:",
+    JSON.stringify({
+      verdict: "ready|needs_replan|needs_human|blocked",
+      understanding: "...",
+      evidence: ["path or command inspected"],
+      assumptionsStillValid: [],
+      assumptionsChanged: [],
+      scopeDecision: {
+        declaredScopeOk: true,
+        requestedScopeChanges: [],
+      },
+      acceptanceProof: ["command or artifact expected"],
+      risks: [],
+      executorInstructions: "Concrete instructions for the executor on this turn.",
+    }, null, 2),
+    "",
+    "If verdict is not ready, explain why in risks or assumptionsChanged. The harness will stop before executor edits.",
+    "",
+    `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
+    recentHistory,
+    "",
+    "Workflow policy:",
+    JSON.stringify(policy, null, 2),
+    "",
+    "Task JSON:",
+    taskJson,
+  ].join("\n");
+
+  writePromptWithEvent(promptFile, content, "task_grill", repoRoot, runsRoot, stateFile, budget, {
+    task: task.id,
+    resultFile,
     codegraph: codeGraphFile,
   });
 }

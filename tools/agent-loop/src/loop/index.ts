@@ -28,6 +28,7 @@ import {
   writeCodeGraphContext,
   writeRepoContext,
   writePlannerPrompt,
+  writeTaskGrillPrompt,
   writeExecutorPrompt,
   writeVerifierPrompt,
   writeFinalizeDocsPrompt,
@@ -72,6 +73,13 @@ export class LoopError extends Error {
     super(message);
     this.name = "LoopError";
   }
+}
+
+interface TaskGrillResult {
+  verdict: "ready" | "needs_replan" | "needs_human" | "blocked";
+  understanding?: string;
+  risks?: string[];
+  executorInstructions?: string;
 }
 
 function git(args: string[], cwd?: string): string {
@@ -320,6 +328,9 @@ export function runAgenticLoop(config: LoopConfig): void {
     const worktreePath = join(cfg.repoRoot, cfg.worktreeRoot, safeId);
     const ts         = timestamp();
     const runDir     = join(cfg.repoRoot, cfg.runsRoot, `agentic-${ts}-${safeId}`);
+    const taskGrillPrompt = join(runDir, "task-grill.md");
+    const taskGrillResult = join(runDir, "task-grill-result.json");
+    const taskGrillLog    = join(runDir, "task-grill.log");
     const executorPrompt  = join(runDir, "executor.md");
     const verifierPrompt  = join(runDir, "verifier.md");
     const verifierResult  = join(runDir, "verifier-result.json");
@@ -346,8 +357,54 @@ export function runAgenticLoop(config: LoopConfig): void {
     }
 
     try {
-      // Executor
+      // Task-grill: re-check understanding immediately before execution.
       writeCodeGraphContext(codeGraphFile, worktreePath);
+      writeTaskGrillPrompt(taskGrillPrompt, {
+        repoRoot: cfg.repoRoot,
+        runsRoot: cfg.runsRoot,
+        stateFile: cfg.stateFile,
+        budget: cfg.budget,
+        task,
+        iteration,
+        runDir,
+        resultFile: taskGrillResult,
+        eventLogPath,
+        codeGraphFile,
+        policy,
+      });
+      appendEvent(cfg.repoRoot, "task_grill_started", { task: taskId, prompt: taskGrillPrompt, resultFile: taskGrillResult, log: taskGrillLog }, cfg.runsRoot, cfg.stateFile);
+      agentCallCounter.count++;
+      invokeAgentWithLog(taskGrillPrompt, cfg.agent, worktreePath, taskGrillLog);
+      if (!existsSync(taskGrillResult)) throw new LoopError(`Task grill did not write ${taskGrillResult}`);
+      const taskGrillResultObj = JSON.parse(readFileSync(taskGrillResult, "utf-8")) as TaskGrillResult;
+      appendEvent(cfg.repoRoot, "task_grill_finished", { task: taskId, verdict: taskGrillResultObj.verdict, resultFile: taskGrillResult, understanding: taskGrillResultObj.understanding }, cfg.runsRoot, cfg.stateFile);
+
+      if (taskGrillResultObj.verdict !== "ready") {
+        if (taskGrillResultObj.verdict === "needs_replan") {
+          const reason = [
+            "task-grill requested replanning",
+            taskGrillResultObj.understanding ?? "",
+            ...(taskGrillResultObj.risks ?? []),
+          ].filter(Boolean).join("; ");
+          setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "blocked", { at: new Date().toISOString(), phase: "task_grill", reason, resultFile: taskGrillResult });
+          appendEvent(cfg.repoRoot, "task_replan_requested", { task: taskId, reason, resultFile: taskGrillResult }, cfg.runsRoot, cfg.stateFile);
+          runPlannerPhase(cfg, policy, agentCallCounter);
+          copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+          continue;
+        }
+
+        const status = taskGrillResultObj.verdict === "blocked" ? "blocked" : "needs_human";
+        const reason = [
+          `task-grill verdict=${taskGrillResultObj.verdict}`,
+          taskGrillResultObj.understanding ?? "",
+          ...(taskGrillResultObj.risks ?? []),
+        ].filter(Boolean).join("; ");
+        setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, status, { at: new Date().toISOString(), phase: "task_grill", reason, resultFile: taskGrillResult });
+        copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+        throw new LoopError(`Task grill stopped ${taskId} before executor edits: ${reason}`);
+      }
+
+      // Executor
       writeExecutorPrompt(executorPrompt, {
         repoRoot: cfg.repoRoot,
         runsRoot: cfg.runsRoot,
@@ -359,6 +416,7 @@ export function runAgenticLoop(config: LoopConfig): void {
         eventLogPath,
         codeGraphFile,
         policy,
+        taskGrillResult: taskGrillResultObj,
       });
 
       appendEvent(cfg.repoRoot, "executor_started", { task: taskId, prompt: executorPrompt, log: executorLog }, cfg.runsRoot, cfg.stateFile);

@@ -1,7 +1,7 @@
 {
   "name": "@coding-assistant-guardrails/agent-loop",
   "version": "0.1.0",
-  "description": "Deterministic pre-flight CLI for the agentic loop: validate repo consistency and scaffold plans.",
+  "description": "TypeScript agentic loop CLI: validate skills, scaffold plans, run task-grilled autonomous worktree loops, verify, retry, and replan.",
   "type": "module",
   "scripts": {
     "agent": "tsx src/index.ts"

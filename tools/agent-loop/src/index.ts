@@ -58,7 +58,7 @@ function detectRepoRoot(): string {
 
 program
   .name("agent")
-  .description("Deterministic pre-flight CLI for the agentic coding loop")
+  .description("TypeScript CLI for validation, planning, and task-grilled autonomous agent loops")
   .version("0.1.0");
 
 // ── validate ──────────────────────────────────────────────────────────────────

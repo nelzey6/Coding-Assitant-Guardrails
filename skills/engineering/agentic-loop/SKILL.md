@@ -110,27 +110,31 @@ Do not copy these skills' detailed procedures into loop prompts. Tell the agent 
 
 ## Harness
 
-For full autonomous execution, prefer the harness when it exists:
+For full autonomous execution in this repository, prefer the TypeScript runner:
 
-```powershell
-pwsh -File scripts/agentic/agentic-loop.ps1 --tool claude --goal "..." --checks "npm test"
+```bash
+cd tools/agent-loop
+npm run agent -- run --tool claude --checks "npm test"
 ```
 
 or with another CLI:
 
-```powershell
-pwsh -File scripts/agentic/agentic-loop.ps1 --tool custom --command 'my-agent run --prompt-file {prompt}'
+```bash
+cd tools/agent-loop
+npm run agent -- run --tool custom --command 'my-agent run --prompt-file {prompt}'
 ```
+
+The legacy PowerShell harness still exists under `scripts/agentic/agentic-loop.ps1` and may be the installed shim in product repos until packaging migrates to the TS runner.
 
 ### Pre-flight validation
 
-Before invoking the harness, run the TS CLI pre-flight check:
+Before invoking a multi-iteration harness, run the TS CLI validation check:
 
 ```bash
 cd tools/agent-loop && npx tsx src/index.ts validate
 ```
 
-If this exits non-zero, stop and report the violations before running the PS1. The validator checks that all promotable skills (`engineering/`, `productivity/`, `misc/`) are registered in `.claude-plugin/plugin.json` and linked in both the top-level and bucket `README.md` files, and that excluded skills (`personal/`, `in-progress/`, `deprecated/`) are absent from those surfaces.
+If this exits non-zero, stop and report the violations before running an autonomous loop. The validator checks that all promotable skills (`engineering/`, `productivity/`, `misc/`) are registered in `.claude-plugin/plugin.json` and linked in both the top-level and bucket `README.md` files, and that excluded skills (`personal/`, `in-progress/`, `deprecated/`) are absent from those surfaces.
 
 Do not start a multi-iteration autonomous harness unless the user explicitly asks to run it. If the harness is unavailable, use this skill to prepare or update `agentic.json` and report the intended harness command.
 
@@ -162,11 +166,14 @@ Executor prompts should include:
 
 - the selected task JSON
 - the selected workflow name
+- the task-grill result for the current turn
 - an instruction to read `AGENTS.md` / `CLAUDE.md`
 - an instruction to read and follow the canonical `SKILL.md` for the selected workflow
 - relevant `PROJECT.md`, `CONTEXT.md`, ADR, state, and recent progress references
 - the rule that only one task may be completed
 - the rule that the harness/verifier marks completion
+
+Before each executor prompt, the harness should run a task-grill prompt that asks whether the current task is still understood, scoped, and safe. If the task-grill verdict is `needs_replan`, the stale task should be marked `blocked`, the planner should run again, and the loop should continue with replacement tasks.
 
 Verifier prompts should include:
 
