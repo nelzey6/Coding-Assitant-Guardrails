@@ -150,8 +150,8 @@ Known gaps before calling the TS runner production-default:
 - `run` does not yet enforce the policy clean-main-worktree gate.
 - CLI defaults do not fully honor policy defaults such as retry count and merge mode.
 - `promptPolicy.lessons` exists in state but is not yet updated as structured learning memory.
-- Architect checkpoints (`--architect-checkpoint-interval`) do not yet cover the `replan` verdict path in smoke tests.
-- Installer shims still install the PowerShell harness, not the TS runner.
+- `run` does not yet enforce the policy clean-main-worktree gate.
+- CLI defaults do not fully honor policy defaults such as retry count and merge mode.
 
 ## Validation Coverage
 
@@ -173,12 +173,12 @@ Known gaps before calling the TS runner production-default:
 - replan convergence detection (`replan_convergence_failure`) when plan produces identical task IDs
 - assumption ledger: task-grill `assumptionsStillValid`/`assumptionsChanged` persisted to `state.assumptions` with `[valid]`/`[changed]` tags and emitted as `assumptions_updated` event
 - goal review: `--goal-review` pass verdict allows completion, `needs_human` halts before finalize-docs
-- architect checkpoint: `--architect-checkpoint-interval 2` fires after N passed tasks, `continue` verdict proceeds
+- architect checkpoint: `continue` verdict proceeds, `replan` verdict calls planner and continues with new task
+- planner from empty task list: plans then executes planned task
 
 Missing TS smoke coverage:
 
 - real `claude` / `pi` commands
-- planner phase from empty task list outside the replan case
 - `--rebase-before-verify` gate (requires real multi-commit git scenario)
 - CodeGraph context invocation (requires `codegraph` on PATH)
 - finalize-docs behavior
@@ -192,7 +192,7 @@ Missing TS smoke coverage:
 
 Root ADRs live in `adrs/`. `docs/adr/` contains older ADRs and should not receive new decisions.
 
-`scripts/agentic/agentic-loop.ps1` remains the legacy/reference PowerShell harness and is still what setup scripts install as the `agentic-loop` shim today. The TS runner under `tools/agent-loop/` is the current typed architecture being evolved toward the productive autonomous harness.
+`scripts/agentic/setup-agentic.ps1` and `setup-agentic.sh` now install the TS runner (`tools/agent-loop/src/index.ts`) as the `agentic-loop` shim. They require Node.js >= 20 and `npm install` inside `tools/agent-loop/` to have been run. The shims bake the absolute path to `node`, `tsx/dist/cli.mjs`, and `src/index.ts` at install time. `scripts/agentic/agentic-loop.ps1` remains as the legacy PowerShell harness reference but is no longer installed by the setup scripts.
 
 ## Repository Constraints
 

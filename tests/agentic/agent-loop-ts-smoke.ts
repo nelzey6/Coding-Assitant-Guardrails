@@ -1059,6 +1059,180 @@ else if (content.includes('"id": "task-002"')) writeFileSync("out2.txt", "done",
   }
 });
 
+// ── case 14: architect checkpoint replan ──────────────────────────────────────
+// Two tasks pass. Architect checkpoint interval=2. Agent returns replan.
+// Planner creates a new task. Loop completes with the new task passing.
+
+runCase("architect checkpoint: replan verdict calls planner and continues", () => {
+  const dir = tmpRepo("arch-replan");
+  try {
+    writeState(dir, {
+      version: 1, goal: "Smoke goal", maxIterations: 8, checks: [],
+      defaultDiscoveryWorkflow: "grill-with-docs",
+      tasks: [
+        baseTask({ id: "task-001", title: "First task",  priority: 1, scope: ["out1.txt"] }),
+        baseTask({ id: "task-002", title: "Second task", priority: 2, scope: ["out2.txt"] }),
+      ],
+      decisions: [], assumptions: [], openQuestions: [], blockers: [],
+      promptPolicy: { lessons: [] },
+    });
+
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({
+    verdict: "ready", understanding: "ok", evidence: [], assumptionsStillValid: [],
+    assumptionsChanged: [], scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: [], risks: [], executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+
+// Architect checkpoint: first call returns replan, second (after new task) returns continue.
+if (content.includes("Write your verdict JSON only to:") && content.includes("task-003")) {
+  const m = content.match(/Write your verdict JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "continue", assessment: "new task added, on track", suggestedChanges: [] }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write your verdict JSON only to:")) {
+  const m = content.match(/Write your verdict JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "replan", assessment: "missed a task", suggestedChanges: ["add task-003"] }), "utf-8");
+  process.exit(0);
+}
+
+if (content.includes("Write planner JSON only to:")) {
+  const pm = content.match(/Write planner JSON only to: (.+)/);
+  const pp = pm[1].trim();
+  mkdirSync(dirname(pp), { recursive: true });
+  writeFileSync(pp, JSON.stringify({
+    verdict: "planned", summary: "added missing task", decisions: [], assumptions: [],
+    openQuestions: [], blockers: [], artifacts: [],
+    tasks: [{
+      id: "task-003", title: "Extra task", kind: "maintenance", workflow: "tdd",
+      status: "pending", priority: 3,
+      acceptanceCriteria: ["out3.txt exists"], validation: [],
+      dependsOn: [], failureHistory: [], artifacts: [], scope: ["out3.txt"]
+    }]
+  }), "utf-8");
+  const gm = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/);
+  if (gm) { mkdirSync(dirname(gm[1].trim()), { recursive: true }); writeFileSync(gm[1].trim(), "# Grill\\nok.", "utf-8"); }
+  process.exit(0);
+}
+
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+if (content.includes('"id": "task-001"')) writeFileSync("out1.txt", "done", "utf-8");
+else if (content.includes('"id": "task-002"')) writeFileSync("out2.txt", "done", "utf-8");
+else if (content.includes('"id": "task-003"')) writeFileSync("out3.txt", "done", "utf-8");
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "8", "--no-merge", "--architect-checkpoint-interval", "2"], 180_000);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    const task3 = state.tasks.find((t: any) => t.id === "task-003");
+    assert(task3?.status === "passed", `expected task-003 passed, got ${task3?.status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "architect_checkpoint_replan"), "expected architect_checkpoint_replan event");
+    assert(hasEvent(events, "planner_finished"), "expected planner_finished after architect replan");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 15: planner phase from empty task list ───────────────────────────────
+// agentic.json starts with no tasks. Loop runs planner, then executes the planned task.
+
+runCase("planner from empty state: plans then executes", () => {
+  const dir = tmpRepo("plan-from-empty");
+  try {
+    writeState(dir, {
+      version: 1, goal: "Smoke goal", maxIterations: 3, checks: [],
+      defaultDiscoveryWorkflow: "grill-with-docs",
+      tasks: [],
+      decisions: [], assumptions: [], openQuestions: [], blockers: [],
+      promptPolicy: { lessons: [] },
+    });
+
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write planner JSON only to:")) {
+  const pm = content.match(/Write planner JSON only to: (.+)/);
+  const pp = pm[1].trim();
+  mkdirSync(dirname(pp), { recursive: true });
+  writeFileSync(pp, JSON.stringify({
+    verdict: "planned", summary: "initial plan", decisions: [], assumptions: [],
+    openQuestions: [], blockers: [], artifacts: [],
+    tasks: [{
+      id: "task-001", title: "Planned task", kind: "maintenance", workflow: "tdd",
+      status: "pending", priority: 1,
+      acceptanceCriteria: ["output.txt exists"], validation: [],
+      dependsOn: [], failureHistory: [], artifacts: [], scope: ["output.txt"]
+    }]
+  }), "utf-8");
+  const gm = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/);
+  if (gm) { mkdirSync(dirname(gm[1].trim()), { recursive: true }); writeFileSync(gm[1].trim(), "# Grill\\nPlanned.", "utf-8"); }
+  process.exit(0);
+}
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({
+    verdict: "ready", understanding: "ok", evidence: [], assumptionsStillValid: [],
+    assumptionsChanged: [], scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: [], risks: [], executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+writeFileSync("output.txt", "done", "utf-8");
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "3", "--no-merge"], 90_000);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    assert(state.tasks.length > 0, "expected tasks to be planned");
+    assert(state.tasks[0].status === "passed", `expected task passed, got ${state.tasks[0].status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "planner_finished"), "expected planner_finished from initial planning");
+    assert(hasEvent(events, "task_passed"), "expected task_passed after planning");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 
 const passed = results.filter((r) => r.ok).length;

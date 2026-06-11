@@ -23,12 +23,32 @@ else
   SKILLS_REPO="$(cd "$SKILLS_REPO" && pwd)"
 fi
 
-source_file="$SKILLS_REPO/scripts/agentic/agentic-loop.ps1"
-codegraph_helper="$SKILLS_REPO/scripts/context/codegraph-context.ps1"
-if [ ! -f "$source_file" ]; then
-  echo "Agentic loop script not found: $source_file" >&2
+agent_loop_dir="$SKILLS_REPO/tools/agent-loop"
+agent_index_ts="$agent_loop_dir/src/index.ts"
+tsx_cli="$agent_loop_dir/node_modules/tsx/dist/cli.mjs"
+
+if [ ! -f "$agent_index_ts" ]; then
+  echo "TS agent-loop entry point not found: $agent_index_ts" >&2
   exit 1
 fi
+if [ ! -f "$tsx_cli" ]; then
+  echo "tsx not found at $tsx_cli — run 'npm install' inside $agent_loop_dir first." >&2
+  exit 1
+fi
+
+# Verify node >= 20
+if ! command -v node >/dev/null 2>&1; then
+  echo "node is not on PATH. Install Node.js >= 20 before running setup." >&2
+  exit 1
+fi
+node_major="$(node --version | sed 's/^v\([0-9]*\).*/\1/')"
+if [ "$node_major" -lt 20 ]; then
+  echo "node $(node --version) is too old. agentic-loop requires Node.js >= 20." >&2
+  exit 1
+fi
+echo "node $(node --version) detected."
+
+codegraph_helper="$SKILLS_REPO/scripts/context/codegraph-context.ps1"
 
 case "$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]')" in
   codex) TOOL="codex" ;;
@@ -39,18 +59,18 @@ esac
 
 targets=()
 if [ "$TOOL" = "claude" ] || [ "$TOOL" = "both" ]; then
-  targets+=("$HOME/.claude/skills/agentic-loop/scripts/agentic-loop.ps1")
+  targets+=("$HOME/.claude/skills/agentic-loop")
 fi
 if [ "$TOOL" = "codex" ] || [ "$TOOL" = "both" ]; then
-  targets+=("$HOME/.codex/skills/agentic-loop/scripts/agentic-loop.ps1")
+  targets+=("$HOME/.codex/skills/agentic-loop")
 fi
 
-for target in "${targets[@]}"; do
-  mkdir -p "$(dirname "$target")"
-  cp "$source_file" "$target"
-  echo "Installed agentic loop harness to $target"
+for target_dir in "${targets[@]}"; do
+  mkdir -p "$target_dir"
+  printf '%s' "$agent_loop_dir" > "$target_dir/AGENT_LOOP_LOCATION"
+  echo "Registered agentic-loop location at $target_dir"
   if [ -f "$codegraph_helper" ]; then
-    context_dir="$(dirname "$(dirname "$target")")/context"
+    context_dir="$target_dir/context"
     mkdir -p "$context_dir"
     cp "$codegraph_helper" "$context_dir/codegraph-context.ps1"
     echo "Installed CodeGraph context helper to $context_dir"
@@ -62,12 +82,7 @@ if [ "${#targets[@]}" -eq 0 ]; then
   exit 0
 fi
 
-preferred="${targets[0]}"
-for target in "${targets[@]}"; do
-  case "$target" in
-    */.claude/*) preferred="$target"; break ;;
-  esac
-done
+node_bin="$(command -v node)"
 
 bin_dir="$HOME/.local/bin"
 case ":$PATH:" in
@@ -78,15 +93,8 @@ mkdir -p "$bin_dir"
 shim="$bin_dir/agentic-loop"
 cat > "$shim" <<SHIM
 #!/usr/bin/env sh
-if command -v pwsh >/dev/null 2>&1; then
-  exec pwsh -NoProfile -File "$preferred" "\$@"
-elif command -v powershell.exe >/dev/null 2>&1; then
-  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$preferred" "\$@"
-else
-  echo "agentic-loop requires pwsh or powershell.exe on PATH" >&2
-  exit 127
-fi
+exec "$node_bin" "$tsx_cli" "$agent_index_ts" "\$@"
 SHIM
 chmod +x "$shim"
 echo "Installed agentic-loop shell shim to $shim"
-echo "agentic-loop command installed. Ensure $bin_dir is on PATH and pwsh is installed, then run: agentic-loop --help"
+echo "agentic-loop installed (TS runner). Ensure $bin_dir is on PATH, then run: agentic-loop --help"
