@@ -38,6 +38,7 @@ import {
   writeGoalReviewPrompt,
   writeArchitectCheckpointPrompt,
   writeDecisionGrillPrompt,
+  writePostTaskReviewPrompt,
   validatePlannerResult,
   validateDecisions,
   getPromptBudgetLimits,
@@ -69,6 +70,8 @@ export interface LoopConfig {
   extraChecks?: string[];
   /** Run a goal-review agent after all tasks pass, before finalize-docs. Halts on needs_human. */
   goalReview?: boolean;
+  /** Reassess the remaining plan after every passed task. */
+  postTaskReview?: boolean;
   /** Run an architect checkpoint every N passed tasks (0 = disabled). */
   architectCheckpointInterval?: number;
   /** Run a grill-with-docs self-interview before each executor turn; escalates low-confidence decisions. */
@@ -315,6 +318,65 @@ interface ArchitectCheckpointResult {
   suggestedChanges?: string[];
 }
 
+interface PostTaskReviewResult {
+  verdict: "continue" | "adjust_remaining_tasks" | "replan" | "needs_human";
+  assessment?: string;
+  remainingPlanStillValid?: boolean;
+  suggestedChanges?: string[];
+}
+
+function enforceReplanBudget(
+  cfg: Required<LoopConfig>,
+  sessionReplanCountRef: { count: number },
+  phase: string,
+  reason: string
+): void {
+  sessionReplanCountRef.count++;
+  if (cfg.maxReplans > 0 && sessionReplanCountRef.count > cfg.maxReplans) {
+    appendEvent(cfg.repoRoot, "replan_budget_exhausted", { phase, sessionReplanCount: sessionReplanCountRef.count, maxReplans: cfg.maxReplans, reason }, cfg.runsRoot, cfg.stateFile);
+    throw new LoopError(`Replan budget exhausted at ${phase} (${sessionReplanCountRef.count - 1} replans >= maxReplans ${cfg.maxReplans}): ${reason}`);
+  }
+}
+
+function runPlannerWithConvergenceGuard(
+  cfg: Required<LoopConfig>,
+  policy: WorkflowPolicy,
+  agentCallCounter: { count: number },
+  sessionReplanCountRef: { count: number },
+  phase: string,
+  reason: string,
+  priorFailureAnalysisFile = ""
+): void {
+  enforceReplanBudget(cfg, sessionReplanCountRef, phase, reason);
+
+  const preReplanState = loadState(cfg.repoRoot, cfg.stateFile)!;
+  const prevReplanTaskIds = (preReplanState.lastReplanTaskIds ?? []).slice().sort().join(",");
+  const newTaskIds = runPlannerPhase(cfg, policy, agentCallCounter, priorFailureAnalysisFile);
+  const newTaskIdsKey = newTaskIds.slice().sort().join(",");
+
+  if (prevReplanTaskIds.length > 0 && newTaskIdsKey === prevReplanTaskIds) {
+    const thrashReason = `replan produced the same task set as the previous replan (${newTaskIdsKey}); stopping to avoid infinite loop`;
+    const afterState = loadState(cfg.repoRoot, cfg.stateFile)!;
+    appendEvent(cfg.repoRoot, "replan_convergence_failure", { phase, taskIds: newTaskIdsKey, sessionReplanCount: sessionReplanCountRef.count }, cfg.runsRoot, cfg.stateFile);
+    for (const t of getTasks(afterState).filter((t) => t.status === "pending" || t.status === "needs_retry")) {
+      setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, t.id, "needs_human", { at: new Date().toISOString(), phase: "replan_convergence", reason: thrashReason, resultFile: "" });
+    }
+    throw new LoopError(`Replan convergence failure: ${thrashReason}`);
+  }
+}
+
+function blockRemainingPlanForReplan(
+  cfg: Required<LoopConfig>,
+  phase: string,
+  reason: string,
+  resultFile: string
+): void {
+  const state = loadState(cfg.repoRoot, cfg.stateFile)!;
+  for (const t of getTasks(state).filter((t) => t.status === "pending" || t.status === "needs_retry")) {
+    setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, t.id, "blocked", { at: new Date().toISOString(), phase, reason, resultFile });
+  }
+}
+
 // Run architect checkpoint: review plan + cumulative diff for drift after N passed tasks.
 // Returns true if the loop should continue, false if it should halt (throws on needs_human).
 // Triggers runPlannerPhase on replan verdict.
@@ -360,17 +422,72 @@ function runArchitectCheckpointPhase(
   }
 
   if (result.verdict === "replan") {
-    sessionReplanCountRef.count++;
-    if (cfg.maxReplans > 0 && sessionReplanCountRef.count > cfg.maxReplans) {
-      throw new LoopError(`Replan budget exhausted at architect checkpoint (${sessionReplanCountRef.count} replans >= maxReplans ${cfg.maxReplans})`);
-    }
     console.log(`Architect checkpoint requested replan: ${result.assessment ?? ""}`);
     appendEvent(cfg.repoRoot, "architect_checkpoint_replan", { assessment: result.assessment, suggestedChanges: result.suggestedChanges }, cfg.runsRoot, cfg.stateFile);
-    runPlannerPhase(cfg, policy, agentCallCounter);
+    blockRemainingPlanForReplan(cfg, "architect_checkpoint", result.assessment ?? "architect checkpoint requested replan", resultFile);
+    runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, "architect_checkpoint", result.assessment ?? "architect checkpoint requested replan");
     return;
   }
 
   console.log(`Architect checkpoint: continue. ${result.assessment ?? ""}`);
+}
+
+function runPostTaskReviewPhase(
+  cfg: Required<LoopConfig>,
+  policy: WorkflowPolicy,
+  agentCallCounter: { count: number },
+  loopBaseRef: string,
+  sessionReplanCountRef: { count: number },
+  taskId: string,
+  taskRunDir: string,
+  verifierResultFile: string,
+  handoverFile: string
+): void {
+  const ts = timestamp();
+  const runDir = join(cfg.repoRoot, cfg.runsRoot, `agentic-${ts}-${safeSlug(taskId)}-post-task-review`);
+  mkdirSync(runDir, { recursive: true });
+
+  const promptFile = join(runDir, "post-task-review.md");
+  const logFile    = join(runDir, "post-task-review.log");
+  const resultFile = join(runDir, "post-task-review-result.json");
+
+  const state = loadState(cfg.repoRoot, cfg.stateFile)!;
+  writePostTaskReviewPrompt(promptFile, {
+    repoRoot: cfg.repoRoot,
+    runsRoot: cfg.runsRoot,
+    stateFile: cfg.stateFile,
+    budget: cfg.budget,
+    state,
+    taskId,
+    taskRunDir,
+    verifierResultFile,
+    handoverFile,
+    loopBaseRef,
+    resultFile,
+  });
+
+  appendEvent(cfg.repoRoot, "post_task_review_started", { task: taskId, runDir, prompt: promptFile, resultFile }, cfg.runsRoot, cfg.stateFile);
+  console.log(`=== Agentic post-task review: ${taskId} ===`);
+  agentCallCounter.count++;
+  invokeAgentWithLog(promptFile, cfg.agent, cfg.repoRoot, logFile);
+
+  if (!existsSync(resultFile)) throw new LoopError(`Post-task review agent did not write ${resultFile}`);
+  const result = JSON.parse(readFileSync(resultFile, "utf-8")) as PostTaskReviewResult;
+  appendEvent(cfg.repoRoot, "post_task_review_finished", { task: taskId, verdict: result.verdict, assessment: result.assessment, remainingPlanStillValid: result.remainingPlanStillValid, suggestedChanges: result.suggestedChanges }, cfg.runsRoot, cfg.stateFile);
+
+  if (result.verdict === "needs_human") {
+    throw new LoopError(`Post-task review returned needs_human after ${taskId}: ${result.assessment ?? "(no assessment)"}`);
+  }
+
+  if (result.verdict === "replan" || result.verdict === "adjust_remaining_tasks") {
+    const phase = result.verdict === "replan" ? "post_task_review" : "post_task_adjustment";
+    appendEvent(cfg.repoRoot, "post_task_review_replan", { task: taskId, verdict: result.verdict, assessment: result.assessment, suggestedChanges: result.suggestedChanges }, cfg.runsRoot, cfg.stateFile);
+    blockRemainingPlanForReplan(cfg, phase, result.assessment ?? `post-task review requested ${result.verdict}`, resultFile);
+    runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, phase, result.assessment ?? `post-task review requested ${result.verdict}`);
+    return;
+  }
+
+  console.log(`Post-task review: continue. ${result.assessment ?? ""}`);
 }
 
 interface DecisionGrillOutcome {
@@ -483,7 +600,8 @@ export function runAgenticLoop(config: LoopConfig): void {
     rebaseBeforeVerify:          config.rebaseBeforeVerify          ?? false,
     finalizeDocs:                config.finalizeDocs                ?? false,
     goalReview:                  config.goalReview                  ?? false,
-    architectCheckpointInterval: config.architectCheckpointInterval ?? 0,
+    postTaskReview:              config.postTaskReview              ?? true,
+    architectCheckpointInterval: config.architectCheckpointInterval ?? 3,
     decisionGrill:               config.decisionGrill               ?? true,
     repoRoot:           config.repoRoot,
     agent:              config.agent,
@@ -625,38 +743,11 @@ export function runAgenticLoop(config: LoopConfig): void {
             ...(taskGrillResultObj.risks ?? []),
           ].filter(Boolean).join("; ");
 
-          // Replan budget guard
-          sessionReplanCountRef.count++;
-          if (cfg.maxReplans > 0 && sessionReplanCountRef.count > cfg.maxReplans) {
-            const budgetReason = `replan budget exhausted (${sessionReplanCountRef.count - 1} replans >= maxReplans ${cfg.maxReplans}); stopping to avoid thrash. Last reason: ${reason}`;
-            setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "task_grill", reason: budgetReason, resultFile: taskGrillResult });
-            appendEvent(cfg.repoRoot, "replan_budget_exhausted", { task: taskId, sessionReplanCount: sessionReplanCountRef.count, maxReplans: cfg.maxReplans, reason: budgetReason }, cfg.runsRoot, cfg.stateFile);
-            copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
-            throw new LoopError(`Replan budget exhausted for ${taskId}: ${budgetReason}`);
-          }
-
-          // Capture last replan's task IDs before this replan overwrites them
-          const preReplanState = loadState(cfg.repoRoot, cfg.stateFile)!;
-          const prevReplanTaskIds = (preReplanState.lastReplanTaskIds ?? []).slice().sort().join(",");
-
           setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "blocked", { at: new Date().toISOString(), phase: "task_grill", reason, resultFile: taskGrillResult });
           appendEvent(cfg.repoRoot, "task_replan_requested", { task: taskId, reason, resultFile: taskGrillResult, sessionReplanCount: sessionReplanCountRef.count }, cfg.runsRoot, cfg.stateFile);
 
           const replanTask = getTasks(loadState(cfg.repoRoot, cfg.stateFile)!).find((t) => t.id === taskId);
-          const newTaskIds = runPlannerPhase(cfg, policy, agentCallCounter, replanTask ? getLastFailureAnalysisFile(replanTask) : "");
-          const newTaskIdsKey = newTaskIds.slice().sort().join(",");
-
-          // Non-convergence detection: if this replan produced the same task IDs as the previous replan, it's thrashing
-          if (prevReplanTaskIds.length > 0 && newTaskIdsKey === prevReplanTaskIds) {
-            const thrashReason = `replan produced the same task set as the previous replan (${newTaskIdsKey}); stopping to avoid infinite loop`;
-            const afterState = loadState(cfg.repoRoot, cfg.stateFile)!;
-            appendEvent(cfg.repoRoot, "replan_convergence_failure", { task: taskId, taskIds: newTaskIdsKey, sessionReplanCount: sessionReplanCountRef.count }, cfg.runsRoot, cfg.stateFile);
-            for (const t of getTasks(afterState).filter((t) => t.status === "pending" || t.status === "needs_retry")) {
-              setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, t.id, "needs_human", { at: new Date().toISOString(), phase: "replan_convergence", reason: thrashReason, resultFile: "" });
-            }
-            copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
-            throw new LoopError(`Replan convergence failure: ${thrashReason}`);
-          }
+          runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, "task_grill", reason, replanTask ? getLastFailureAnalysisFile(replanTask) : "");
 
           copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
           continue;
@@ -936,6 +1027,10 @@ export function runAgenticLoop(config: LoopConfig): void {
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         appendProgress(join(cfg.repoRoot, cfg.runsRoot), taskId, verifierResultObj.summary ?? "", handoverFile);
         if (cfg.cleanupPassed && worktreeExists(worktreePath)) removeWorktree(worktreePath, cfg.repoRoot);
+
+        if (cfg.postTaskReview) {
+          runPostTaskReviewPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef, taskId, runDir, verifierResult, handoverFile);
+        }
 
         // Architect checkpoint: trigger every N passed tasks if configured.
         passedSinceLastCheckpoint++;

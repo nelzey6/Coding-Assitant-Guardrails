@@ -41,6 +41,16 @@ Goal
        │ pass / fail / needs_human
        ▼
 ┌─────────────┐
+│ Plan Review │  after each passed task: is the remaining plan still valid?
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│ Checkpoint  │  after major checkpoints: architecture review / replan
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
 │  Reflection │  persist lessons, handover notes, assumption updates
 └──────┬──────┘
        │
@@ -112,8 +122,21 @@ flowchart TD
     MERGE{Merge mode?}
     MERGE -- ff-only / cherry-pick / no-ff --> COMMIT[Commit + merge\ntask branch → main]
     MERGE -- no-merge / review-branch --> HOLD[Hold branch for\nhuman review\n--accept to integrate]
-    COMMIT --> REFLECT
-    HOLD --> REFLECT
+    COMMIT --> POST_REVIEW[Post-task plan review\nis remaining plan still valid?]
+    HOLD --> POST_REVIEW
+    POST_REVIEW --> POST_VERDICT{Verdict?}
+    POST_VERDICT -- continue --> CHECKPOINT
+    POST_VERDICT -- adjust_remaining_tasks / replan --> POST_REPLAN[Block stale pending tasks\nrun Planner again]
+    POST_REPLAN --> PICK
+    POST_VERDICT -- needs_human --> STOP_H
+
+    CHECKPOINT{Major checkpoint\ninterval reached?}
+    CHECKPOINT -- No --> REFLECT
+    CHECKPOINT -- Yes --> ARCH[Architect checkpoint\nreview cumulative drift]
+    ARCH --> ARCH_VERDICT{Verdict?}
+    ARCH_VERDICT -- continue --> REFLECT
+    ARCH_VERDICT -- replan --> REPLAN
+    ARCH_VERDICT -- needs_human --> STOP_H
 
     REFLECT[Persist assumptions\nwrite handover.md\nupdate state] --> FINALIZE{All tasks\ndone?}
     FINALIZE -- No --> PICK
@@ -150,6 +173,19 @@ If a task declares a `scope` glob list, the harness diffs changed files after th
 ### Verification
 A fresh verifier agent reads the task JSON, acceptance criteria, diff, checks output, and human-gate list from the policy. For high-risk tasks (implementation/architecture with a declared scope or matching a human-gate path), multiple independent "refute-first" verifier agents vote; a majority pass is required.
 
+### Post-task plan review
+After each passed task, a fresh reviewer reassesses whether the remaining task graph is still valid. This phase does not re-verify the completed task and does not execute edits. It checks whether assumptions changed, remaining scopes are still right, validation still proves the goal, and the next tasks are still correctly sliced and ordered.
+
+| Verdict | Harness action |
+| --- | --- |
+| `continue` | Proceed to the next task or checkpoint. |
+| `adjust_remaining_tasks` | Block stale pending/retry tasks, run the planner, and continue with replacement tasks. |
+| `replan` | Block stale pending/retry tasks, run the planner, and continue with the new plan. |
+| `needs_human` | Stop with a human gate before more autonomous work. |
+
+### Architect checkpoint
+Every three passed tasks by default, the harness runs a broader checkpoint over the cumulative diff and remaining plan. Use `--architect-checkpoint-interval <n>` to change the interval or `0` to disable it.
+
 ### Reflection
 The harness persists `assumptionsStillValid`/`assumptionsChanged` back into `state.assumptions`, writes `handover.md` for future agents, and appends lifecycle events to `.agent-runs/events.jsonl`.
 
@@ -178,6 +214,8 @@ The harness persists `assumptionsStillValid`/`assumptionsChanged` back into `sta
 - Main worktree stays clean — one task per isolated branch/worktree.
 - Harness (not the executor) marks pass/fail and merges.
 - Task-grill must return `ready` before any edits happen.
+- Post-task review runs after every passed task to reassess whether the remaining plan is still valid.
+- Architect checkpoints run every three passed tasks by default and may force a replan.
 - Scope rail blocks out-of-scope file changes before the verifier sees them.
 - Fast verifier requires low-risk task kind + declared scope.
 - Retry budget prevents infinite loops; exhaustion escalates to `needs_human`.

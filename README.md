@@ -110,13 +110,26 @@ The loop selects a workflow skill for each task. These are also usable standalon
 
 | Skill | When the loop uses it | Standalone use |
 | --- | --- | --- |
+| [`agentic-loop`](./skills/engineering/agentic-loop/SKILL.md) | Goal-driven autonomous task loop | Prepare or run autonomous work |
 | [`grill-with-docs`](./skills/engineering/grill-with-docs/SKILL.md) | Planner discovery, ambiguous goals | Clarify requirements before implementing |
 | [`diagnose`](./skills/engineering/diagnose/SKILL.md) | Bugs, failures, unknown root cause | Debug a failing test or crash |
 | [`tdd`](./skills/engineering/tdd/SKILL.md) | Any task with observable behavior | Implement with red/green/refactor |
 | [`zoom-out`](./skills/engineering/zoom-out/SKILL.md) | Unfamiliar or cross-module tasks | Understand code in broader context |
 | [`improve-codebase-architecture`](./skills/engineering/improve-codebase-architecture/SKILL.md) | Structural cleanup tasks | Refactor a module boundary |
+| [`prototype`](./skills/engineering/prototype/SKILL.md) | Design or state-machine exploration | Build a throwaway prototype |
+| [`setup-matt-pocock-skills`](./skills/engineering/setup-matt-pocock-skills/SKILL.md) | Repo agent-skill setup | Seed agent docs and issue-tracker conventions |
+| [`to-issues`](./skills/engineering/to-issues/SKILL.md) | Break plans into tracked work | Convert a plan into issues |
+| [`to-prd`](./skills/engineering/to-prd/SKILL.md) | Product planning handoff | Turn context into a PRD |
+| [`triage`](./skills/engineering/triage/SKILL.md) | Issue workflow preparation | Triage incoming work |
 | [`update-project-md`](./skills/engineering/update-project-md/SKILL.md) | Post-run doc finalization | Refresh PROJECT.md from repo reality |
+| [`caveman`](./skills/productivity/caveman/SKILL.md) | Compact autonomous communication | Use compressed output style |
+| [`grill-me`](./skills/productivity/grill-me/SKILL.md) | Plan stress-testing | Interrogate a plan before building |
 | [`handoff`](./skills/productivity/handoff/SKILL.md) | Loop stopped, human input needed | Hand off work to another session |
+| [`write-a-skill`](./skills/productivity/write-a-skill/SKILL.md) | Skill authoring support | Create a new skill package |
+| [`git-guardrails-claude-code`](./skills/misc/git-guardrails-claude-code/SKILL.md) | Git safety setup | Add Claude Code git guardrails |
+| [`migrate-to-shoehorn`](./skills/misc/migrate-to-shoehorn/SKILL.md) | Test fixture cleanup | Replace test assertions with shoehorn |
+| [`scaffold-exercises`](./skills/misc/scaffold-exercises/SKILL.md) | Course exercise setup | Scaffold exercise files |
+| [`setup-pre-commit`](./skills/misc/setup-pre-commit/SKILL.md) | Repo quality gate setup | Add pre-commit hooks |
 
 Full skill list: [`skills/engineering`](./skills/engineering/README.md) — [`skills/productivity`](./skills/productivity/README.md) — [`skills/misc`](./skills/misc/README.md)
 

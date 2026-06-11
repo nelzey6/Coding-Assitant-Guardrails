@@ -127,6 +127,48 @@ if (__promptContent.includes("Write task-grill JSON only to:")) {
   }
   process.exit(0);
 }
+if (__promptContent.includes("Write post-task review JSON only to:")) {
+  const m = __promptContent.match(/Write post-task review JSON only to: (.+)/);
+  if (!m) throw new Error("no post-task review result path");
+  const resultPath = m[1].trim();
+  __mkdirSync(__dirname(resultPath), { recursive: true });
+  if (__promptContent.includes('"title": "Post review replan"')) {
+    __writeFileSync(resultPath, JSON.stringify({
+      verdict: "replan",
+      assessment: "completed slice changed remaining plan",
+      remainingPlanStillValid: false,
+      suggestedChanges: ["replace remaining stale task"]
+    }), "utf-8");
+    process.exit(0);
+  }
+  __writeFileSync(resultPath, JSON.stringify({
+    verdict: "continue",
+    assessment: "remaining plan still valid for smoke execution",
+    remainingPlanStillValid: true,
+    suggestedChanges: []
+  }), "utf-8");
+  process.exit(0);
+}
+if (__promptContent.includes("Write decision JSON only to:")) {
+  const m = __promptContent.match(/Write decision JSON only to: (.+)/);
+  if (!m) throw new Error("no decision result path");
+  const resultPath = m[1].trim();
+  __mkdirSync(__dirname(resultPath), { recursive: true });
+  __writeFileSync(resultPath, JSON.stringify({ decisions: [] }), "utf-8");
+  process.exit(0);
+}
+if (__promptContent.includes("Write your verdict JSON only to:") && __promptContent.includes("architect reviewer")) {
+  const m = __promptContent.match(/Write your verdict JSON only to: (.+)/);
+  if (!m) throw new Error("no architect checkpoint result path");
+  const resultPath = m[1].trim();
+  __mkdirSync(__dirname(resultPath), { recursive: true });
+  __writeFileSync(resultPath, JSON.stringify({
+    verdict: "continue",
+    assessment: "checkpoint still valid",
+    suggestedChanges: []
+  }), "utf-8");
+  process.exit(0);
+}
 ${body}
 `, "utf-8");
   return p;
@@ -240,6 +282,7 @@ writeFileSync("output.txt", "done", "utf-8");
     assert(hasEvent(events, "task_grill_finished"), "missing task_grill_finished event");
     assert(hasEvent(events, "verifier_finished"), "missing verifier_finished event");
     assert(hasEvent(events, "task_passed"), "missing task_passed event");
+    assert(hasEvent(events, "post_task_review_finished"), "missing post_task_review_finished event");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }
@@ -351,7 +394,96 @@ writeFileSync("output.txt", "done", "utf-8");
   }
 });
 
-// ── case 1d: unscoped task emits warning event, still runs ───────────────────
+// ── case 1d: post-task review can replan stale remaining work ────────────────
+
+runCase("post-task review: replan verdict calls planner before continuing", () => {
+  const dir = tmpRepo("post-task-replan");
+  try {
+    writeState(dir, baseState(
+      { title: "Post review replan", scope: ["output.txt"] },
+      {
+        maxIterations: 4,
+        tasks: [
+          baseTask({ id: "task-001", title: "Post review replan", scope: ["output.txt"], priority: 1 }),
+          baseTask({ id: "task-002", title: "Stale remaining task", scope: ["stale.txt"], priority: 2, dependsOn: ["task-001"] }),
+        ],
+      }
+    ));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const promptFile = process.argv[2];
+const content = readFileSync(promptFile, "utf-8");
+if (content.includes("Write planner JSON only to:")) {
+  const m = content.match(/Write planner JSON only to: (.+)/);
+  if (!m) throw new Error("no planner result path");
+  const resultPath = m[1].trim();
+  mkdirSync(dirname(resultPath), { recursive: true });
+  writeFileSync(resultPath, JSON.stringify({
+    verdict: "planned",
+    summary: "remaining plan adjusted after post-task review",
+    decisions: [],
+    assumptions: ["post-task review replaced stale remaining task"],
+    openQuestions: [],
+    blockers: [],
+    artifacts: [],
+    tasks: [{
+      id: "task-003",
+      title: "Adjusted remaining task",
+      kind: "maintenance",
+      workflow: "tdd",
+      status: "pending",
+      priority: 3,
+      acceptanceCriteria: ["adjusted.txt exists"],
+      validation: [],
+      dependsOn: [],
+      failureHistory: [],
+      artifacts: [],
+      scope: ["adjusted.txt"]
+    }]
+  }), "utf-8");
+  const grillPathMatch = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/);
+  if (grillPathMatch) {
+    const grillPath = grillPathMatch[1].trim();
+    mkdirSync(dirname(grillPath), { recursive: true });
+    writeFileSync(grillPath, "# Autonomous Grill Transcript\\n\\nAdjusted after post-task review.", "utf-8");
+  }
+  process.exit(0);
+}
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  if (!m) throw new Error("no verifier result path");
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "verified", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+if (content.includes('"id": "task-003"')) {
+  writeFileSync("adjusted.txt", "done", "utf-8");
+  process.exit(0);
+}
+if (content.includes('"id": "task-002"')) throw new Error("executor should not run stale task-002 after post-task replan");
+writeFileSync("output.txt", "done", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "4", "--no-merge"], 120_000);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    const adjusted = state.tasks.find((t: any) => t.id === "task-003");
+    assert(adjusted?.status === "passed", `expected adjusted task passed, got ${adjusted?.status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "post_task_review_replan"), "missing post_task_review_replan event");
+    assert(hasEvent(events, "planner_finished"), "missing planner_finished after post-task review");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 1e: unscoped task emits warning event, still runs ───────────────────
 
 runCase("unscoped task: emits scope_missing_warning, task still runs", () => {
   const dir = tmpRepo("unscoped");
@@ -549,7 +681,7 @@ if (content.includes('"attempts": 2') || content.includes('"attempts":2')) {
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--max-retries", "2", "--no-merge"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--max-retries", "2", "--no-merge", "--no-decision-grill", "--no-post-task-review"], 90_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const state = readState(dir);
@@ -654,7 +786,7 @@ if (content.includes('"attempts": 2') || content.includes('"attempts":2')) {
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--max-retries", "2", "--no-merge"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--max-retries", "2", "--no-merge", "--no-decision-grill", "--no-post-task-review"], 90_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const state = readState(dir);
@@ -849,7 +981,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--no-decision-grill", "--no-post-task-review"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const state = readState(dir);
@@ -916,7 +1048,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--goal-review"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--goal-review", "--no-decision-grill", "--no-post-task-review"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const events = readEvents(dir);
     assert(hasEvent(events, "goal_review_started"), "expected goal_review_started event");
@@ -975,7 +1107,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--goal-review"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--goal-review", "--no-decision-grill", "--no-post-task-review"]);
     assert(r.status !== 0, "expected non-zero exit when goal review returns needs_human");
     const events = readEvents(dir);
     assert(hasEvent(events, "goal_review_finished"), "expected goal_review_finished event");
@@ -1045,7 +1177,7 @@ else if (content.includes('"id": "task-002"')) writeFileSync("out2.txt", "done",
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "5", "--no-merge", "--architect-checkpoint-interval", "2"], 120_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "5", "--no-merge", "--architect-checkpoint-interval", "2", "--no-decision-grill", "--no-post-task-review"], 120_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks.every((t: any) => t.status === "passed"), `not all tasks passed: ${JSON.stringify(state.tasks.map((t: any) => t.status))}`);
@@ -1145,7 +1277,7 @@ else if (content.includes('"id": "task-003"')) writeFileSync("out3.txt", "done",
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "8", "--no-merge", "--architect-checkpoint-interval", "2"], 180_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "8", "--no-merge", "--architect-checkpoint-interval", "2", "--no-decision-grill", "--no-post-task-review"], 180_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     const task3 = state.tasks.find((t: any) => t.id === "task-003");
@@ -1220,7 +1352,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "3", "--no-merge"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "3", "--no-merge", "--no-decision-grill", "--no-post-task-review"], 90_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks.length > 0, "expected tasks to be planned");
@@ -1291,7 +1423,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill", "--no-post-task-review"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
@@ -1359,7 +1491,7 @@ throw new Error("executor/verifier must not run after decision-grill escalation"
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill", "--no-post-task-review"], 90_000);
     assert(r.status !== 0, "expected non-zero exit when decision grill escalates");
     const state = readState(dir);
     assert(state.tasks[0].status === "needs_human", `expected needs_human, got ${state.tasks[0].status}`);
@@ -1432,7 +1564,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill", "--no-post-task-review"], 90_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);

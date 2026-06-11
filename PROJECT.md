@@ -39,7 +39,7 @@ Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA
 | --- | --- |
 | `tools/agent-loop/src/index.ts` | Commander CLI entry point. Defines `validate`, `plan`, diagnostics, `accept`, `reset-task`, and `run`. |
 | `tools/agent-loop/src/loop/index.ts` | Autonomous run engine. Owns planner, task-grill, executor, checks, scope rail, verifier, replan, commit/merge, handover, and finalize-docs phases. |
-| `tools/agent-loop/src/prompts/index.ts` | Prompt builders for planner, task-grill, decision-grill, executor, verifier, goal-review, architect-checkpoint, finalize-docs; plus `validatePlannerResult`/`validateDecisions` and prompt budget trimming. |
+| `tools/agent-loop/src/prompts/index.ts` | Prompt builders for planner, task-grill, decision-grill, executor, verifier, post-task review, goal-review, architect-checkpoint, finalize-docs; plus `validatePlannerResult`/`validateDecisions` and prompt budget trimming. |
 | `tools/agent-loop/src/state/index.ts` | `agentic.json` schema helpers, task selection, task status changes, attempts, failure history (including `failureAnalysisFile` pointer), planner result merge, and replan tracking (`replanCount`, `lastReplanTaskIds`). |
 | `tools/agent-loop/src/agent/index.ts` | Agent invocation adapters for `claude`, `pi`, and custom command templates. |
 | `tools/agent-loop/src/checks/index.ts` | Validation command execution, timeout handling, structured `METRIC key=value` parsing. |
@@ -89,7 +89,10 @@ The current TS run loop is:
 14. For high-risk tasks, run adversarial verifier votes unless overridden.
 15. On pass, optionally commit/merge or retain review branch/worktree.
 16. Write handover/progress artifacts.
-17. When no runnable tasks remain, treat `passed` and `blocked` as terminal statuses. If all unfinished work is terminal, complete.
+17. Run post-task plan review by default. This fresh review asks whether the remaining plan is still correctly sliced, scoped, ordered, and validated after the completed task. Verdicts: `continue`, `adjust_remaining_tasks`, `replan`, `needs_human`.
+18. On post-task review `adjust_remaining_tasks` or `replan`, block stale pending/retry tasks, enforce the replan budget/convergence guard, run planner again, and continue to replacement tasks.
+19. Every three passed tasks by default, run architect checkpoint over cumulative diff and remaining plan; `replan` calls planner, `needs_human` halts.
+20. When no runnable tasks remain, treat `passed` and `blocked` as terminal statuses. If all unfinished work is terminal, complete.
 
 ## Task-Grill Contract
 
@@ -142,7 +145,8 @@ Current TS rails:
 - `--rebase-before-verify`: optional gate that rebases the worktree on loop-start HEAD and re-runs checks before the verifier, catching post-merge integration failures early.
 - After each `ready` task-grill verdict, `assumptionsStillValid` and `assumptionsChanged` fields from the result are persisted back into `state.assumptions` (tagged `[valid]`/`[changed]`) and emitted as an `assumptions_updated` event. The current assumption list is forwarded into every subsequent task-grill prompt so drift is visible across turns.
 - `--goal-review` (opt-in): after all tasks pass, a goal-review agent judges the cumulative diff against `state.goal` and emits `goal_review_finished`. A `needs_human` verdict halts the loop before finalize-docs.
-- `--architect-checkpoint-interval <n>` (opt-in, default 0 = disabled): every N passed tasks, an architect checkpoint agent reviews the plan and cumulative diff for drift. Verdicts: `continue` (proceed), `replan` (call planner again, counts against replan budget), `needs_human` (halt).
+- Post-task plan review is default-on after every passed task. It reviews assumption drift, remaining task slicing/scope/order, and validation design. `adjust_remaining_tasks` and `replan` block stale pending/retry tasks before planner appends replacements; `needs_human` halts.
+- `--architect-checkpoint-interval <n>` (default 3, `0` = disabled): every N passed tasks, an architect checkpoint agent reviews the plan and cumulative diff for drift. Verdicts: `continue` (proceed), `replan` (call planner again, counts against replan budget), `needs_human` (halt).
 - `--decision-grill` (opt-in): before each executor turn, a grill-with-docs self-interview surfaces genuine design/product decisions and answers them itself with evidence. The harness enforces a decision contract via `validateDecisions` (each decision needs 2-4 evidenced options, exactly one marked recommended, plus `whyItMatters`/`selfAnswer`/`confidence`/`escalate`). Shallow or low-confidence-without-escalate results trigger exactly one re-grill (`decision_grill_regrill`); if still inadequate, or any decision sets `escalate:true`/stays low-confidence, the task escalates to `needs_human`. Answered decisions are flattened into `state.decisions` and emitted as `decisions_recorded`. The planner result's `decisions` are validated by the same contract and normalized to strings on merge.
 - `accept` and `reset-task` are dry-run by default and require `--apply` to mutate.
 
@@ -172,6 +176,8 @@ Known gaps before calling the TS runner production-default:
 - replan convergence detection (`replan_convergence_failure`) when plan produces identical task IDs
 - assumption ledger: task-grill `assumptionsStillValid`/`assumptionsChanged` persisted to `state.assumptions` with `[valid]`/`[changed]` tags and emitted as `assumptions_updated` event
 - goal review: `--goal-review` pass verdict allows completion, `needs_human` halts before finalize-docs
+- post-task review: default `continue` verdict runs after passed tasks
+- post-task review: `replan` verdict blocks stale remaining tasks, calls planner, and continues with replacement task
 - architect checkpoint: `continue` verdict proceeds, `replan` verdict calls planner and continues with new task
 - planner from empty task list: plans then executes planned task
 - decision grill: well-formed self-answered decision recorded to `state.decisions` and task passes

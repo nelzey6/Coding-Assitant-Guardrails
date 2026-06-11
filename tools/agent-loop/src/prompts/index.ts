@@ -977,6 +977,92 @@ export function writeArchitectCheckpointPrompt(promptFile: string, opts: Archite
   writeFileSync(promptFile, content, "utf-8");
 }
 
+export interface PostTaskReviewPromptOptions {
+  repoRoot: string;
+  runsRoot: string;
+  stateFile: string;
+  budget: PromptBudget;
+  state: AgenticState;
+  taskId: string;
+  taskRunDir: string;
+  verifierResultFile: string;
+  handoverFile: string;
+  loopBaseRef: string;
+  resultFile: string;
+}
+
+export function writePostTaskReviewPrompt(promptFile: string, opts: PostTaskReviewPromptOptions): void {
+  const {
+    repoRoot, runsRoot, stateFile, budget, state, taskId, taskRunDir,
+    verifierResultFile, handoverFile, loopBaseRef, resultFile,
+  } = opts;
+
+  const limits = getPromptBudgetLimits(budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const tasks = state.tasks ?? [];
+  const completedTask = tasks.find((t) => t.id === taskId);
+  const remainingTasks = tasks.filter((t) => !["passed", "blocked"].includes(t.status ?? ""));
+  const diffStat = loopBaseRef
+    ? git(["diff", "--stat", loopBaseRef, "HEAD"], repoRoot)
+    : git(["diff", "--stat", "HEAD"], repoRoot);
+
+  const content = [
+    "You are the post-task plan reviewer for an autonomous agentic loop.",
+    "",
+    "The verifier already judged whether the completed task passed. Your job is different: reassess whether the remaining plan is still valid after this completed slice.",
+    "Spend intelligence on assumptions, validation design, task slicing, and plan drift. Do not propose executor edits here.",
+    "",
+    `Completed task: ${taskId}`,
+    `Completed task run directory: ${taskRunDir}`,
+    `Verifier result: ${verifierResultFile}`,
+    `Handover: ${handoverFile}`,
+    "",
+    "Read AGENTS.md / CLAUDE.md, the verifier result, handover, state, and relevant repo files before deciding.",
+    "",
+    `Write post-task review JSON only to: ${resultFile}`,
+    "",
+    "Allowed verdicts: continue, adjust_remaining_tasks, replan, needs_human.",
+    `Schema: { "verdict": "continue|adjust_remaining_tasks|replan|needs_human", "assessment": "...", "remainingPlanStillValid": true, "suggestedChanges": [] }`,
+    "",
+    "- continue: the remaining pending tasks are still correctly sliced, scoped, ordered, and validated.",
+    "- adjust_remaining_tasks: remaining tasks need focused updates or additions; the harness will call the planner.",
+    "- replan: the remaining plan is materially stale or wrong; the harness will call the planner.",
+    "- needs_human: a product/domain/safety decision is required before more autonomous work.",
+    "",
+    "Review questions:",
+    "- Did the completed task change assumptions that the remaining tasks depend on?",
+    "- Are remaining task scopes still tight and sufficient?",
+    "- Is validation still proving the right behavior, or did the last task reveal a better proof?",
+    "- Are any remaining tasks now redundant, missing, too broad, or in the wrong order?",
+    "- Is this a major checkpoint where the plan should be re-sliced before continuing?",
+    "",
+    `Goal: ${state.goal ?? "(no goal recorded)"}`,
+    "",
+    "Completed task JSON:",
+    completedTask ? JSON.stringify(completedTask, null, 2) : "(completed task not found in state)",
+    "",
+    "Remaining tasks:",
+    remainingTasks.length ? remainingTasks.map((t) => `- [${t.status}] ${t.id}: ${t.title ?? ""}`).join("\n") : "(none — all done)",
+    "",
+    "Current assumptions:",
+    (state.assumptions?.length ? state.assumptions.join("\n") : "(none)"),
+    "",
+    "Current decisions:",
+    (state.decisions?.length ? state.decisions.join("\n") : "(none)"),
+    "",
+    "Cumulative diff stat since loop start:",
+    diffStat || "(no diff)",
+    "",
+    "Recent harness history:",
+    recentHistory,
+  ].join("\n");
+
+  writePromptWithEvent(promptFile, content, "post_task_review", repoRoot, runsRoot, stateFile, budget, {
+    task: taskId,
+    resultFile,
+  });
+}
+
 export interface FinalizeDocsPromptOptions {
   repoRoot: string;
   runsRoot: string;

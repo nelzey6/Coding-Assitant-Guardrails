@@ -18,8 +18,10 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 7. Runs configured **checks** (global `--checks` + task `validation` commands).
 8. Runs a **verifier** agent; requires `verifier-result.json` with verdict `pass`, `fail`, or `needs_human`.
 9. On pass: commits + merges (unless `--no-merge` / `--review-branch`).
-10. On failure: records `failureHistory`, marks `needs_retry` or `needs_human` based on retry budget.
-11. Repeats until all tasks pass or the iteration budget is exhausted.
+10. Runs a **post-task plan review** after every passed task to decide whether the remaining plan is still valid.
+11. Runs an **architect checkpoint** every three passed tasks by default; the checkpoint may force replanning.
+12. On failure: records `failureHistory`, marks `needs_retry` or `needs_human` based on retry budget.
+13. Repeats until all tasks pass or the iteration budget is exhausted.
 
 ---
 
@@ -55,8 +57,9 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 --fast-verifier              Skip verifier agent for low-risk tasks that pass checks
 --rebase-before-verify       Rebase worktree on loop-start HEAD before verifier; re-runs checks
 --goal-review                Run goal-review agent after all tasks pass
---architect-checkpoint-interval <n>  Run architect checkpoint every N passed tasks (0 = off)
---decision-grill             Self-interview design decisions before each executor turn
+--no-post-task-review        Skip the default plan-validity review after each passed task
+--architect-checkpoint-interval <n>  Run architect checkpoint every N passed tasks (0 = off, default: 3)
+--no-decision-grill          Skip the per-task design decision self-interview
 --no-finalize-docs           Skip final PROJECT.md refresh after all tasks pass
 --allow-dirty                Allow starting with uncommitted changes in main worktree
 --status                     Print state summary and exit (dirty-tree safe)
