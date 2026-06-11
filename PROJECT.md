@@ -151,8 +151,6 @@ Known gaps before calling the TS runner production-default:
 - `run` does not yet enforce the policy clean-main-worktree gate.
 - CLI defaults do not fully honor policy defaults such as retry count and merge mode.
 - `promptPolicy.lessons` exists in state but is not yet updated as structured learning memory.
-- `run` does not yet enforce the policy clean-main-worktree gate.
-- CLI defaults do not fully honor policy defaults such as retry count and merge mode.
 
 ## Validation Coverage
 

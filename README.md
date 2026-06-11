@@ -113,18 +113,9 @@ The typed agent loop lives in [`tools/agent-loop/`](./tools/agent-loop/). It is 
 
 The legacy PowerShell harness remains at [`scripts/agentic/agentic-loop.ps1`](./scripts/agentic/agentic-loop.ps1) and is still what the setup scripts install as the `agentic-loop` shim today. Treat it as the compatibility/reference harness while the TS runner becomes the primary autonomous implementation.
 
-High-level flow:
+For the full visual walkthrough — phases, decision points, scope rail, retry logic, and safety defaults — see **[docs/agentic-loop-flow.md](./docs/agentic-loop-flow.md)**.
 
-1. Plan from a goal into `agentic.json` tasks using grill-with-docs-style discovery.
-2. Run one task at a time in a fresh git worktree/branch.
-3. Run a fresh task-grill prompt that asks whether the current task is still understood, scoped, and safe.
-4. If task-grill returns `ready`, invoke a fresh executor agent with the task-grill result injected.
-5. If task-grill returns `needs_replan`, mark the stale task blocked, run planner again, and continue with replacement tasks.
-6. Run configured checks and task validation commands.
-7. Invoke a fresh verifier agent unless `--fast-verifier` is explicitly used and allowed.
-8. Commit/merge or hold the result for human inspection.
-9. Persist state, events, handovers, logs, diffs, task-grill artifacts, and summaries under `.agent-runs/`.
-10. On completion, refresh durable docs through update-project-md-style finalization unless skipped.
+In short: plan a goal into tasks → task-grill each task before edits → execute in an isolated worktree → run checks → verify → merge or hold for review → persist state and finalize docs.
 
 Useful commands:
 

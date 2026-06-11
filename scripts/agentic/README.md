@@ -1,5 +1,7 @@
 # Agentic loop harness
 
+> For a visual overview of every phase, decision point, and safety rail, see [docs/agentic-loop-flow.md](../../docs/agentic-loop-flow.md).
+
 `agentic-loop.ps1` is the legacy PowerShell agentic harness and current installed shim target. Ralph runs pre-sliced `prd.json` stories; the agentic loop runs `agentic.json` tasks with workflow routing, worktrees, checks, verifier results, and harness-owned merge decisions.
 
 The current typed architecture is the TypeScript runner under `tools/agent-loop/`. It adds per-task task-grill before executor edits and can route stale tasks back through planner via `needs_replan`. See root `PROJECT.md` for the detailed TS architecture and current gaps.

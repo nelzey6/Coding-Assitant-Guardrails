@@ -18,7 +18,7 @@ if (!(Test-Path $agentIndexTs)) {
     throw "TS agent-loop entry point not found: $agentIndexTs"
 }
 if (!(Test-Path $tsxCli)) {
-    throw "tsx not found at $tsxCli — run 'npm install' inside $agentLoopDir first."
+    throw "tsx not found at $tsxCli - run 'npm install' inside $agentLoopDir first."
 }
 
 # Verify node >= 20

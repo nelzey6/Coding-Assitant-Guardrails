@@ -136,29 +136,25 @@ cd tools/agent-loop && npx tsx src/index.ts validate
 
 If this exits non-zero, stop and report the violations before running an autonomous loop. The validator checks that all promotable skills (`engineering/`, `productivity/`, `misc/`) are registered in `.claude-plugin/plugin.json` and linked in both the top-level and bucket `README.md` files, and that excluded skills (`personal/`, `in-progress/`, `deprecated/`) are absent from those surfaces.
 
-Do not start a multi-iteration autonomous harness unless the user explicitly asks to run it. If the harness is unavailable, use this skill to prepare or update `agentic.json` and report the intended harness command.
+**Always invoke the harness when this skill is used.** Prepare `agentic.json`, then run the TS runner (or the installed `agentic-loop` shim) immediately. Only fall back to plan-only mode if the user explicitly passes `--plan-only`, the harness binary is not on PATH, or a pre-flight `validate` check exits non-zero.
+
+### Resuming after a plan-only stop
+
+If `agentic.json` already exists with `pending` tasks (e.g. from a prior `--plan-only` run or a stopped session), skip the planner and go straight to execution:
+
+```powershell
+agentic-loop --tool claude
+```
+
+The harness picks up all `pending` and `needs_retry` tasks with satisfied dependencies and continues the loop. No replanning needed unless the user asks for it.
+
+When this skill is invoked and `agentic.json` already has a task list, treat it as a resume request — run the harness immediately without re-planning.
 
 ## Worktree execution
 
-Prefer one git worktree per executable task:
+Prefer one git worktree per executable task. The main repo stays clean; the harness creates `.worktrees/<task-id>/` on a dedicated branch, runs the executor there, runs checks, runs the verifier, and only then commits and merges. The harness — not the executor agent — marks tasks passed and merges branches.
 
-```text
-main repo stays clean
-↓
-create .worktrees/<run-task>/ on a task branch
-↓
-run executor agent in that worktree
-↓
-run checks in that worktree
-↓
-run verifier
-↓
-commit and merge only after verifier passes
-↓
-remove or retain worktree according to cleanup policy
-```
-
-The harness, not the executor agent, should mark tasks passed and merge branches.
+For a full visual walkthrough of every phase and decision point, see [docs/agentic-loop-flow.md](../../../docs/agentic-loop-flow.md).
 
 ## Prompt contract
 
@@ -197,11 +193,11 @@ Stop and use `handoff` when:
 
 ## Final response
 
-When preparing an agentic loop, report:
+After launching the harness, report:
 
-- state file path
-- selected default checks
-- task count and selected workflows
+- state file path and task count
+- selected workflows per task
+- checks being run
 - expected worktree root
-- human gates or unresolved risks
-- suggested command for the harness when available
+- any human gates or unresolved risks that caused a stop
+- the exact harness command that was (or would be) run
