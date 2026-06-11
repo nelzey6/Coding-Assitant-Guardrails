@@ -10,6 +10,8 @@ Built for [Codex](https://openai.com/codex), [Claude Code](https://claude.ai/cod
 
 That's it. The loop plans, grills itself, executes, checks, and merges — or tells you exactly why it stopped.
 
+**→ [Quickstart — get running in 2 minutes](#quickstart)**
+
 ---
 
 ## How it works
