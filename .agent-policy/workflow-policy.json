@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "ownedBy": "Coding-Assistant-Guardrails",
+  "purpose": "Shared workflow routing policy for manual agent sessions and autonomous harnesses. This file chooses canonical repo skills; it does not duplicate skill procedure.",
+  "defaultDiscoveryWorkflow": "grill-with-docs",
+  "defaultExecutionWorkflow": "tdd",
+  "workflows": {
+    "grill-with-docs": {
+      "skillName": "grill-with-docs",
+      "phase": "discovery",
+      "default": true,
+      "routeWhen": [
+        "ambiguous product requirement",
+        "missing acceptance criteria for user-visible behavior",
+        "domain terminology unclear",
+        "product or business decision needed",
+        "conflicting documentation or behavior",
+        "request uses broad words such as improve, clean up, optimize, support, or handle"
+      ],
+      "autoLoopUse": "Run as the default discovery gate. Resolve questions from repository docs/code first; stop for human input only when a product/domain decision remains unresolved.",
+      "executorBlock": {
+        "requiredWorkflow": "grill-with-docs",
+        "expectedLoop": [
+          "Restate the goal and identify missing decisions.",
+          "Inspect repository docs/code before asking the user.",
+          "Separate answers found from evidence, safe assumptions, and human-only decisions.",
+          "Stop with needs_human only when a product/domain decision remains unresolved.",
+          "Produce or update a task plan when unblocked."
+        ]
+      }
+    },
+    "diagnose": {
+      "skillName": "diagnose",
+      "phase": "execution",
+      "routeWhen": [
+        "bug",
+        "regression",
+        "failing test",
+        "crash or exception",
+        "error log or alarm",
+        "flaky behavior",
+        "timeout or performance issue",
+        "unknown root cause",
+        "behavior differs across environments"
+      ],
+      "autoLoopUse": "Use before editing when the task is failure-driven. The executor must reproduce or gather evidence before fixing.",
+      "executorBlock": {
+        "requiredWorkflow": "diagnose",
+        "expectedLoop": [
+          "Reproduce the failure.",
+          "Gather evidence.",
+          "Identify the smallest causal explanation.",
+          "Fix only after the cause is understood.",
+          "Add or update a regression test where appropriate."
+        ]
+      }
+    },
+    "tdd": {
+      "skillName": "tdd",
+      "phase": "execution",
+      "routeWhen": [
+        "new observable behavior",
+        "clear acceptance criteria",
+        "bug with known expected behavior",
+        "focused regression test can prove the change"
+      ],
+      "autoLoopUse": "Use for implementation tasks where a focused test or smoke check can prove behavior.",
+      "executorBlock": {
+        "requiredWorkflow": "tdd",
+        "expectedLoop": [
+          "Write or identify a focused failing test/check for the expected behavior.",
+          "Implement the smallest change that makes the test/check pass.",
+          "Refactor only after green.",
+          "Keep the validation focused and maintainable."
+        ]
+      }
+    },
+    "zoom-out": {
+      "skillName": "zoom-out",
+      "phase": "pre-execution",
+      "routeWhen": [
+        "unfamiliar subsystem",
+        "unclear state flow",
+        "unclear dependency direction",
+        "large surface area",
+        "change crosses modules, packages, services, processes, or lifecycle phases"
+      ],
+      "autoLoopUse": "Use before selecting an implementation approach when context is missing.",
+      "executorBlock": {
+        "requiredWorkflow": "zoom-out",
+        "expectedLoop": [
+          "Inspect the surrounding system.",
+          "Map relevant files, ownership, dependencies, and data flow.",
+          "Only then choose the smallest necessary next change or follow-up task."
+        ]
+      }
+    },
+    "improve-codebase-architecture": {
+      "skillName": "improve-codebase-architecture",
+      "phase": "planning-or-execution",
+      "routeWhen": [
+        "architecture cleanup",
+        "simplification or modularization",
+        "boundary repair",
+        "cross-cutting refactor",
+        "coupling or ownership problem",
+        "migration or safe seam needed",
+        "realistic chance to delete, collapse, or move code instead of adding another path"
+      ],
+      "autoLoopUse": "Use for structural tasks, but still slice into small safe migration steps. Avoid broad rewrites.",
+      "executorBlock": {
+        "requiredWorkflow": "improve-codebase-architecture",
+        "expectedLoop": [
+          "Understand the current architecture.",
+          "Identify the smallest useful seam or migration step.",
+          "Avoid broad rewrites.",
+          "Preserve behavior.",
+          "Document durable decisions only when they meet ADR criteria."
+        ]
+      }
+    },
+    "update-project-md": {
+      "skillName": "update-project-md",
+      "phase": "maintenance",
+      "routeWhen": [
+        "durable repository facts discovered",
+        "build, test, lint, run, deploy, debugging, or validation commands discovered or corrected",
+        "architecture map or module ownership clarified",
+        "PROJECT.md is missing, placeholder-only, stale, or contradictory"
+      ],
+      "autoLoopUse": "Use after durable repo facts change or are discovered. Do not store live task state in PROJECT.md.",
+      "executorBlock": {
+        "requiredWorkflow": "update-project-md",
+        "expectedLoop": [
+          "Inspect current repository evidence for durable facts.",
+          "Update PROJECT.md only with durable technical repo truth.",
+          "Do not store live task state, hypotheses, or conversation summaries.",
+          "Validate the documentation change against current code/docs where possible."
+        ]
+      }
+    },
+    "handoff": {
+      "skillName": "handoff",
+      "phase": "stop",
+      "routeWhen": [
+        "blocked",
+        "needs human decision",
+        "iteration budget exhausted",
+        "session or autonomous run must stop with context preserved"
+      ],
+      "autoLoopUse": "Use to produce a compact continuation note when the loop stops before completion.",
+      "executorBlock": {
+        "requiredWorkflow": "handoff",
+        "expectedLoop": [
+          "Summarize the goal, current state, evidence, and blocker.",
+          "List changed files, worktrees, validation, and verifier results.",
+          "Give the exact recommended continuation command or next human decision."
+        ]
+      }
+    }
+  },
+  "humanGates": [
+    "schema migration",
+    "auth or permission changes",
+    "payment or billing logic",
+    "public API breaking change",
+    "dependency upgrade",
+    "large rewrite",
+    "data deletion or destructive migration",
+    "editing upstream-derived files",
+    "changes outside declared task scope"
+  ],
+  "autonomousLoop": {
+    "requiredPhases": [
+      "discovery",
+      "planning",
+      "execution",
+      "verification",
+      "reflection"
+    ],
+    "defaultWorktreeMode": true,
+    "requireCleanMainWorktree": true,
+    "requireVerifierBeforeMerge": true,
+    "maxRetriesPerTask": 1,
+    "mergeMode": "ff-only",
+    "stateFile": "agentic.json",
+    "scratchRoot": ".agent-runs",
+    "worktreeRoot": ".worktrees"
+  },
+  "verifierRules": [
+    "Check git diff against the selected task and acceptance criteria.",
+    "Check that the selected canonical skill was used or explicitly ruled out with evidence.",
+    "Check that configured validation commands passed or failures are explained as blockers.",
+    "Check that no unrelated files changed.",
+    "Check whether any human gate was crossed before allowing merge or completion."
+  ]
+}
