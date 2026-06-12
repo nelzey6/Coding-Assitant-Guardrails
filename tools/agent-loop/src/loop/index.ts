@@ -433,7 +433,7 @@ async function runArchitectCheckpointPhase(
     console.log(`Architect checkpoint requested replan: ${result.assessment ?? ""}`);
     appendEvent(cfg.repoRoot, "architect_checkpoint_replan", { assessment: result.assessment, suggestedChanges: result.suggestedChanges }, cfg.runsRoot, cfg.stateFile);
     blockRemainingPlanForReplan(cfg, "architect_checkpoint", result.assessment ?? "architect checkpoint requested replan", resultFile);
-    runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, "architect_checkpoint", result.assessment ?? "architect checkpoint requested replan");
+    await runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, "architect_checkpoint", result.assessment ?? "architect checkpoint requested replan");
     return;
   }
 
@@ -491,7 +491,7 @@ async function runPostTaskReviewPhase(
     const phase = result.verdict === "replan" ? "post_task_review" : "post_task_adjustment";
     appendEvent(cfg.repoRoot, "post_task_review_replan", { task: taskId, verdict: result.verdict, assessment: result.assessment, suggestedChanges: result.suggestedChanges }, cfg.runsRoot, cfg.stateFile);
     blockRemainingPlanForReplan(cfg, phase, result.assessment ?? `post-task review requested ${result.verdict}`, resultFile);
-    runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, phase, result.assessment ?? `post-task review requested ${result.verdict}`);
+    await runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, phase, result.assessment ?? `post-task review requested ${result.verdict}`);
     return;
   }
 
@@ -679,8 +679,8 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       if (hasUnfinishedTasks(state)) {
         throw new LoopError(`No runnable task available. Blocked by dependencies:\n${getBlockedDependencySummary(state)}`);
       }
-      if (cfg.goalReview) runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
-      if (cfg.finalizeDocs && cfg.merge) runFinalizeDocsPhase(cfg, agentCallCounter);
+      if (cfg.goalReview) await runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
+      if (cfg.finalizeDocs && cfg.merge) await runFinalizeDocsPhase(cfg, agentCallCounter);
       console.log("<promise>COMPLETE</promise>");
       return;
     }
@@ -758,7 +758,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           appendEvent(cfg.repoRoot, "task_replan_requested", { task: taskId, reason, resultFile: taskGrillResult, sessionReplanCount: sessionReplanCountRef.count }, cfg.runsRoot, cfg.stateFile);
 
           const replanTask = getTasks(loadState(cfg.repoRoot, cfg.stateFile)!).find((t) => t.id === taskId);
-          runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, "task_grill", reason, replanTask ? getLastFailureAnalysisFile(replanTask) : "");
+          await runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, "task_grill", reason, replanTask ? getLastFailureAnalysisFile(replanTask) : "");
 
           copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
           continue;
@@ -1040,14 +1040,14 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         if (cfg.cleanupPassed && worktreeExists(worktreePath)) removeWorktree(worktreePath, cfg.repoRoot);
 
         if (cfg.postTaskReview) {
-          runPostTaskReviewPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef, taskId, runDir, verifierResult, handoverFile);
+          await runPostTaskReviewPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef, taskId, runDir, verifierResult, handoverFile);
         }
 
         // Architect checkpoint: trigger every N passed tasks if configured.
         passedSinceLastCheckpoint++;
         if (cfg.architectCheckpointInterval > 0 && passedSinceLastCheckpoint >= cfg.architectCheckpointInterval) {
           passedSinceLastCheckpoint = 0;
-          runArchitectCheckpointPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef);
+          await runArchitectCheckpointPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef);
         }
 
         if (cfg.retryTaskId) { console.log("<promise>COMPLETE</promise>"); return; }
@@ -1084,8 +1084,8 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     if (hasUnfinishedTasks(finalState)) {
       throw new LoopError(`Reached max iterations or no runnable task. Blocked by dependencies:\n${getBlockedDependencySummary(finalState)}`);
     }
-    if (cfg.goalReview) runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
-    if (cfg.finalizeDocs && cfg.merge) runFinalizeDocsPhase(cfg, agentCallCounter);
+    if (cfg.goalReview) await runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
+    if (cfg.finalizeDocs && cfg.merge) await runFinalizeDocsPhase(cfg, agentCallCounter);
     console.log("<promise>COMPLETE</promise>");
     return;
   }
