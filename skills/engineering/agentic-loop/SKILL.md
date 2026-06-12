@@ -112,22 +112,16 @@ Do not copy these skills' detailed procedures into loop prompts. Tell the agent 
 
 ### You are inside Claude Code right now
 
-Claude Code is the executor. Do **not** try to spawn the harness as a subprocess — `claude` cannot nest itself.
+Invoke the harness directly — do not do any planning, reading, or execution inline in the conversation:
 
-Instead, when this skill is invoked, do the following directly in the conversation:
+```bash
+agentic-loop init "the goal here"
+agentic-loop run --checks "your check command"
+```
 
-1. If `agentic.json` has no tasks yet: plan the goal into tasks and write them to `agentic.json`.
-2. For each `pending` task in priority order:
-   - **Task-grill** — confirm the task is still understood, scoped, and safe.
-   - **Execute** — make the code changes in the repo.
-   - **Checks** — run the configured validation commands from `agentic.json`.
-   - **Verify** — review the diff and check output; decide pass/fail.
-   - Update `agentic.json` task status and print a progress summary to the conversation.
-3. If `agentic.json` already has `pending` tasks (resume case): skip planning, start executing immediately.
+The harness owns all phases. `pi` is the default executor/verifier. Claude Code's only job is to run these two commands.
 
-Write all artifacts to `.agent-runs/agentic-<timestamp>-<task-id>/` and append every phase transition to `.agent-runs/events.jsonl`. After each task, print to the conversation: task ID, grill verdict, checks result, verifier verdict, and run dir path.
-
-### From a terminal (unattended, fresh agents per task)
+### From a terminal
 
 The harness spawns a brand-new `pi` process for each executor and verifier call. `pi` is the default tool.
 
