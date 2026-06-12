@@ -941,20 +941,26 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           verifierResultObj = JSON.parse(readFileSync(verifierResult, "utf-8")) as VerifierResult;
         } else {
           appendEvent(cfg.repoRoot, "verifier_votes_started", { task: taskId, votes, adversarial: true }, cfg.runsRoot, cfg.stateFile);
-          const voteResults: VerifierResult[] = [];
-          for (let v = 1; v <= votes; v++) {
-            const vPrompt = join(runDir, `verifier-vote-${v}.md`);
-            const vResult = join(runDir, `verifier-vote-${v}.json`);
-            const vLog    = join(runDir, `verifier-vote-${v}.log`);
+          const voteSlots = Array.from({ length: votes }, (_, i) => i + 1).map((v) => ({
+            prompt: join(runDir, `verifier-vote-${v}.md`),
+            result: join(runDir, `verifier-vote-${v}.json`),
+            log:    join(runDir, `verifier-vote-${v}.log`),
+            v,
+          }));
+          for (const { prompt: vPrompt, result: vResult, log: vLog, v } of voteSlots) {
             writeVerifierPrompt(vPrompt, { repoRoot: cfg.repoRoot, runsRoot: cfg.runsRoot, stateFile: cfg.stateFile, budget: cfg.budget, task, worktreePath, checkOutput, resultFile: vResult, eventLogPath, policy, adversarial });
             appendEvent(cfg.repoRoot, "verifier_started", { task: taskId, prompt: vPrompt, resultFile: vResult, log: vLog, vote: v, votes }, cfg.runsRoot, cfg.stateFile);
             agentCallCounter.count++;
-            await invokeAgentWithLog(vPrompt, cfg.verifierAgent, worktreePath, vLog);
+          }
+          await Promise.all(voteSlots.map(({ prompt: vPrompt, log: vLog }) =>
+            invokeAgentWithLog(vPrompt, cfg.verifierAgent, worktreePath, vLog)
+          ));
+          const voteResults: VerifierResult[] = voteSlots.map(({ result: vResult, v }) => {
             if (!existsSync(vResult)) throw new LoopError(`Verifier vote ${v} did not write ${vResult}`);
             const vr = JSON.parse(readFileSync(vResult, "utf-8")) as VerifierResult;
-            voteResults.push(vr);
             appendEvent(cfg.repoRoot, "verifier_vote", { task: taskId, vote: v, verdict: vr.verdict, summary: vr.summary }, cfg.runsRoot, cfg.stateFile);
-          }
+            return vr;
+          });
           const passCount      = voteResults.filter((r) => r.verdict === "pass").length;
           const needsHumanCount = voteResults.filter((r) => r.verdict === "needs_human").length;
           const majority = Math.floor(votes / 2) + 1;
