@@ -1579,6 +1579,324 @@ writeFileSync("output.txt", "done", "utf-8");
   }
 });
 
+// ── case 19: post-task review adjust_remaining_tasks ─────────────────────────
+// Same code path as replan but verdict is "adjust_remaining_tasks" and the
+// emitted phase is "post_task_adjustment". The stale remaining task must be
+// blocked and a replacement task must run and pass.
+
+runCase("post-task review: adjust_remaining_tasks blocks stale task and replans", () => {
+  const dir = tmpRepo("post-task-adjust");
+  try {
+    writeState(dir, baseState(
+      { title: "First task", scope: ["output.txt"], priority: 1 },
+      {
+        maxIterations: 4,
+        tasks: [
+          baseTask({ id: "task-001", title: "First task", scope: ["output.txt"], priority: 1 }),
+          baseTask({ id: "task-002", title: "Stale adjustment task", scope: ["stale.txt"], priority: 2, dependsOn: ["task-001"] }),
+        ],
+      }
+    ));
+
+    // Override post-task review to return adjust_remaining_tasks for the first task.
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({
+    verdict: "ready", understanding: "ok", evidence: [], assumptionsStillValid: [],
+    assumptionsChanged: [], scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: [], risks: [], executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write decision JSON only to:")) {
+  const m = content.match(/Write decision JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ decisions: [] }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write post-task review JSON only to:")) {
+  const m = content.match(/Write post-task review JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  // Only trigger adjust on the first task; return continue for subsequent reviews.
+  if (content.includes('"id": "task-001"') || content.includes('"task": "task-001"')) {
+    writeFileSync(p, JSON.stringify({
+      verdict: "adjust_remaining_tasks",
+      assessment: "scope of remaining tasks needs narrowing",
+      remainingPlanStillValid: false,
+      suggestedChanges: ["replace stale task-002 with narrower task"]
+    }), "utf-8");
+  } else {
+    writeFileSync(p, JSON.stringify({
+      verdict: "continue",
+      assessment: "adjusted plan still valid",
+      remainingPlanStillValid: true,
+      suggestedChanges: []
+    }), "utf-8");
+  }
+  process.exit(0);
+}
+if (content.includes("Write planner JSON only to:")) {
+  const m = content.match(/Write planner JSON only to: (.+)/);
+  const pp = m[1].trim();
+  mkdirSync(dirname(pp), { recursive: true });
+  writeFileSync(pp, JSON.stringify({
+    verdict: "planned", summary: "narrowed remaining task", decisions: [], assumptions: [],
+    openQuestions: [], blockers: [], artifacts: [],
+    tasks: [{
+      id: "task-003", title: "Narrowed task", kind: "maintenance", workflow: "tdd",
+      status: "pending", priority: 3,
+      acceptanceCriteria: ["adjusted.txt exists"], validation: [],
+      dependsOn: [], failureHistory: [], artifacts: [], scope: ["adjusted.txt"]
+    }]
+  }), "utf-8");
+  const gm = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/);
+  if (gm) { mkdirSync(dirname(gm[1].trim()), { recursive: true }); writeFileSync(gm[1].trim(), "# Grill\\nAdjusted.", "utf-8"); }
+  process.exit(0);
+}
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+if (content.includes('"id": "task-002"')) throw new Error("executor must not run stale task-002 after adjust_remaining_tasks");
+if (content.includes('"id": "task-003"')) { writeFileSync("adjusted.txt", "done", "utf-8"); process.exit(0); }
+writeFileSync("output.txt", "done", "utf-8");
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "4", "--no-merge", "--decision-grill"], 120_000);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    const stale = state.tasks.find((t: any) => t.id === "task-002");
+    const adjusted = state.tasks.find((t: any) => t.id === "task-003");
+    assert(stale?.status === "blocked", `expected task-002 blocked, got ${stale?.status}`);
+    assert(adjusted?.status === "passed", `expected task-003 passed, got ${adjusted?.status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "post_task_review_replan"), "expected post_task_review_replan event");
+    const ev = events.find((e: any) => e.type === "post_task_review_replan");
+    assert(ev?.verdict === "adjust_remaining_tasks", `expected verdict=adjust_remaining_tasks, got ${ev?.verdict}`);
+    assert(hasEvent(events, "planner_finished"), "expected planner_finished after adjust_remaining_tasks");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 20: architect checkpoint needs_human ─────────────────────────────────
+// Two tasks pass. Architect checkpoint fires (interval=2). Agent returns
+// needs_human. Loop must exit non-zero without running any more tasks.
+
+runCase("architect checkpoint: needs_human verdict halts loop", () => {
+  const dir = tmpRepo("arch-nh");
+  try {
+    writeState(dir, {
+      version: 1, goal: "Smoke goal", maxIterations: 5, checks: [],
+      defaultDiscoveryWorkflow: "grill-with-docs",
+      tasks: [
+        baseTask({ id: "task-001", title: "First task",  priority: 1, scope: ["out1.txt"] }),
+        baseTask({ id: "task-002", title: "Second task", priority: 2, scope: ["out2.txt"] }),
+        baseTask({ id: "task-003", title: "Third task",  priority: 3, scope: ["out3.txt"], dependsOn: ["task-002"] }),
+      ],
+      decisions: [], assumptions: [], openQuestions: [], blockers: [],
+      promptPolicy: { lessons: [] },
+    });
+
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({
+    verdict: "ready", understanding: "ok", evidence: [], assumptionsStillValid: [],
+    assumptionsChanged: [], scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: [], risks: [], executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+// Architect checkpoint: return needs_human
+if (content.includes("Write your verdict JSON only to:") && content.includes("architect reviewer")) {
+  const m = content.match(/Write your verdict JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "needs_human", assessment: "architectural risk discovered, human review required", suggestedChanges: [] }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+if (content.includes('"id": "task-003"')) throw new Error("task-003 must not run after architect checkpoint needs_human");
+if (content.includes('"id": "task-001"')) writeFileSync("out1.txt", "done", "utf-8");
+else if (content.includes('"id": "task-002"')) writeFileSync("out2.txt", "done", "utf-8");
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "5", "--no-merge", "--architect-checkpoint-interval", "2", "--no-decision-grill", "--no-post-task-review"], 120_000);
+    assert(r.status !== 0, "expected non-zero exit when architect checkpoint returns needs_human");
+    const events = readEvents(dir);
+    assert(hasEvent(events, "architect_checkpoint_finished"), "expected architect_checkpoint_finished event");
+    const ev = events.find((e: any) => e.type === "architect_checkpoint_finished");
+    assert(ev?.verdict === "needs_human", `expected verdict=needs_human, got ${ev?.verdict}`);
+    const state = readState(dir);
+    assert(state.tasks.find((t: any) => t.id === "task-003")?.status !== "passed", "task-003 must not pass after architect needs_human");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 21: agent-call budget exhaustion ─────────────────────────────────────
+// Two maintenance tasks with --fast-verifier (no verifier agent call).
+// Task-1 uses grill(1) + executor(1) = 2 agent calls.
+// --max-agent-calls 2: iteration 2 starts with count=2 >= 2, fires
+// budget_exhausted before task-2's grill runs. Loop exits non-zero.
+
+runCase("agent-call budget: exhausted after maxAgentCalls, loop halts", () => {
+  const dir = tmpRepo("agent-call-budget");
+  try {
+    writeState(dir, {
+      version: 1, goal: "Budget smoke", maxIterations: 5, checks: [],
+      defaultDiscoveryWorkflow: "grill-with-docs",
+      tasks: [
+        baseTask({ id: "task-001", kind: "maintenance", title: "First task",  priority: 1, scope: ["out1.txt"] }),
+        baseTask({ id: "task-002", kind: "maintenance", title: "Second task", priority: 2, scope: ["out2.txt"] }),
+      ],
+      decisions: [], assumptions: [], openQuestions: [], blockers: [],
+      promptPolicy: { lessons: [] },
+    });
+
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({
+    verdict: "ready", understanding: "ok", evidence: [], assumptionsStillValid: [],
+    assumptionsChanged: [], scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: [], risks: [], executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+if (content.includes('"id": "task-001"')) { writeFileSync("out1.txt", "done", "utf-8"); process.exit(0); }
+writeFileSync("out2.txt", "done", "utf-8");
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    // grill(1) + executor(1) = 2 calls for task-1. Budget fires at iteration 2 top.
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "5", "--max-agent-calls", "2", "--no-merge", "--no-decision-grill", "--no-post-task-review", "--fast-verifier"], 90_000);
+    assert(r.status !== 0, "expected non-zero exit when agent-call budget exhausted");
+    const events = readEvents(dir);
+    assert(hasEvent(events, "budget_exhausted"), "expected budget_exhausted event");
+    const ev = events.find((e: any) => e.type === "budget_exhausted");
+    assert(ev?.reason?.includes("agent-call budget exhausted"), `expected agent-call budget reason, got: ${ev?.reason}`);
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 22: post-task review needs_human halts loop ─────────────────────────
+// Task passes. Post-task review agent returns needs_human. Loop must exit
+// non-zero without running any further tasks.
+
+runCase("post-task review: needs_human verdict halts loop", () => {
+  const dir = tmpRepo("post-task-nh");
+  try {
+    writeState(dir, baseState(
+      { title: "Smoke task", scope: ["output.txt"], priority: 1 },
+      {
+        maxIterations: 3,
+        tasks: [
+          baseTask({ id: "task-001", title: "Smoke task", scope: ["output.txt"], priority: 1 }),
+          baseTask({ id: "task-002", title: "Should not run", scope: ["other.txt"], priority: 2, dependsOn: ["task-001"] }),
+        ],
+      }
+    ));
+
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+
+if (content.includes("Write task-grill JSON only to:")) {
+  const m = content.match(/Write task-grill JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({
+    verdict: "ready", understanding: "ok", evidence: [], assumptionsStillValid: [],
+    assumptionsChanged: [], scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: [], risks: [], executorInstructions: "proceed"
+  }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write post-task review JSON only to:")) {
+  const m = content.match(/Write post-task review JSON only to: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({
+    verdict: "needs_human",
+    assessment: "completed work revealed a requirement gap that needs human clarification",
+    remainingPlanStillValid: false,
+    suggestedChanges: []
+  }), "utf-8");
+  process.exit(0);
+}
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+if (content.includes('"id": "task-002"')) throw new Error("task-002 must not run after post-task review needs_human");
+writeFileSync("output.txt", "done", "utf-8");
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "3", "--no-merge", "--no-decision-grill"], 90_000);
+    assert(r.status !== 0, "expected non-zero exit when post-task review returns needs_human");
+    const events = readEvents(dir);
+    assert(hasEvent(events, "post_task_review_finished"), "expected post_task_review_finished event");
+    const ev = events.find((e: any) => e.type === "post_task_review_finished");
+    assert(ev?.verdict === "needs_human", `expected verdict=needs_human, got ${ev?.verdict}`);
+    const state = readState(dir);
+    assert(state.tasks.find((t: any) => t.id === "task-002")?.status !== "passed", "task-002 must not pass after post-task review needs_human");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 
 const passed = results.filter((r) => r.ok).length;

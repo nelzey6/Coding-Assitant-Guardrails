@@ -178,11 +178,15 @@ Known gaps before calling the TS runner production-default:
 - goal review: `--goal-review` pass verdict allows completion, `needs_human` halts before finalize-docs
 - post-task review: default `continue` verdict runs after passed tasks
 - post-task review: `replan` verdict blocks stale remaining tasks, calls planner, and continues with replacement task
+- post-task review: `adjust_remaining_tasks` verdict blocks stale tasks, calls planner (phase `post_task_adjustment`), and continues
+- post-task review: `needs_human` verdict halts loop before any dependent task runs
 - architect checkpoint: `continue` verdict proceeds, `replan` verdict calls planner and continues with new task
+- architect checkpoint: `needs_human` verdict halts loop without running further tasks
 - planner from empty task list: plans then executes planned task
 - decision grill: well-formed self-answered decision recorded to `state.decisions` and task passes
 - decision grill: shallow decision (1 option) re-grilled once, then escalates to `needs_human` before executor edits
 - decision grill: low-confidence decision re-grilled once, answered with high confidence on the second pass
+- agent-call budget exhaustion (`budget_exhausted`) via `--max-agent-calls`
 
 Missing TS smoke coverage:
 
@@ -192,7 +196,7 @@ Missing TS smoke coverage:
 - finalize-docs behavior
 - accept/apply/review-branch flows
 - doctor/reset commands
-- runtime/agent-call budget exhaustion
+- runtime budget exhaustion (`--max-runtime-seconds`)
 - policy default adoption
 - clean-tree gate
 
