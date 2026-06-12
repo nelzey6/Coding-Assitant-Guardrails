@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { program } from "commander";
-import { writeFileSync, existsSync, copyFileSync, mkdirSync } from "fs";
+import { writeFileSync, existsSync, copyFileSync, mkdirSync, createWriteStream } from "fs";
 import { join, resolve, dirname } from "path";
 import { loadContext } from "./context/index.js";
 import { loadPolicy } from "./policy/index.js";
@@ -524,6 +524,20 @@ program
       architectCheckpointInterval: parseInt(opts.architectCheckpointInterval ?? "3", 10),
       decisionGrill:               opts.decisionGrill !== false,
     };
+
+    const runsRoot = join(repoRoot, loopConfig.runsRoot ?? DEFAULT_RUNS_ROOT);
+    mkdirSync(runsRoot, { recursive: true });
+    const runTs = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+    const runLogPath = join(runsRoot, `run-${runTs}.log`);
+    const logStream = createWriteStream(runLogPath, { flags: "a" });
+    for (const stream of [process.stdout, process.stderr] as NodeJS.WriteStream[]) {
+      const orig = stream.write.bind(stream);
+      (stream as NodeJS.WriteStream).write = function(chunk: Uint8Array | string, ...rest: unknown[]) {
+        logStream.write(chunk);
+        return (orig as (...a: unknown[]) => boolean)(chunk, ...rest);
+      } as typeof stream.write;
+    }
+    if (process.stdout.isTTY) console.log(`Run log: ${runLogPath}`);
 
     runAgenticLoop(loopConfig).catch((err) => {
       if (err instanceof LoopError) {
