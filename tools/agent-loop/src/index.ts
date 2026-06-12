@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { program } from "commander";
-import { writeFileSync, existsSync } from "fs";
+import { writeFileSync, existsSync, copyFileSync, mkdirSync } from "fs";
 import { join, resolve, dirname } from "path";
 import { loadContext } from "./context/index.js";
 import { loadPolicy } from "./policy/index.js";
@@ -80,6 +80,56 @@ program
     const result = runValidation(ctx);
     printValidateResult(result, { json: !!opts.json });
     if (!result.passed) process.exit(1);
+  });
+
+// ── init ──────────────────────────────────────────────────────────────────────
+
+program
+  .command("init <goal>")
+  .description(
+    "Start a new goal: archives the existing agentic.json (if any) to .agent-runs/archive-<timestamp>.json, then writes a fresh minimal state for the given goal."
+  )
+  .option("--repo <path>", "Path to repo root (default: auto-detected from cwd)")
+  .option("--runs-root <path>", "Event log / run artifact root (default: .agent-runs)")
+  .option("--json", "Output result as JSON")
+  .action((goal: string, opts) => {
+    const repoRoot  = opts.repo     ? resolve(opts.repo)     : detectRepoRoot();
+    const runsRoot  = join(repoRoot, opts.runsRoot ?? DEFAULT_RUNS_ROOT);
+    const stateFile = join(repoRoot, DEFAULT_STATE_FILE);
+
+    let archived   = false;
+    let archivePath = "";
+
+    if (existsSync(stateFile)) {
+      mkdirSync(runsRoot, { recursive: true });
+      const ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+      archivePath = join(runsRoot, `archive-${ts}.json`);
+      copyFileSync(stateFile, archivePath);
+      archived = true;
+    }
+
+    const freshState = {
+      version: 1,
+      goal,
+      maxIterations: 10,
+      checks: [] as string[],
+      defaultDiscoveryWorkflow: "grill-with-docs",
+      tasks: [] as unknown[],
+      decisions: [] as string[],
+      assumptions: [] as string[],
+      openQuestions: [] as string[],
+      blockers: [] as string[],
+      promptPolicy: { lessons: [] as string[] },
+    };
+    writeFileSync(stateFile, JSON.stringify(freshState, null, 2), "utf-8");
+
+    if (opts.json) {
+      console.log(JSON.stringify({ archived, archivePath: archived ? archivePath : null, stateFile }));
+    } else {
+      if (archived) console.log(`Archived previous goal to: ${archivePath}`);
+      console.log(`Initialised new goal in: ${stateFile}`);
+      console.log(`Goal: ${goal}`);
+    }
   });
 
 // ── plan ──────────────────────────────────────────────────────────────────────

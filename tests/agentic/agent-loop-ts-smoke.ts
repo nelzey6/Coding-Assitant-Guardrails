@@ -1897,6 +1897,63 @@ writeFileSync("output.txt", "done", "utf-8");
   }
 });
 
+// ── case 23: init — no prior state ───────────────────────────────────────────
+// agentic-loop init "my goal" in a fresh repo creates agentic.json with the
+// given goal and does not create an archive file.
+
+runCase("init: no prior agentic.json creates fresh state", () => {
+  const dir = tmpRepo("init-fresh");
+  try {
+    git(["commit", "--allow-empty", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["init", "my fresh goal", "--json"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+
+    const out = JSON.parse(r.stdout.trim());
+    assert(out.archived === false, `expected archived=false, got ${out.archived}`);
+    assert(out.archivePath === null, `expected archivePath=null, got ${out.archivePath}`);
+    assert(existsSync(out.stateFile), `stateFile ${out.stateFile} does not exist`);
+
+    const state = JSON.parse(readFileSync(out.stateFile, "utf-8"));
+    assert(state.goal === "my fresh goal", `expected goal, got ${state.goal}`);
+    assert(Array.isArray(state.tasks) && state.tasks.length === 0, "expected empty tasks");
+    assert(!existsSync(join(dir, ".agent-runs")), "no archive dir expected for fresh init");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 24: init — archives existing state ───────────────────────────────────
+// agentic-loop init "new goal" when agentic.json already exists archives the
+// old file to .agent-runs/archive-<timestamp>.json and writes a fresh state.
+
+runCase("init: existing agentic.json is archived and replaced", () => {
+  const dir = tmpRepo("init-archive");
+  try {
+    git(["commit", "--allow-empty", "-m", "initial"], dir);
+
+    // Seed an existing state
+    writeFileSync(join(dir, "agentic.json"), JSON.stringify({ version: 1, goal: "old goal", tasks: [] }), "utf-8");
+
+    const r = runCLI(dir, ["init", "new goal", "--json"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+
+    const out = JSON.parse(r.stdout.trim());
+    assert(out.archived === true, `expected archived=true, got ${out.archived}`);
+    assert(typeof out.archivePath === "string" && out.archivePath.length > 0, "expected archivePath string");
+    assert(existsSync(out.archivePath), `archive file ${out.archivePath} does not exist`);
+
+    const archive = JSON.parse(readFileSync(out.archivePath, "utf-8"));
+    assert(archive.goal === "old goal", `archive should contain old goal, got ${archive.goal}`);
+
+    const state = JSON.parse(readFileSync(out.stateFile, "utf-8"));
+    assert(state.goal === "new goal", `expected new goal, got ${state.goal}`);
+    assert(Array.isArray(state.tasks) && state.tasks.length === 0, "expected empty tasks in fresh state");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── summary ───────────────────────────────────────────────────────────────────
 
 const passed = results.filter((r) => r.ok).length;

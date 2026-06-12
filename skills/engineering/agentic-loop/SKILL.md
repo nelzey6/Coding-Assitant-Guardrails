@@ -132,6 +132,9 @@ Write all artifacts to `.agent-runs/agentic-<timestamp>-<task-id>/` and append e
 The harness spawns a brand-new `pi` process for each executor and verifier call. `pi` is the default tool.
 
 ```powershell
+# Start a new goal — archives existing agentic.json (if any), writes fresh state
+agentic-loop init "refactor the auth module to use JWT"
+
 # Run everything (plan if needed, then execute all tasks)
 agentic-loop run --checks "npm test"
 
@@ -139,8 +142,9 @@ agentic-loop run --checks "npm test"
 agentic-loop run --plan-only
 agentic-loop run                        # resume from the plan
 
-# Use Claude instead of pi
-agentic-loop run --tool claude --checks "npm test"
+# Route expensive phases to a stronger model
+agentic-loop run --planner-command "claude --model claude-opus-4-8 -p {prompt}" \
+                 --command "claude --model claude-sonnet-4-6 -p {prompt}"
 
 # Keep task branches for human review instead of auto-merging
 agentic-loop run --no-merge --checks "npm test"

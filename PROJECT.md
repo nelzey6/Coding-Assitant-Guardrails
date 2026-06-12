@@ -27,6 +27,12 @@ cd tools/agent-loop
 npm run agent -- --help
 npm run agent -- validate
 npm run agent -- run --help
+
+# Start a new goal (archives existing agentic.json if present, writes fresh state)
+npm run agent -- init "my goal here"
+
+# Resume current goal
+npm run agent -- run --no-merge --checks "cd tools/agent-loop && npx tsc --noEmit"
 ```
 
 Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA_CERTS` pointing at a missing Zscaler PEM. The warning does not fail the TS typecheck or smoke suite.
