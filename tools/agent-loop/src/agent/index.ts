@@ -1,6 +1,8 @@
-import { spawnSync } from "child_process";
-import { mkdirSync, readFileSync, appendFileSync } from "fs";
-import { dirname, resolve } from "path";
+import { spawnSync, spawn } from "child_process";
+import { mkdirSync, readFileSync, appendFileSync, createWriteStream, writeFileSync, unlinkSync } from "fs";
+import { dirname, resolve, join } from "path";
+import { tmpdir } from "os";
+import { randomBytes } from "crypto";
 import type { AgenticTask, AgenticState } from "../context/index.js";
 import { runShellScript } from "../tools/shell.js";
 
@@ -42,6 +44,65 @@ function shellCapture(command: string, cwd: string, timeoutSeconds: number): str
   } catch (err) {
     throw toAgentError(err, command);
   }
+}
+
+/**
+ * Run a shell command, streaming output live to stdout AND appending to logPath.
+ * Resolves when the process exits; rejects on non-zero exit or spawn error.
+ */
+function spawnTee(command: string, cwd: string, timeoutSeconds: number, logPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const isWindows = process.platform === "win32";
+    const id = randomBytes(8).toString("hex");
+    const scriptPath = isWindows
+      ? join(tmpdir(), `agentic-${id}.ps1`)
+      : join(tmpdir(), `agentic-${id}.sh`);
+
+    const script = isWindows
+      ? `${command.trimStart().startsWith('"') ? `& ${command}` : command}\nexit $LASTEXITCODE`
+      : command;
+    writeFileSync(scriptPath, script, "utf-8");
+
+    const logStream = createWriteStream(logPath, { flags: "a" });
+    const child = isWindows
+      ? spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath], { cwd, stdio: ["ignore", "pipe", "pipe"] })
+      : spawn("sh", [scriptPath], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(() => {
+        child.kill();
+        reject(new AgentError(`Command timed out after ${timeoutSeconds}s: ${command}`));
+      }, timeoutSeconds * 1000);
+    }
+
+    const onData = (chunk: Buffer) => {
+      process.stdout.write(chunk);
+      logStream.write(chunk);
+    };
+
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onData);
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      logStream.end();
+      try { unlinkSync(scriptPath); } catch { /* ignore */ }
+      reject(new AgentError(`${err.message}: ${command}`));
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      logStream.end(() => {
+        try { unlinkSync(scriptPath); } catch { /* ignore */ }
+        if (code !== 0 && code !== null) {
+          reject(new AgentError(`Command failed with code ${code}: ${command}`));
+        } else {
+          resolve();
+        }
+      });
+    });
+  });
 }
 
 /**
@@ -106,58 +167,34 @@ export function invokeAgent(
 }
 
 /**
- * Invoke an agent and tee all output to logPath.
+ * Invoke an agent, streaming output live to stdout AND teeing to logPath.
  * On error, appends the error message to the log before re-throwing.
  */
-export function invokeAgentWithLog(
+export async function invokeAgentWithLog(
   promptFile: string,
   config: AgentConfig,
   workingDirectory: string,
   logPath: string
-): void {
+): Promise<void> {
   mkdirSync(dirname(logPath), { recursive: true });
 
-  // For the log, we need captured output. Re-run with capture mode.
-  const template = config.commandTemplate;
   const timeout = config.timeoutSeconds ?? 0;
-
-  if (template) {
-    const resolvedPrompt = resolve(promptFile);
-    const command = template.replace("{prompt}", resolvedPrompt);
-    try {
-      const out = shellCapture(command, workingDirectory, timeout);
-      if (out) {
-        process.stdout.write(out + "\n");
-        appendFileSync(logPath, out + "\n", "utf-8");
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      appendFileSync(logPath, `ERROR: ${msg}\n`, "utf-8");
-      throw err;
-    }
-    return;
-  }
-
-  // For named tools (claude/pi) we can only capture via a spawned wrapper;
-  // use the same shellCapture path by composing the command string.
-  const isWindows = process.platform === "win32";
   const resolvedPrompt = resolve(promptFile);
+
   let command: string;
-  if (config.tool === "claude") {
+  if (config.commandTemplate) {
+    command = config.commandTemplate.replace("{prompt}", resolvedPrompt);
+  } else if (config.tool === "claude") {
     const prompt = readFileSync(promptFile, "utf-8").replace(/'/g, "'\\''");
     command = `claude -p '${prompt}'`;
   } else if (config.tool === "pi") {
-    command = isWindows ? `pi -p "@${resolvedPrompt}"` : `pi -p "@${resolvedPrompt}"`;
+    command = `pi -p "@${resolvedPrompt}"`;
   } else {
     throw new AgentError(`--tool custom requires --command`);
   }
 
   try {
-    const out = shellCapture(command, workingDirectory, timeout);
-    if (out) {
-      process.stdout.write(out + "\n");
-      appendFileSync(logPath, out + "\n", "utf-8");
-    }
+    await spawnTee(command, workingDirectory, timeout, logPath);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     appendFileSync(logPath, `ERROR: ${msg}\n`, "utf-8");

@@ -525,15 +525,13 @@ program
       decisionGrill:               opts.decisionGrill !== false,
     };
 
-    try {
-      runAgenticLoop(loopConfig);
-    } catch (err) {
+    runAgenticLoop(loopConfig).catch((err) => {
       if (err instanceof LoopError) {
         console.error(err.message);
         process.exit(err.exitCode);
       }
       throw err;
-    }
+    });
   });
 
 program.parseAsync(process.argv).catch((err) => {
