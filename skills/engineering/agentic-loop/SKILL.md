@@ -157,14 +157,14 @@ agentic-loop last-failure  # most recent failure details
 Before running an autonomous loop on this repository, verify the skill/README consistency:
 
 ```bash
-cd tools/agent-loop && npx tsx src/index.ts validate
+agentic-loop validate
 ```
 
 Stop and report violations if this exits non-zero.
 
 ## Worktree execution
 
-Prefer one git worktree per executable task. The main repo stays clean; the harness creates `.worktrees/<task-id>/` on a dedicated branch, runs the executor there, runs checks, runs the verifier, and only then commits and merges. The harness — not the executor agent — marks tasks passed and merges branches.
+Prefer one git worktree per executable task. The main repo stays clean; the harness creates `.worktrees/<task-id>/` on a dedicated branch, runs any configured worktree bootstrap commands, runs the executor there, runs checks, runs the verifier, and only then commits and merges. The harness — not the executor agent — marks tasks passed and merges branches. Use `--worktree-bootstrap`, `--worktree-bootstrap-ignore`, and `--check-env-file` when a target repo needs ignored local dependencies, generated code, embedded/FPGA tool outputs, SDK setup, or environment variables inside worktrees. Bootstrap is generic shell setup, not Node-specific.
 
 For a full visual walkthrough of every phase and decision point, see [docs/agentic-loop-flow.md](../../../docs/agentic-loop-flow.md).
 

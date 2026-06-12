@@ -33,6 +33,14 @@ npm run agent -- init "my goal here"
 
 # Resume current goal
 npm run agent -- run --no-merge --checks "cd tools/agent-loop && npx tsc --noEmit"
+
+# Run with worktree bootstrap/env support for repos with ignored local artifacts.
+# Bootstrap commands are generic shell commands: they can link deps, source an SDK,
+# generate code, prepare HDL/toolchain outputs, or create any local-only fixture.
+npm run agent -- run --no-merge \
+  --worktree-bootstrap "./scripts/bootstrap-worktree.sh" \
+  --worktree-bootstrap-ignore ".toolchain-cache/**" \
+  --check-env-file .env.local
 ```
 
 Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA_CERTS` pointing at a missing Zscaler PEM. The warning does not fail the TS typecheck or smoke suite.
@@ -48,8 +56,8 @@ Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA
 | `tools/agent-loop/src/prompts/index.ts` | Prompt builders for planner, task-grill, decision-grill, executor, verifier, post-task review, goal-review, architect-checkpoint, finalize-docs; plus `validatePlannerResult`/`validateDecisions` and prompt budget trimming. |
 | `tools/agent-loop/src/state/index.ts` | `agentic.json` schema helpers, task selection, task status changes, attempts, failure history (including `failureAnalysisFile` pointer), planner result merge, and replan tracking (`replanCount`, `lastReplanTaskIds`). |
 | `tools/agent-loop/src/agent/index.ts` | Agent invocation adapters for `claude`, `pi`, and custom command templates. |
-| `tools/agent-loop/src/checks/index.ts` | Validation command execution, timeout handling, structured `METRIC key=value` parsing. |
-| `tools/agent-loop/src/scope/index.ts` | Scope glob matching, out-of-scope diff detection, unscoped task detection, fast-verifier eligibility, high-risk task detection. |
+| `tools/agent-loop/src/checks/index.ts` | Validation command execution, timeout handling, `.env` file loading for checks, structured `METRIC key=value` parsing. |
+| `tools/agent-loop/src/scope/index.ts` | Scope glob matching, out-of-scope diff detection with harness-owned ignore globs, unscoped task detection, fast-verifier eligibility, high-risk task detection. |
 | `tools/agent-loop/src/events/index.ts` | `.agent-runs/events.jsonl` append/load/format helpers. |
 | `tools/agent-loop/src/reporting/index.ts` | Human/JSON output for status, summary, last-failure, why-stuck, doctor, reset, and accept. |
 | `tools/agent-loop/src/policy/index.ts` | Loads workflow policy from `.agent-policy/workflow-policy.json` or `templates/agent-policy/workflow-policy.json`. |
@@ -83,11 +91,12 @@ The current TS run loop is:
 2. If no tasks exist, run planner. Planner must write `planner-result.json` and `grill-transcript.md`.
 3. Pick next runnable task: `pending` or `needs_retry` with passed dependencies.
 4. Create or reuse `.worktrees/<task-id>` on `agentic/<task-id>` or `agentic/review/<task-id>`.
-5. Run task-grill before executor edits.
+5. Run configured worktree bootstrap commands, if any, and mark configured bootstrap artifacts ignored for scope/diff/commit.
+6. Run task-grill before executor edits.
 6. If task-grill returns `ready`, inject its result into executor prompt and run executor.
 7. If task-grill returns `needs_replan`, mark stale task `blocked`, record `task_replan_requested`, enforce replan budget, check for plan convergence, run planner again, and continue to replacement tasks.
 8. If task-grill returns `needs_human` or `blocked`, stop before executor edits.
-9. Run configured checks from state-level `checks`, task `validation`, and CLI `--checks`.
+9. Run configured checks from state-level `checks`, task `validation`, and CLI `--checks`. Checks can load a configured env file. Artifact-only discovery/investigation/zoom-out tasks skip task validation unless extra CLI checks are explicitly provided.
 10. Emit `scope_missing_warning` event and warn if task declares no scope (loop proceeds but diff-scope rail is inactive).
 11. Enforce declared task `scope` by diffing changed files before verifier review.
 12. If `--rebase-before-verify` is set, rebase worktree on loop-start HEAD and re-run checks before the verifier.
@@ -137,6 +146,8 @@ Verdict behavior:
 Current TS rails:
 
 - One task per isolated worktree/branch.
+- Worktree bootstrap commands can prepare ignored local dependencies, generated code, HDL/toolchain outputs, SDK/env links, or other local-only artifacts before task-grill/checks; bootstrap-owned paths are excluded from diff artifacts, scope rail, and commits. This mechanism is target-repo generic and is not specific to Node projects.
+- `run` enforces the policy clean-main-worktree gate when `autonomousLoop.requireCleanMainWorktree` is true. Use `--allow-dirty` only when intentionally running with uncommitted main-worktree changes.
 - Harness owns task status, verifier result handling, commit, merge, and cleanup.
 - Task-grill must pass before executor runs.
 - Tasks with no declared `scope` emit `scope_missing_warning`; the diff-scope rail is inactive for them.
@@ -144,6 +155,7 @@ Current TS rails:
 - Fast verifier is denied unless task kind is low-risk and scope is declared.
 - High-risk tasks can receive multiple adversarial verifier votes.
 - Check/verifier failures retry until budget, then escalate to `needs_human`.
+- Artifact-only discovery/investigation/zoom-out tasks are allowed to prove completion through artifacts/evidence instead of implementation validation commands.
 - On every failure (checks, scope, verifier, rebase-checks), the harness writes `failure-analysis.json` to the run dir with phase, attempt, truncated reason, and diff stat. The path is stored in the task's `failureHistory` and injected into the next task-grill and replan planner prompts to break blind-retry loops.
 - Runtime and agent-call budgets emit `budget_exhausted`.
 - Replan budget (`--max-replans`, default 5) caps how many times task-grill can trigger replanning per session; exhaustion emits `replan_budget_exhausted` and escalates to `needs_human`.
@@ -158,7 +170,6 @@ Current TS rails:
 
 Known gaps before calling the TS runner production-default:
 
-- `run` does not yet enforce the policy clean-main-worktree gate.
 - CLI defaults do not fully honor policy defaults such as retry count and merge mode.
 - `promptPolicy.lessons` exists in state but is not yet updated as structured learning memory.
 
@@ -193,10 +204,15 @@ Known gaps before calling the TS runner production-default:
 - decision grill: shallow decision (1 option) re-grilled once, then escalates to `needs_human` before executor edits
 - decision grill: low-confidence decision re-grilled once, answered with high confidence on the second pass
 - agent-call budget exhaustion (`budget_exhausted`) via `--max-agent-calls`
+- worktree bootstrap artifact ignores do not trigger scope violations
+- `--check-env-file` loads environment variables for validation commands
+- artifact-only `zoom-out` tasks skip task validation commands and rely on artifact/verifier proof
+- `validate` fails on zero discovered skills unless `--allow-empty` is passed
+- `run` blocks dirty main worktrees by default and proceeds with `--allow-dirty`
 
 Missing TS smoke coverage:
 
-- real `claude` / `pi` commands
+- real `claude` / `pi` commands beyond the default adapter path
 - `--rebase-before-verify` gate (requires real multi-commit git scenario)
 - CodeGraph context invocation (requires `codegraph` on PATH)
 - finalize-docs behavior

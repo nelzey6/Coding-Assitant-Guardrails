@@ -73,12 +73,19 @@ program
     "Check README/plugin/skill consistency across all buckets. Exits non-zero on any error."
   )
   .option("--repo <path>", "Path to repo root (default: auto-detected from cwd)")
+  .option("--allow-empty", "Treat a repo with zero discovered skills as success")
   .option("--json", "Output results as JSON")
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
     const ctx = loadContext(repoRoot);
     const result = runValidation(ctx);
     printValidateResult(result, { json: !!opts.json });
+    if (result.checkedSkills === 0 && !opts.allowEmpty) {
+      if (!opts.json) {
+        console.error("No skills were discovered. Run from the skills repository root, pass --repo, or use --allow-empty intentionally.");
+      }
+      process.exit(1);
+    }
     if (!result.passed) process.exit(1);
   });
 
@@ -448,6 +455,9 @@ program
   .option("--max-replans <n>",               "Maximum replans allowed before escalating to needs_human (0 = no limit, default: 5)", "5")
   .option("--verifier-votes <n>",            "Override verifier vote count (0 = auto)", "0")
   .option("--checks <cmd>",                  "Extra check command (repeatable)", collect, [])
+  .option("--worktree-bootstrap <cmd>",      "Bootstrap command run inside each task worktree before agents/checks (repeatable)", collect, [])
+  .option("--worktree-bootstrap-ignore <path>", "Worktree-relative bootstrap artifact ignored by scope/diff/commit (repeatable)", collect, [])
+  .option("--check-env-file <path>",         "Env file loaded for validation checks, relative to worktree or absolute")
   .option("--prompt-budget <level>",         "Prompt context budget: low | medium | high (default: medium)", "medium")
   .option("--merge-mode <mode>",             "ff-only | no-ff | cherry-pick (default: ff-only)", "ff-only")
   .option("--no-commit",                     "Do not commit changes in the worktree after a pass")
@@ -459,6 +469,7 @@ program
   .option("--retry <id>",                    "Retry a specific task id (must be needs_retry or failed)")
   .option("--fast-verifier",                 "Skip the verifier agent for low-risk tasks that pass checks")
   .option("--rebase-before-verify",          "Rebase worktree on loop-start HEAD before verifier; re-runs checks to catch integration issues")
+  .option("--allow-dirty",                   "Proceed even if policy requires a clean main worktree")
   .option("--no-finalize-docs",              "Skip the finalize-docs agent after all tasks pass")
   .option("--goal-review",                   "Run a goal-review agent after all tasks pass; halts with needs_human if gaps detected")
   .option("--no-post-task-review",           "Skip the default plan-validity review after each passed task")
@@ -469,7 +480,10 @@ program
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
 
     const timeout = parseInt(opts.agentTimeout ?? "0", 10);
-    const makeAgent = (template: string): AgentConfig => ({ tool: "custom", commandTemplate: template, timeoutSeconds: timeout });
+    const makeAgent = (template?: string): AgentConfig =>
+      template && template.trim().length > 0
+        ? { tool: "custom", commandTemplate: template, timeoutSeconds: timeout }
+        : { tool: "pi", timeoutSeconds: timeout };
     const defaultCmd = opts.command ?? "";
     const agentConfig:    AgentConfig = makeAgent(defaultCmd);
     const plannerConfig:  AgentConfig = makeAgent(opts.plannerCommand  ?? defaultCmd);
@@ -507,6 +521,9 @@ program
       verifierVotes:       parseInt(opts.verifierVotes    ?? "0",  10),
       checkTimeoutSeconds: parseInt(opts.checkTimeout     ?? "0",  10),
       extraChecks:         (opts.checks as string[]) ?? [],
+      worktreeBootstrap:   (opts.worktreeBootstrap as string[]) ?? [],
+      worktreeBootstrapIgnore: (opts.worktreeBootstrapIgnore as string[]) ?? [],
+      checkEnvFile:        opts.checkEnvFile ?? "",
       budget:              budgetRaw as "low" | "medium" | "high",
       mergeMode:           mergeModeRaw as "ff-only" | "no-ff" | "cherry-pick",
       planOnly:            !!opts.planOnly,
@@ -518,6 +535,7 @@ program
       cleanupPassed:       !!opts.cleanupPassed,
       fastVerifier:                !!opts.fastVerifier,
       rebaseBeforeVerify:          !!opts.rebaseBeforeVerify,
+      allowDirty:                  !!opts.allowDirty,
       finalizeDocs:                opts.finalizeDocs !== false,
       goalReview:                  !!opts.goalReview,
       postTaskReview:              opts.postTaskReview !== false,

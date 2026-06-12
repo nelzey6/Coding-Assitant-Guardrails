@@ -73,9 +73,9 @@ agentic-loop run --checks "npm test"
 `pi` is the default executor. Each task gets a brand-new process — no shared context, no accumulated mistakes across tasks.
 
 ```powershell
-agentic-loop run --tool claude --checks "npm test"   # use Claude instead
-agentic-loop run --plan-only                          # plan, review agentic.json, then run
-agentic-loop run                                      # resume from existing plan
+agentic-loop run --command "claude -p {prompt}" --checks "npm test"  # use Claude instead
+agentic-loop run --plan-only                                         # plan, review agentic.json, then run
+agentic-loop run                                                     # resume from existing plan
 ```
 
 ---

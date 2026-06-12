@@ -46,6 +46,7 @@ import {
   type PromptBudget,
 } from "../prompts/index.js";
 import { loadPolicy, type WorkflowPolicy } from "../policy/index.js";
+import { runShellScript } from "../tools/shell.js";
 
 export interface LoopConfig {
   repoRoot: string;
@@ -76,6 +77,12 @@ export interface LoopConfig {
   maxReplans?: number;
   /** Extra check commands appended to state.checks (from --checks CLI flag). */
   extraChecks?: string[];
+  /** Shell commands run inside each worktree before task-grill/checks. */
+  worktreeBootstrap?: string[];
+  /** Worktree-relative paths owned by bootstrap and ignored by scope/diff/commit. */
+  worktreeBootstrapIgnore?: string[];
+  /** Env file, relative to worktree or absolute, loaded for checks. */
+  checkEnvFile?: string;
   /** Run a goal-review agent after all tasks pass, before finalize-docs. Halts on needs_human. */
   goalReview?: boolean;
   /** Reassess the remaining plan after every passed task. */
@@ -95,6 +102,7 @@ export interface LoopConfig {
   cleanupPassed?: boolean;
   fastVerifier?: boolean;
   finalizeDocs?: boolean;
+  allowDirty?: boolean;
 }
 
 export class LoopError extends Error {
@@ -126,12 +134,57 @@ function timestamp(): string {
   return new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
 }
 
-function writeDiffArtifacts(worktreePath: string, runDir: string): void {
+function pathspecExcludes(paths: string[]): string[] {
+  return expandIgnoredPaths(paths).map((p) => `:(exclude)${p}`);
+}
+
+function expandIgnoredPaths(paths: string[]): string[] {
+  const expanded: string[] = [];
+  for (const path of paths) {
+    const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").trim();
+    if (!normalized) continue;
+    expanded.push(normalized);
+    if (normalized.endsWith("/**")) expanded.push(normalized.slice(0, -3));
+  }
+  return [...new Set(expanded)];
+}
+
+function writeDiffArtifacts(worktreePath: string, runDir: string, ignoredPaths: string[] = []): void {
   try { execFileSync("git", ["-C", worktreePath, "add", "-N", "."], { stdio: "ignore" }); } catch { /* non-fatal */ }
-  const patch = (() => { try { return git(["diff", "HEAD"], worktreePath); } catch { return ""; } })();
-  const stat  = (() => { try { return git(["diff", "--stat", "HEAD"], worktreePath); } catch { return ""; } })();
+  const excludes = pathspecExcludes(ignoredPaths);
+  const diffArgs = excludes.length > 0 ? ["diff", "HEAD", "--", ".", ...excludes] : ["diff", "HEAD"];
+  const statArgs = excludes.length > 0 ? ["diff", "--stat", "HEAD", "--", ".", ...excludes] : ["diff", "--stat", "HEAD"];
+  const patch = (() => { try { return git(diffArgs, worktreePath); } catch { return ""; } })();
+  const stat  = (() => { try { return git(statArgs, worktreePath); } catch { return ""; } })();
   writeFileSync(join(runDir, "diff.patch"), patch, "utf-8");
   writeFileSync(join(runDir, "diff-stat.txt"), stat, "utf-8");
+}
+
+function writeWorktreeExclude(worktreePath: string, ignoredPaths: string[]): void {
+  const normalized = expandIgnoredPaths(ignoredPaths);
+  if (normalized.length === 0) return;
+  const gitDir = git(["rev-parse", "--git-dir"], worktreePath);
+  const infoDir = join(gitDir, "info");
+  mkdirSync(infoDir, { recursive: true });
+  appendFileSync(join(infoDir, "exclude"), `\n# agentic-loop bootstrap artifacts\n${normalized.join("\n")}\n`, "utf-8");
+}
+
+function runWorktreeBootstrap(worktreePath: string, commands: string[], timeoutSeconds: number): string {
+  const effective = [...new Set(commands.filter((c) => c && c.trim().length > 0))];
+  if (effective.length === 0) return "No worktree bootstrap commands configured.";
+  const log: string[] = [];
+  for (const command of effective) {
+    const output = runShellScript(command, worktreePath, timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined, "pipe");
+    log.push(`PASS: ${command}`);
+    if (output) log.push(output);
+  }
+  return log.join("\n");
+}
+
+function isArtifactOnlyTask(task: Task): boolean {
+  const workflow = task.workflow ?? "";
+  const kind = task.kind ?? "";
+  return workflow === "zoom-out" || kind === "discovery" || kind === "investigation";
 }
 
 function writeChecksLog(logPath: string, content: string): void {
@@ -583,6 +636,7 @@ async function runDecisionGrillPhase(
 
 // Main entry point. Throws LoopError with an appropriate exitCode on terminal failures.
 export async function runAgenticLoop(config: LoopConfig): Promise<void> {
+  const policy = loadPolicy(config.repoRoot);
   const cfg: Required<LoopConfig> = {
     stateFile:          config.stateFile          ?? "agentic.json",
     runsRoot:           config.runsRoot           ?? ".agent-runs",
@@ -595,6 +649,9 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     checkTimeoutSeconds: config.checkTimeoutSeconds ?? 0,
     maxReplans:         config.maxReplans         ?? 5,
     extraChecks:        config.extraChecks        ?? [],
+    worktreeBootstrap:  config.worktreeBootstrap  ?? policy.autonomousLoop.worktreeBootstrap ?? [],
+    worktreeBootstrapIgnore: config.worktreeBootstrapIgnore ?? policy.autonomousLoop.worktreeBootstrapIgnore ?? [],
+    checkEnvFile:       config.checkEnvFile       ?? policy.autonomousLoop.checkEnvFile ?? "",
     budget:             config.budget             ?? "medium",
     planOnly:           config.planOnly           ?? false,
     retryTaskId:        config.retryTaskId        ?? "",
@@ -607,6 +664,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     fastVerifier:       config.fastVerifier       ?? false,
     rebaseBeforeVerify:          config.rebaseBeforeVerify          ?? false,
     finalizeDocs:                config.finalizeDocs                ?? false,
+    allowDirty:                  config.allowDirty                  ?? false,
     goalReview:                  config.goalReview                  ?? false,
     postTaskReview:              config.postTaskReview              ?? true,
     architectCheckpointInterval: config.architectCheckpointInterval ?? 3,
@@ -619,12 +677,15 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     verifierAgent:      config.verifierAgent      ?? config.agent,
   };
 
-  const policy = loadPolicy(cfg.repoRoot);
   const runStartTime = Date.now();
   const agentCallCounter = { count: 0 };
   const eventLogPath = join(cfg.repoRoot, cfg.runsRoot, "events.jsonl");
   // Capture HEAD at loop start — used as rebase target when --rebase-before-verify is set.
   const loopBaseRef = (() => { try { return git(["rev-parse", "HEAD"], cfg.repoRoot); } catch { return ""; } })();
+
+  if (policy.autonomousLoop.requireCleanMainWorktree && !cfg.allowDirty && git(["status", "--porcelain"], cfg.repoRoot).length > 0) {
+    throw new LoopError("Main worktree is dirty. Commit/stash first, or pass --allow-dirty.", 2);
+  }
 
   // ── Planner phase ─────────────────────────────────────────────────────────
   {
@@ -720,8 +781,25 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     if (!worktreeExists(worktreePath)) {
       createWorktree(branch, worktreePath, "HEAD", cfg.repoRoot);
     }
+    writeWorktreeExclude(worktreePath, cfg.worktreeBootstrapIgnore);
 
     try {
+      if (cfg.worktreeBootstrap.length > 0) {
+        const bootstrapLog = join(runDir, "bootstrap.log");
+        appendEvent(cfg.repoRoot, "worktree_bootstrap_started", { task: taskId, commands: cfg.worktreeBootstrap, ignored: cfg.worktreeBootstrapIgnore, log: bootstrapLog }, cfg.runsRoot, cfg.stateFile);
+        try {
+          const bootstrapOutput = runWorktreeBootstrap(worktreePath, cfg.worktreeBootstrap, cfg.checkTimeoutSeconds || 120);
+          writeFileSync(bootstrapLog, bootstrapOutput, "utf-8");
+          appendEvent(cfg.repoRoot, "worktree_bootstrap_passed", { task: taskId, log: bootstrapLog }, cfg.runsRoot, cfg.stateFile);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          writeFileSync(bootstrapLog, msg, "utf-8");
+          appendEvent(cfg.repoRoot, "worktree_bootstrap_failed", { task: taskId, reason: msg, log: bootstrapLog }, cfg.runsRoot, cfg.stateFile);
+          setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "bootstrap", reason: msg });
+          copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+          throw new LoopError(`Worktree bootstrap failed for ${taskId}. Worktree retained at ${worktreePath}.\n${msg}`);
+        }
+      }
       // Task-grill: re-check understanding immediately before execution.
       writeCodeGraphContext(codeGraphFile, worktreePath);
       writeTaskGrillPrompt(taskGrillPrompt, {
@@ -827,18 +905,20 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         appendEvent(cfg.repoRoot, "executor_failed", { task: taskId, reason: msg, log: executorLog }, cfg.runsRoot, cfg.stateFile);
         setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "executor", reason: msg, resultFile: verifierResult });
         writeChecksLog(checksLog, "Checks not run because executor failed.");
-        writeDiffArtifacts(worktreePath, runDir);
+        writeDiffArtifacts(worktreePath, runDir, cfg.worktreeBootstrapIgnore);
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         throw new LoopError(`Executor failed for ${taskId}. Worktree retained at ${worktreePath}. ${msg}`);
       }
 
       // Checks
       const baseChecks = getTaskChecks(task, loadState(cfg.repoRoot, cfg.stateFile)!);
-      const taskChecks = [...new Set([...baseChecks, ...cfg.extraChecks])];
+      const taskChecks = isArtifactOnlyTask(task) && cfg.extraChecks.length === 0
+        ? []
+        : [...new Set([...baseChecks, ...cfg.extraChecks])];
       appendEvent(cfg.repoRoot, "checks_started", { task: taskId, commands: taskChecks, log: checksLog }, cfg.runsRoot, cfg.stateFile);
       let checkOutput: string;
       try {
-        checkOutput = invokeChecks(worktreePath, taskChecks, cfg.checkTimeoutSeconds || 120);
+        checkOutput = invokeChecks(worktreePath, taskChecks, cfg.checkTimeoutSeconds || 120, cfg.checkEnvFile);
         writeChecksLog(checksLog, checkOutput);
         const metrics = parseMetricLines(checkOutput);
         appendEvent(cfg.repoRoot, "checks_passed", { task: taskId, log: checksLog, metrics }, cfg.runsRoot, cfg.stateFile);
@@ -850,18 +930,18 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         appendEvent(cfg.repoRoot, "checks_failed", { task: taskId, status: failureStatus, reason: checkOutput, log: checksLog, metrics }, cfg.runsRoot, cfg.stateFile);
         writeFailureAnalysis({ taskId, phase: "checks", attempt: task.attempts ?? 1, rawOutput: checkOutput, worktreePath, outputFile: failureAnalysisFile });
         setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, failureStatus, { at: new Date().toISOString(), phase: "checks", reason: checkOutput, resultFile: verifierResult, failureAnalysisFile });
-        writeDiffArtifacts(worktreePath, runDir);
+        writeDiffArtifacts(worktreePath, runDir, cfg.worktreeBootstrapIgnore);
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         if (failureStatus === "needs_retry") { console.warn(`Checks failed for ${taskId}; marked ${failureStatus}.`); continue; }
         throw new LoopError(`Checks failed for ${taskId}; marked ${failureStatus}. Worktree retained at ${worktreePath}.\n${checkOutput}`);
       }
 
-      writeDiffArtifacts(worktreePath, runDir);
+      writeDiffArtifacts(worktreePath, runDir, cfg.worktreeBootstrapIgnore);
 
       // Scope rail
       const taskScope = getTaskScope(task as any);
       if (taskScope.length > 0) {
-        const outOfScope = getOutOfScopeFiles(worktreePath, taskScope);
+        const outOfScope = getOutOfScopeFiles(worktreePath, taskScope, cfg.worktreeBootstrapIgnore);
         if (outOfScope.length > 0) {
           const scopeReason = `Out-of-scope changes for ${taskId} (declared scope: ${taskScope.join(", ")}): ${outOfScope.join(", ")}`;
           const failureStatus = getFailureStatusForTask(task, "checks", cfg.maxRetries);
@@ -899,7 +979,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           const rebaseCheckCmds = [...new Set([...getTaskChecks(task, loadState(cfg.repoRoot, cfg.stateFile)!), ...cfg.extraChecks])];
           appendEvent(cfg.repoRoot, "rebase_checks_started", { task: taskId, commands: rebaseCheckCmds }, cfg.runsRoot, cfg.stateFile);
           try {
-            checkOutput = invokeChecks(worktreePath, rebaseCheckCmds, cfg.checkTimeoutSeconds || 120);
+            checkOutput = invokeChecks(worktreePath, rebaseCheckCmds, cfg.checkTimeoutSeconds || 120, cfg.checkEnvFile);
             appendEvent(cfg.repoRoot, "rebase_checks_passed", { task: taskId }, cfg.runsRoot, cfg.stateFile);
           } catch (err) {
             checkOutput = err instanceof Error ? err.message : String(err);
@@ -907,7 +987,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
             appendEvent(cfg.repoRoot, "rebase_checks_failed", { task: taskId, status: rebaseCheckFailStatus, reason: checkOutput }, cfg.runsRoot, cfg.stateFile);
             writeFailureAnalysis({ taskId, phase: "rebase_checks", attempt: task.attempts ?? 1, rawOutput: checkOutput, worktreePath, outputFile: failureAnalysisFile });
             setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, rebaseCheckFailStatus, { at: new Date().toISOString(), phase: "rebase_checks", reason: checkOutput, resultFile: verifierResult, failureAnalysisFile });
-            writeDiffArtifacts(worktreePath, runDir);
+            writeDiffArtifacts(worktreePath, runDir, cfg.worktreeBootstrapIgnore);
             copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
             if (rebaseCheckFailStatus === "needs_retry") { console.warn(`Post-rebase checks failed for ${taskId}; marked ${rebaseCheckFailStatus}.`); continue; }
             throw new LoopError(`Post-rebase checks failed for ${taskId}; marked ${rebaseCheckFailStatus}. Worktree retained at ${worktreePath}.\n${checkOutput}`);
@@ -988,7 +1068,9 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       // Handle verdict
       if (verifierResultObj.verdict === "pass") {
         if (cfg.commit) {
-          git(["add", "-A"], worktreePath);
+          const excludes = pathspecExcludes(cfg.worktreeBootstrapIgnore);
+          if (excludes.length > 0) git(["add", "-A", "--", ".", ...excludes], worktreePath);
+          else git(["add", "-A"], worktreePath);
           const changed = (() => { try { return git(["status", "--porcelain"], worktreePath); } catch { return ""; } })();
           if (changed) git(["commit", "-m", `agentic: complete ${taskId}`], worktreePath);
           else console.log(`No changes to commit for ${taskId}.`);
@@ -1078,7 +1160,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       const msg = err instanceof Error ? err.message : String(err);
       setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "harness", reason: msg, resultFile: verifierResult });
       if (!existsSync(checksLog)) writeChecksLog(checksLog, "Checks did not complete before harness failure.");
-      if (!existsSync(join(runDir, "diff.patch"))) writeDiffArtifacts(worktreePath, runDir);
+      if (!existsSync(join(runDir, "diff.patch"))) writeDiffArtifacts(worktreePath, runDir, cfg.worktreeBootstrapIgnore);
       copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
       throw new LoopError(`Task ${taskId} failed in harness; marked needs_human. Worktree retained at ${worktreePath}. ${msg}`);
     }

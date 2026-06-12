@@ -28,13 +28,16 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 ## All flags
 
 ```
---goal <text>                Goal text; used to create agentic.json when missing
---tool <name>                pi | claude | custom  (default: pi)
---command <template>         Custom executor command; {prompt} = prompt file path
---verifier-command <tpl>     Separate verifier command (defaults to --command)
+--command <template>         Custom default agent command; {prompt} = prompt file path. Omit to use pi.
+--planner-command <tpl>      Planner/replan/checkpoint command (defaults to --command or pi)
+--grill-command <tpl>        Task-grill/decision-grill/post-task review command (defaults to --command or pi)
+--executor-command <tpl>     Executor command (defaults to --command or pi)
+--verifier-command <tpl>     Separate verifier command (defaults to --command or pi)
 --checks <cmd>               Extra check command, repeatable; merged with task.validation
+--worktree-bootstrap <cmd>   Bootstrap command run inside each task worktree before agents/checks
+--worktree-bootstrap-ignore <path>  Bootstrap artifact path ignored by scope/diff/commit
+--check-env-file <path>      Env file loaded for validation checks, relative to worktree or absolute
 --state <path>               State file (default: agentic.json)
---policy <path>              Workflow policy file
 --worktree-root <path>       Worktree root (default: .worktrees)
 --runs-root <path>           Run artifact root (default: .agent-runs)
 --max-iterations <n>         Max task loop iterations (default: 10)
@@ -43,9 +46,9 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 --max-agent-calls <n>        Hard cap on total planner+executor+verifier calls (0 = off)
 --max-replans <n>            Max replans before escalating to needs_human (default: 5)
 --verifier-votes <n>         Verifier vote count override (0 = auto: 3 for high-risk, 1 otherwise)
---agent-timeout-seconds <n>  Timeout for each agent invocation (custom commands only)
---check-timeout-seconds <n>  Timeout for each check command
---prompt-budget low|normal|high  How much context to inline in prompts (default: normal)
+--agent-timeout <n>          Timeout for each agent invocation
+--check-timeout <n>          Timeout for each check command
+--prompt-budget low|medium|high  How much context to inline in prompts (default: medium)
 --merge-mode ff-only|no-ff|cherry-pick  Merge strategy (default: ff-only)
 --no-commit                  Don't commit changes after a pass
 --no-merge                   Don't merge after a pass; keep branch for review
@@ -56,20 +59,17 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 --retry <task-id>            Force-retry a specific needs_retry/failed task
 --fast-verifier              Skip verifier agent for low-risk tasks that pass checks
 --rebase-before-verify       Rebase worktree on loop-start HEAD before verifier; re-runs checks
+--allow-dirty                Allow starting run with uncommitted changes in main worktree
 --goal-review                Run goal-review agent after all tasks pass
 --no-post-task-review        Skip the default plan-validity review after each passed task
 --architect-checkpoint-interval <n>  Run architect checkpoint every N passed tasks (0 = off, default: 3)
 --no-decision-grill          Skip the per-task design decision self-interview
 --no-finalize-docs           Skip final PROJECT.md refresh after all tasks pass
---allow-dirty                Allow starting with uncommitted changes in main worktree
---status                     Print state summary and exit (dirty-tree safe)
---summary                    Print compact checkpoint summary and exit (dirty-tree safe)
---last-failure               Print most recent failure context and exit (dirty-tree safe)
---why-stuck                  Explain blocked/needs_human tasks (dirty-tree safe)
---doctor                     Diagnose stale review metadata without mutating state
---reset-task <task-id>       Remove worktree/branch and mark needs_retry for a clean rerun
---accept <task-id>           Integrate a passed no-merge task and clean up
 ```
+
+`validate` also supports `--allow-empty` for intentionally empty skill repos. Without it, validating a repo with zero discovered skills exits non-zero to catch wrong working-directory usage.
+
+Worktree bootstrap is intentionally language/toolchain-neutral. Use it for Node deps, Python venv links, CMake build dirs, embedded SDK setup, FPGA vendor tool outputs, generated HDL artifacts, or any other local-only preparation. Put those local-only paths in `--worktree-bootstrap-ignore` so they do not appear in scope/diff/commit checks.
 
 ---
 

@@ -185,7 +185,10 @@
     "mergeMode": "ff-only",
     "stateFile": "agentic.json",
     "scratchRoot": ".agent-runs",
-    "worktreeRoot": ".worktrees"
+    "worktreeRoot": ".worktrees",
+    "worktreeBootstrap": [],
+    "worktreeBootstrapIgnore": [],
+    "checkEnvFile": ""
   },
   "verifierRules": [
     "Check git diff against the selected task and acceptance criteria.",

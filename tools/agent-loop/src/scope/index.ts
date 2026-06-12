@@ -71,7 +71,7 @@ export function testPathInScope(relativePath: string, scopeGlobs: string[]): boo
   return false;
 }
 
-export function getOutOfScopeFiles(worktreePath: string, scopeGlobs: string[]): string[] {
+export function getOutOfScopeFiles(worktreePath: string, scopeGlobs: string[], ignoreGlobs: string[] = []): string[] {
   // Intent-to-add untracked files so they appear in the diff
   try {
     execFileSync("git", ["-C", worktreePath, "add", "-N", "."], { stdio: "ignore" });
@@ -87,7 +87,13 @@ export function getOutOfScopeFiles(worktreePath: string, scopeGlobs: string[]): 
   } catch {
     return [];
   }
-  return changed.filter((f) => !testPathInScope(f, scopeGlobs));
+  const effectiveIgnoreGlobs = ignoreGlobs.flatMap((glob) => {
+    const normalized = glob.replace(/\\/g, "/").trim();
+    return normalized.endsWith("/**") ? [normalized, normalized.slice(0, -3)] : [normalized];
+  });
+  return changed
+    .filter((f) => !testPathInScope(f, effectiveIgnoreGlobs))
+    .filter((f) => !testPathInScope(f, scopeGlobs));
 }
 
 function getHumanGatePaths(policy: WorkflowPolicy): string[] {

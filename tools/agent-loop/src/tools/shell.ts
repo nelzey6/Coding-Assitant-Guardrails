@@ -32,7 +32,8 @@ export function runShellScript(
   command: string,
   cwd: string,
   timeoutMs: number | undefined,
-  stdio: "inherit" | "pipe" = "pipe"
+  stdio: "inherit" | "pipe" = "pipe",
+  env: NodeJS.ProcessEnv = process.env
 ): string {
   const isWindows = process.platform === "win32";
   const id = randomBytes(8).toString("hex");
@@ -43,7 +44,7 @@ export function runShellScript(
   writeFileSync(scriptPath, isWindows ? psScript(command) : command, "utf-8");
 
   try {
-    const spawnOpts = { cwd, timeout: timeoutMs, encoding: "utf-8" as const };
+    const spawnOpts = { cwd, timeout: timeoutMs, encoding: "utf-8" as const, env };
 
     const result = isWindows
       ? spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],

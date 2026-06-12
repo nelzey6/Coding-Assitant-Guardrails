@@ -1,4 +1,6 @@
 import { runShellScript } from "../tools/shell.js";
+import { existsSync, readFileSync } from "fs";
+import { join, isAbsolute } from "path";
 
 export interface MetricMap {
   [key: string]: number;
@@ -35,18 +37,36 @@ function mergeMetrics(target: MetricMap, source: MetricMap): void {
   }
 }
 
-function runCommand(command: string, cwd: string, timeoutSeconds: number): string {
-  return runShellScript(command, cwd, timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined, "pipe");
+function parseEnvFile(path: string): NodeJS.ProcessEnv {
+  if (!existsSync(path)) return {};
+  const env: NodeJS.ProcessEnv = {};
+  for (const rawLine of readFileSync(path, "utf-8").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    const value = rawValue.replace(/^['"]|['"]$/g, "");
+    env[key] = value;
+  }
+  return env;
+}
+
+function runCommand(command: string, cwd: string, timeoutSeconds: number, env: NodeJS.ProcessEnv): string {
+  return runShellScript(command, cwd, timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined, "pipe", env);
 }
 
 export function invokeChecks(
   workingDirectory: string,
   checksToRun: string[],
-  timeoutSeconds = DEFAULT_CHECK_TIMEOUT_SECONDS
+  timeoutSeconds = DEFAULT_CHECK_TIMEOUT_SECONDS,
+  envFile = ""
 ): string {
   const log: string[] = [];
   const allMetrics: MetricMap = {};
   const effectiveChecks = [...new Set(checksToRun.filter((c) => c && c.trim().length > 0))];
+  const envPath = envFile ? (isAbsolute(envFile) ? envFile : join(workingDirectory, envFile)) : "";
+  const checkEnv = envPath ? { ...process.env, ...parseEnvFile(envPath) } : process.env;
 
   if (effectiveChecks.length === 0) {
     return "No checks configured; agent exit success is the only external validation.\n\nStructured metrics:\nNo structured METRIC lines were emitted.";
@@ -55,7 +75,7 @@ export function invokeChecks(
   for (const check of effectiveChecks) {
     console.log(`Running check in ${workingDirectory}: ${check}`);
     try {
-      const output = runCommand(check, workingDirectory, timeoutSeconds);
+      const output = runCommand(check, workingDirectory, timeoutSeconds, checkEnv);
       if (output) console.log(output);
       mergeMetrics(allMetrics, parseMetricLines(output));
       log.push(`PASS: ${check}`);

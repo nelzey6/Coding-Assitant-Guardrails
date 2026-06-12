@@ -174,13 +174,13 @@ ${body}
   return p;
 }
 
-function runCLI(cwd: string, args: string[], timeout = 60_000): { status: number; stdout: string; stderr: string } {
+function runCLI(cwd: string, args: string[], timeout = 60_000, env: NodeJS.ProcessEnv = process.env): { status: number; stdout: string; stderr: string } {
   // Use node + tsx/dist/cli.mjs directly (no .cmd wrapper) so we can use shell:false
   // and pass quoted --command arguments without the shell re-parsing them.
   const r = spawnSync(
     process.execPath,
     [TSX_CLI_MJS, CLI, ...args],
-    { cwd, encoding: "utf-8", timeout, shell: false, env: { ...process.env, FORCE_COLOR: "0" } }
+    { cwd, encoding: "utf-8", timeout, shell: false, env: { ...env, FORCE_COLOR: "0" } }
   );
   return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
@@ -583,6 +583,130 @@ writeFileSync("allowed/in.txt", "ok", "utf-8");
     assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
     const events = readEvents(dir);
     assert(hasEvent(events, "scope_passed"), "missing scope_passed event");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 3b: worktree bootstrap artifacts are ignored by scope rail ─────────
+
+runCase("worktree bootstrap: ignored artifact does not violate task scope", () => {
+  const dir = tmpRepo("bootstrap-ignore");
+  try {
+    writeState(dir, baseState({ scope: ["allowed/**"] }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+mkdirSync("allowed", { recursive: true });
+writeFileSync("allowed/in.txt", "ok", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, [
+      "run",
+      "--command", fakeCommand(agent),
+      "--worktree-bootstrap", "mkdir -p generated && echo bootstrap > generated/client.txt",
+      "--worktree-bootstrap-ignore", "generated/**",
+      "--max-iterations", "1",
+      "--no-merge",
+    ]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+    const events = readEvents(dir);
+    assert(hasEvent(events, "worktree_bootstrap_passed"), "missing worktree_bootstrap_passed event");
+    assert(!hasEvent(events, "scope_violation"), "bootstrap generated path must not violate scope");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 3c: check env file is loaded for validation ────────────────────────
+
+runCase("checks: --check-env-file loads variables for validation", () => {
+  const dir = tmpRepo("check-env");
+  try {
+    writeFileSync(join(dir, ".env.local"), "SMOKE_TOKEN=from-env-file\n", "utf-8");
+    writeState(dir, baseState({ scope: ["output.txt"], validation: ["node -e \"if (process.env.SMOKE_TOKEN !== 'from-env-file') process.exit(7)\""] }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+writeFileSync("output.txt", "done", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--check-env-file", join(dir, ".env.local"), "--max-iterations", "1", "--no-merge"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 3d: artifact-only task skips implementation validation commands ────
+
+runCase("artifact-only task: zoom-out does not run task validation commands", () => {
+  const dir = tmpRepo("artifact-only");
+  try {
+    writeState(dir, baseState({
+      kind: "investigation",
+      workflow: "zoom-out",
+      scope: [],
+      artifacts: [".agent-runs/notes.md"],
+      validation: ["node -e \"process.exit(9)\""],
+    }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "artifact ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+const tick = String.fromCharCode(96);
+const handoverMatch = content.match(new RegExp("write a concise handover note to " + tick + "([^" + tick + "]+)" + tick));
+if (handoverMatch) {
+  mkdirSync(dirname(handoverMatch[1]), { recursive: true });
+  writeFileSync(handoverMatch[1], "# Handover\\n\\nArtifact-only evidence.", "utf-8");
+}
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    const checksLog = readEvents(dir).find((e) => e.type === "checks_started")?.log;
+    assert(!!checksLog, "missing checks_started log path");
+    const checks = readFileSync(checksLog, "utf-8");
+    assert(checks.includes("No checks configured"), "artifact-only task should skip task validation commands");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }
@@ -1949,6 +2073,63 @@ runCase("init: existing agentic.json is archived and replaced", () => {
     const state = JSON.parse(readFileSync(out.stateFile, "utf-8"));
     assert(state.goal === "new goal", `expected new goal, got ${state.goal}`);
     assert(Array.isArray(state.tasks) && state.tasks.length === 0, "expected empty tasks in fresh state");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 25: validate — zero skills is a failure unless explicit ─────────────
+
+runCase("validate: zero discovered skills fails unless --allow-empty", () => {
+  const dir = tmpRepo("validate-empty");
+  try {
+    git(["commit", "--allow-empty", "-m", "initial"], dir);
+
+    const fail = runCLI(dir, ["validate", "--repo", dir]);
+    assert(fail.status !== 0, "validate should fail when zero skills are discovered");
+    assert(fail.stderr.includes("No skills were discovered"), `expected empty-skills warning, got stderr: ${fail.stderr}`);
+
+    const pass = runCLI(dir, ["validate", "--repo", dir, "--allow-empty"]);
+    assert(pass.status === 0, `validate --allow-empty should pass\nstdout: ${pass.stdout}\nstderr: ${pass.stderr}`);
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 26: run — clean main worktree gate honors --allow-dirty ─────────────
+
+runCase("run: dirty main worktree blocks unless --allow-dirty", () => {
+  const dir = tmpRepo("dirty-gate");
+  try {
+    writeState(dir, baseState({ scope: ["output.txt"] }));
+
+    const agent = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write JSON only to this path:")) {
+  const m = content.match(/Write JSON only to this path: (.+)/);
+  const p = m[1].trim();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  process.exit(0);
+}
+writeFileSync("output.txt", "done", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+    writeFileSync(join(dir, "dirty.txt"), "uncommitted", "utf-8");
+
+    const blocked = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    assert(blocked.status !== 0, "dirty main worktree should block run by default");
+    assert((blocked.stderr + blocked.stdout).includes("Main worktree is dirty"), `expected dirty gate message, got stdout=${blocked.stdout} stderr=${blocked.stderr}`);
+    assert(!existsSync(join(dir, ".worktrees", "task-001")), "dirty gate should stop before creating task worktree");
+
+    const allowed = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge", "--allow-dirty"]);
+    assert(allowed.status === 0, `--allow-dirty should allow run\nstdout: ${allowed.stdout}\nstderr: ${allowed.stderr}`);
+    const state = readState(dir);
+    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }

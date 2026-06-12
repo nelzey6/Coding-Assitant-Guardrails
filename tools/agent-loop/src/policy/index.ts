@@ -29,6 +29,9 @@ export interface AutonomousLoopConfig {
   stateFile?: string;
   scratchRoot?: string;
   worktreeRoot?: string;
+  worktreeBootstrap?: string[];
+  worktreeBootstrapIgnore?: string[];
+  checkEnvFile?: string;
 }
 
 const FALLBACK_POLICY_RELATIVE = "templates/agent-policy/workflow-policy.json";
