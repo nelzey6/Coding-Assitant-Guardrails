@@ -22,7 +22,7 @@ import {
 } from "./reporting/index.js";
 import { loadState, writeState, getTasks, clearTaskReviewState } from "./state/index.js";
 import { runAgenticLoop, LoopError, type LoopConfig } from "./loop/index.js";
-import type { AgentConfig, AgentTool } from "./agent/index.js";
+import type { AgentConfig } from "./agent/index.js";
 
 function collect(val: string, acc: string[]): string[] { return [...acc, val]; }
 
@@ -384,9 +384,11 @@ program
   .option("--state <file>",                  "State file name relative to repo root (default: agentic.json)")
   .option("--runs-root <path>",              "Event log / run artifact root (default: .agent-runs)")
   .option("--worktree-root <path>",          "Worktree root (default: .worktrees)")
-  .option("--tool <name>",                   "Agent tool: pi | claude | custom (default: pi)", "pi")
-  .option("--command <template>",            "Shell command template; {prompt} is replaced with the prompt file path")
-  .option("--verifier-command <template>",   "Separate command template for the verifier agent (defaults to --command)")
+  .option("--command <template>",            "Default agent command; {prompt} is replaced with the prompt file path")
+  .option("--planner-command <template>",    "Command for planner, replan, architect checkpoint, goal review (defaults to --command)")
+  .option("--grill-command <template>",      "Command for task-grill, decision-grill, post-task review (defaults to --command)")
+  .option("--executor-command <template>",   "Command for the executor agent (defaults to --command)")
+  .option("--verifier-command <template>",   "Command for the verifier agent (defaults to --command)")
   .option("--agent-timeout <seconds>",       "Seconds before an agent invocation is killed (0 = none)", "0")
   .option("--check-timeout <seconds>",       "Seconds before a check command is killed (0 = none)", "0")
   .option("--max-iterations <n>",            "Maximum loop iterations (default: 10)", "10")
@@ -416,17 +418,14 @@ program
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
 
-    const agentTool = (opts.tool ?? "pi") as AgentTool;
-    const agentConfig: AgentConfig = {
-      tool: agentTool,
-      commandTemplate: opts.command ?? "",
-      timeoutSeconds: parseInt(opts.agentTimeout ?? "0", 10),
-    };
-    const verifierConfig: AgentConfig = {
-      tool: agentTool,
-      commandTemplate: opts.verifierCommand ?? opts.command ?? "",
-      timeoutSeconds: parseInt(opts.agentTimeout ?? "0", 10),
-    };
+    const timeout = parseInt(opts.agentTimeout ?? "0", 10);
+    const makeAgent = (template: string): AgentConfig => ({ tool: "custom", commandTemplate: template, timeoutSeconds: timeout });
+    const defaultCmd = opts.command ?? "";
+    const agentConfig:    AgentConfig = makeAgent(defaultCmd);
+    const plannerConfig:  AgentConfig = makeAgent(opts.plannerCommand  ?? defaultCmd);
+    const grillConfig:    AgentConfig = makeAgent(opts.grillCommand    ?? defaultCmd);
+    const executorConfig: AgentConfig = makeAgent(opts.executorCommand ?? defaultCmd);
+    const verifierConfig: AgentConfig = makeAgent(opts.verifierCommand ?? defaultCmd);
 
     const mergeModeRaw = opts.mergeMode ?? "ff-only";
     if (!["ff-only", "no-ff", "cherry-pick"].includes(mergeModeRaw)) {
@@ -446,6 +445,9 @@ program
       runsRoot:            opts.runsRoot         ?? DEFAULT_RUNS_ROOT,
       worktreeRoot:        opts.worktreeRoot     ?? DEFAULT_WORKTREE_ROOT,
       agent:               agentConfig,
+      plannerAgent:        plannerConfig,
+      grillAgent:          grillConfig,
+      executorAgent:       executorConfig,
       verifierAgent:       verifierConfig,
       maxIterations:       parseInt(opts.maxIterations    ?? "10", 10),
       maxRetries:          parseInt(opts.maxRetries       ?? "3",  10),

@@ -52,7 +52,15 @@ export interface LoopConfig {
   stateFile?: string;
   runsRoot?: string;
   worktreeRoot?: string;
+  /** Default agent used for any phase that does not have its own override. */
   agent: AgentConfig;
+  /** High-effort planning phases: initial planner, replan, architect checkpoint, goal review. Falls back to agent. */
+  plannerAgent?: AgentConfig;
+  /** Per-task critical-thinking phases: task-grill, decision-grill, post-task review. Falls back to agent. */
+  grillAgent?: AgentConfig;
+  /** Executor phase: the agent that edits files. Falls back to agent. */
+  executorAgent?: AgentConfig;
+  /** Verifier phase. Falls back to agent. */
   verifierAgent?: AgentConfig;
   maxIterations?: number;
   maxRetries?: number;
@@ -185,7 +193,7 @@ function runPlannerPhase(
   appendEvent(cfg.repoRoot, "planner_started", { runDir: plannerRunDir, prompt: promptFile, resultFile, grillTranscript: grillFile }, cfg.runsRoot, cfg.stateFile);
   console.log("=== Agentic planner ===");
   agentCallCounter.count++;
-  invokeAgent(promptFile, cfg.agent, cfg.repoRoot);
+  invokeAgent(promptFile, cfg.plannerAgent, cfg.repoRoot);
 
   if (!existsSync(resultFile)) throw new LoopError(`Planner did not write ${resultFile}`);
   if (!existsSync(grillFile))  throw new LoopError(`Planner did not write ${grillFile}`);
@@ -213,7 +221,7 @@ function runPlannerPhase(
     writeFileSync(repairPrompt, repairContent, "utf-8");
     console.log("=== Agentic planner repair ===");
     agentCallCounter.count++;
-    invokeAgent(repairPrompt, cfg.agent, cfg.repoRoot);
+    invokeAgent(repairPrompt, cfg.plannerAgent, cfg.repoRoot);
     if (!existsSync(resultFile)) throw new LoopError(`Planner repair did not write ${resultFile}`);
     plannerResult = JSON.parse(readFileSync(resultFile, "utf-8")) as Record<string, unknown>;
     errors = [
@@ -251,7 +259,7 @@ function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter: { cou
 
   appendEvent(cfg.repoRoot, "finalize_docs_started", { runDir, prompt: promptFile, summary: summaryFile }, cfg.runsRoot, cfg.stateFile);
   agentCallCounter.count++;
-  invokeAgentWithLog(promptFile, cfg.agent, cfg.repoRoot, logFile);
+  invokeAgentWithLog(promptFile, cfg.plannerAgent, cfg.repoRoot, logFile);
 
   if (!existsSync(summaryFile)) {
     writeFileSync(summaryFile, `# Agentic final summary\n\nFinalizer did not create a summary; inspect ${logFile}.`, "utf-8");
@@ -300,7 +308,7 @@ function runGoalReviewPhase(
   appendEvent(cfg.repoRoot, "goal_review_started", { runDir, prompt: promptFile, resultFile }, cfg.runsRoot, cfg.stateFile);
   console.log("=== Agentic goal review ===");
   agentCallCounter.count++;
-  invokeAgentWithLog(promptFile, cfg.agent, cfg.repoRoot, logFile);
+  invokeAgentWithLog(promptFile, cfg.plannerAgent, cfg.repoRoot, logFile);
 
   if (!existsSync(resultFile)) throw new LoopError(`Goal review agent did not write ${resultFile}`);
   const result = JSON.parse(readFileSync(resultFile, "utf-8")) as GoalReviewResult;
@@ -411,7 +419,7 @@ function runArchitectCheckpointPhase(
   appendEvent(cfg.repoRoot, "architect_checkpoint_started", { runDir, prompt: promptFile, resultFile, passedCount }, cfg.runsRoot, cfg.stateFile);
   console.log(`=== Agentic architect checkpoint (${passedCount} tasks passed) ===`);
   agentCallCounter.count++;
-  invokeAgentWithLog(promptFile, cfg.agent, cfg.repoRoot, logFile);
+  invokeAgentWithLog(promptFile, cfg.plannerAgent, cfg.repoRoot, logFile);
 
   if (!existsSync(resultFile)) throw new LoopError(`Architect checkpoint agent did not write ${resultFile}`);
   const result = JSON.parse(readFileSync(resultFile, "utf-8")) as ArchitectCheckpointResult;
@@ -469,7 +477,7 @@ function runPostTaskReviewPhase(
   appendEvent(cfg.repoRoot, "post_task_review_started", { task: taskId, runDir, prompt: promptFile, resultFile }, cfg.runsRoot, cfg.stateFile);
   console.log(`=== Agentic post-task review: ${taskId} ===`);
   agentCallCounter.count++;
-  invokeAgentWithLog(promptFile, cfg.agent, cfg.repoRoot, logFile);
+  invokeAgentWithLog(promptFile, cfg.grillAgent, cfg.repoRoot, logFile);
 
   if (!existsSync(resultFile)) throw new LoopError(`Post-task review agent did not write ${resultFile}`);
   const result = JSON.parse(readFileSync(resultFile, "utf-8")) as PostTaskReviewResult;
@@ -524,7 +532,7 @@ function runDecisionGrillPhase(
     });
     appendEvent(cfg.repoRoot, "decision_grill_started", { task: task.id, prompt: promptFile, resultFile, reGrill: !!priorShallowFeedback }, cfg.runsRoot, cfg.stateFile);
     agentCallCounter.count++;
-    invokeAgentWithLog(promptFile, cfg.agent, worktreePath, logFile);
+    invokeAgentWithLog(promptFile, cfg.grillAgent, worktreePath, logFile);
     if (!existsSync(resultFile)) throw new LoopError(`Decision grill did not write ${resultFile}`);
     const parsed = JSON.parse(readFileSync(resultFile, "utf-8")) as { decisions?: Record<string, unknown>[] };
     const decisions = parsed.decisions ?? [];
@@ -605,6 +613,9 @@ export function runAgenticLoop(config: LoopConfig): void {
     decisionGrill:               config.decisionGrill               ?? true,
     repoRoot:           config.repoRoot,
     agent:              config.agent,
+    plannerAgent:       config.plannerAgent       ?? config.agent,
+    grillAgent:         config.grillAgent         ?? config.agent,
+    executorAgent:      config.executorAgent      ?? config.agent,
     verifierAgent:      config.verifierAgent      ?? config.agent,
   };
 
@@ -730,7 +741,7 @@ export function runAgenticLoop(config: LoopConfig): void {
       });
       appendEvent(cfg.repoRoot, "task_grill_started", { task: taskId, prompt: taskGrillPrompt, resultFile: taskGrillResult, log: taskGrillLog }, cfg.runsRoot, cfg.stateFile);
       agentCallCounter.count++;
-      invokeAgentWithLog(taskGrillPrompt, cfg.agent, worktreePath, taskGrillLog);
+      invokeAgentWithLog(taskGrillPrompt, cfg.grillAgent, worktreePath, taskGrillLog);
       if (!existsSync(taskGrillResult)) throw new LoopError(`Task grill did not write ${taskGrillResult}`);
       const taskGrillResultObj = JSON.parse(readFileSync(taskGrillResult, "utf-8")) as TaskGrillResult;
       appendEvent(cfg.repoRoot, "task_grill_finished", { task: taskId, verdict: taskGrillResultObj.verdict, resultFile: taskGrillResult, understanding: taskGrillResultObj.understanding }, cfg.runsRoot, cfg.stateFile);
@@ -809,7 +820,7 @@ export function runAgenticLoop(config: LoopConfig): void {
       appendEvent(cfg.repoRoot, "executor_started", { task: taskId, prompt: executorPrompt, log: executorLog }, cfg.runsRoot, cfg.stateFile);
       try {
         agentCallCounter.count++;
-        invokeAgentWithLog(executorPrompt, cfg.agent, worktreePath, executorLog);
+        invokeAgentWithLog(executorPrompt, cfg.executorAgent, worktreePath, executorLog);
         appendEvent(cfg.repoRoot, "executor_passed", { task: taskId, log: executorLog }, cfg.runsRoot, cfg.stateFile);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
