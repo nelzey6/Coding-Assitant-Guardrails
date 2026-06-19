@@ -97,6 +97,8 @@ export interface LoopConfig {
   retryTaskId?: string;
   commit?: boolean;
   merge?: boolean;
+  /** After all tasks pass, copy changed files from the run worktree into the main tree as unstaged changes. Default: true. */
+  apply?: boolean;
   mergeMode?: "ff-only" | "no-ff" | "cherry-pick";
   reviewBranchMode?: boolean;
   autoAcceptPassed?: boolean;
@@ -191,6 +193,44 @@ function isArtifactOnlyTask(task: Task): boolean {
 function writeChecksLog(logPath: string, content: string): void {
   mkdirSync(dirname(logPath), { recursive: true });
   writeFileSync(logPath, content, "utf-8");
+}
+
+// After all tasks pass: apply run worktree changes to main tree.
+// With cfg.apply (default): copy changed files as unstaged changes in the main tree, delete the run branch + worktree.
+// With cfg.merge: merge the run branch into main instead.
+function applyRunWorktree(cfg: Required<LoopConfig>, runBranch: string, runWorktreePath: string): void {
+  if (!worktreeExists(runWorktreePath)) return;
+
+  if (cfg.merge) {
+    const branchHead = (() => { try { return git(["rev-parse", runBranch], cfg.repoRoot); } catch { return ""; } })();
+    const mainHead   = (() => { try { return git(["rev-parse", "HEAD"],    cfg.repoRoot); } catch { return ""; } })();
+    if (branchHead && branchHead !== mainHead) {
+      if      (cfg.mergeMode === "ff-only")     git(["merge", "--ff-only", runBranch], cfg.repoRoot);
+      else if (cfg.mergeMode === "no-ff")       git(["merge", "--no-ff", runBranch, "-m", `agentic: merge ${runBranch}`], cfg.repoRoot);
+      else if (cfg.mergeMode === "cherry-pick") git(["cherry-pick", runBranch], cfg.repoRoot);
+      syncCodeGraph(cfg.repoRoot);
+    }
+    removeWorktree(runWorktreePath, cfg.repoRoot);
+    try { git(["branch", "-D", runBranch], cfg.repoRoot); } catch { /* non-fatal */ }
+    return;
+  }
+
+  if (cfg.apply) {
+    // Checkout the run branch files into the main working tree as unstaged changes.
+    try {
+      git(["checkout", runBranch, "--", "."], cfg.repoRoot);
+      // Unstage everything so the user sees clean unstaged diffs.
+      git(["restore", "--staged", "."], cfg.repoRoot);
+      syncCodeGraph(cfg.repoRoot);
+      console.log(`Applied changes from ${runBranch} to main working tree as unstaged changes.`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`apply failed, worktree retained at ${runWorktreePath}: ${msg}`);
+      return;
+    }
+    removeWorktree(runWorktreePath, cfg.repoRoot);
+    try { git(["branch", "-D", runBranch], cfg.repoRoot); } catch { /* non-fatal */ }
+  }
 }
 
 function appendProgress(runsRoot: string, taskId: string, summary: string, handoverFile: string): void {
@@ -656,8 +696,9 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     budget:             config.budget             ?? "medium",
     planOnly:           config.planOnly           ?? false,
     retryTaskId:        config.retryTaskId        ?? "",
-    commit:             config.commit             ?? false,
+    commit:             config.commit             ?? true,
     merge:              config.merge              ?? false,
+    apply:              config.apply              ?? true,
     mergeMode:          config.mergeMode          ?? "ff-only",
     reviewBranchMode:   config.reviewBranchMode   ?? false,
     autoAcceptPassed:   config.autoAcceptPassed   ?? false,
@@ -702,6 +743,14 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
   let passedSinceLastCheckpoint = 0;
   if (cfg.planOnly) { console.log("<promise>PLANNED</promise>"); return; }
 
+  // ── Single run worktree (shared across all tasks) ─────────────────────────
+  const runTs0 = timestamp();
+  const runBranch     = `agentic/run-${runTs0}`;
+  const runWorktreePath = join(cfg.repoRoot, cfg.worktreeRoot, `run-${runTs0}`);
+  createWorktree(runBranch, runWorktreePath, "HEAD", cfg.repoRoot);
+  writeWorktreeExclude(runWorktreePath, cfg.worktreeBootstrapIgnore);
+  appendEvent(cfg.repoRoot, "run_worktree_created", { branch: runBranch, worktree: runWorktreePath }, cfg.runsRoot, cfg.stateFile);
+
   // ── Execution loop ────────────────────────────────────────────────────────
   for (let iteration = 1; iteration <= cfg.maxIterations; iteration++) {
 
@@ -743,6 +792,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       }
       if (cfg.goalReview) await runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
       if (cfg.finalizeDocs && cfg.merge) await runFinalizeDocsPhase(cfg, agentCallCounter);
+      applyRunWorktree(cfg, runBranch, runWorktreePath);
       console.log("<promise>COMPLETE</promise>");
       return;
     }
@@ -750,8 +800,8 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     // Setup run directory and paths
     const taskId   = task.id;
     const safeId   = safeSlug(taskId);
-    const branch   = cfg.reviewBranchMode ? `agentic/review/${safeId}` : `agentic/${safeId}`;
-    const worktreePath = join(cfg.repoRoot, cfg.worktreeRoot, safeId);
+    const branch   = runBranch;
+    const worktreePath = runWorktreePath;
     const ts         = timestamp();
     const runDir     = join(cfg.repoRoot, cfg.runsRoot, `agentic-${ts}-${safeId}`);
     const taskGrillPrompt = join(runDir, "task-grill.md");
@@ -778,10 +828,6 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     task = getTasks(loadState(cfg.repoRoot, cfg.stateFile)!).find((t) => t.id === taskId)!;
     setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "running");
 
-    // Ensure worktree
-    if (!worktreeExists(worktreePath)) {
-      createWorktree(branch, worktreePath, "HEAD", cfg.repoRoot);
-    }
     writeWorktreeExclude(worktreePath, cfg.worktreeBootstrapIgnore);
 
     try {
@@ -1074,36 +1120,10 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           if (excludes.length > 0) git(["add", "-A", "--", ".", ...excludes], worktreePath);
           else git(["add", "-A"], worktreePath);
           const changed = (() => { try { return git(["status", "--porcelain"], worktreePath); } catch { return ""; } })();
-          if (changed) git(["commit", "-m", `agentic: complete ${taskId}`], worktreePath);
+          if (changed) git(["commit", "-m", `agentic: ${taskId}`], worktreePath);
           else console.log(`No changes to commit for ${taskId}.`);
         }
-        if (cfg.merge) {
-          const branchHead = git(["rev-parse", branch], cfg.repoRoot);
-          const mainHead   = git(["rev-parse", "HEAD"], cfg.repoRoot);
-          if (branchHead !== mainHead) {
-            if      (cfg.mergeMode === "ff-only")     git(["merge", "--ff-only", branch], cfg.repoRoot);
-            else if (cfg.mergeMode === "no-ff")       git(["merge", "--no-ff", branch, "-m", `agentic: merge ${taskId}`], cfg.repoRoot);
-            else if (cfg.mergeMode === "cherry-pick") git(["cherry-pick", branch], cfg.repoRoot);
-            syncCodeGraph(cfg.repoRoot);
-          } else {
-            console.log(`No tracked branch changes to merge for ${taskId}.`);
-          }
-        }
-        if (cfg.reviewBranchMode) setTaskPassed(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, verifierResultObj, branch, worktreePath);
-        else setTaskPassed(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, verifierResultObj);
-
-        if (!cfg.merge && cfg.autoAcceptPassed) {
-          // auto-accept: integrate + clean up inline
-          try {
-            git(["merge", "--ff-only", branch], cfg.repoRoot);
-            if (worktreeExists(worktreePath)) removeWorktree(worktreePath, cfg.repoRoot);
-            git(["branch", "-D", branch], cfg.repoRoot);
-          } catch (err) {
-            copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
-            const msg = err instanceof Error ? err.message : String(err);
-            throw new LoopError(`Auto-accept failed for ${taskId}. Worktree retained at ${worktreePath}. ${msg}`);
-          }
-        }
+        setTaskPassed(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, verifierResultObj);
 
         // Write handover if executor didn't
         if (!existsSync(handoverFile)) {
@@ -1128,7 +1148,6 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         appendEvent(cfg.repoRoot, "task_handover_written", { task: taskId, path: handoverFile }, cfg.runsRoot, cfg.stateFile);
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         appendProgress(join(cfg.repoRoot, cfg.runsRoot), taskId, verifierResultObj.summary ?? "", handoverFile);
-        if (cfg.cleanupPassed && worktreeExists(worktreePath)) removeWorktree(worktreePath, cfg.repoRoot);
 
         if (cfg.postTaskReview) {
           await runPostTaskReviewPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef, taskId, runDir, verifierResult, handoverFile);
@@ -1141,7 +1160,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           await runArchitectCheckpointPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef);
         }
 
-        if (cfg.retryTaskId) { console.log("<promise>COMPLETE</promise>"); return; }
+        if (cfg.retryTaskId) { applyRunWorktree(cfg, runBranch, runWorktreePath); console.log("<promise>COMPLETE</promise>"); return; }
 
       } else if (verifierResultObj.verdict === "needs_human") {
         writeFailureAnalysis({ taskId, phase: "verifier", attempt: task.attempts ?? 1, rawOutput: [verifierResultObj.summary ?? "", ...(verifierResultObj.issues ?? [])].filter(Boolean).join("\n"), worktreePath, outputFile: failureAnalysisFile });
@@ -1177,6 +1196,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     }
     if (cfg.goalReview) await runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
     if (cfg.finalizeDocs && cfg.merge) await runFinalizeDocsPhase(cfg, agentCallCounter);
+    applyRunWorktree(cfg, runBranch, runWorktreePath);
     console.log("<promise>COMPLETE</promise>");
     return;
   }

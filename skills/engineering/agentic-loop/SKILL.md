@@ -112,10 +112,10 @@ Do not copy these skills' detailed procedures into loop prompts. Tell the agent 
 
 ### Supported executors
 
-The harness has no built-in default — you must always pass `--command`. Two executors are supported:
+The harness auto-detects `claude` or `pi` on PATH — no `--command` needed in most cases. Override with `--command` when using a specific model or non-standard binary.
 
-- **`claude`** — Claude Code CLI (`claude -p {prompt}`). Use this when running inside Claude Code or any environment where `claude` is on PATH.
-- **`pi`** — Pi CLI (`pi -p {prompt}`). Use this when Pi is installed.
+- **`claude`** — Claude Code CLI, auto-detected if on PATH.
+- **`pi`** — Pi CLI, used as fallback if `claude` is not found.
 
 ### You are inside Claude Code right now
 
@@ -123,35 +123,30 @@ Invoke the harness directly — do not do any planning, reading, or execution in
 
 ```bash
 agentic-loop init "the goal here"
-agentic-loop run --command "claude -p {prompt}" --checks "your check command"
+agentic-loop run --checks "your check command"
 ```
 
-The harness owns all phases. Claude Code's only job is to run these two commands.
+After all tasks pass, changed files are applied to the main working tree as **unstaged changes** so you can review, stage, and commit manually. Claude Code's only job is to run these two commands.
 
 ### From a terminal
 
-The harness spawns a brand-new agent process for each executor and verifier call. Pass `--command` to select the executor.
-
 ```powershell
-# Start a new goal — archives existing agentic.json (if any), writes fresh state
+# Start a new goal
 agentic-loop init "refactor the auth module to use JWT"
 
-# Run everything with claude as the executor
-agentic-loop run --command "claude -p {prompt}" --checks "npm test"
-
-# Run with pi as the executor
-agentic-loop run --command "pi -p {prompt}" --checks "npm test"
+# Run — auto-detects claude or pi; applies result as unstaged changes at end
+agentic-loop run --checks "npm test"
 
 # Plan only — review agentic.json before executing
-agentic-loop run --command "claude -p {prompt}" --plan-only
-agentic-loop run --command "claude -p {prompt}"   # resume from the plan
+agentic-loop run --plan-only
+agentic-loop run              # resume from the plan
 
-# Route expensive phases to a stronger model
+# Opt into merge instead of apply (commits run branch into main)
+agentic-loop run --merge --checks "npm test"
+
+# Override executor or route expensive phases to a stronger model
 agentic-loop run --planner-command "claude --model claude-opus-4-8 -p {prompt}" \
                  --command "claude --model claude-sonnet-4-6 -p {prompt}"
-
-# Keep task branches for human review instead of auto-merging
-agentic-loop run --command "claude -p {prompt}" --no-merge --checks "npm test"
 ```
 
 Inspect a running or stuck loop:

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { program } from "commander";
 import { writeFileSync, existsSync, copyFileSync, mkdirSync, createWriteStream } from "fs";
+import { execFileSync } from "child_process";
 import { join, resolve, dirname } from "path";
 import { loadContext } from "./context/index.js";
 import { loadPolicy } from "./policy/index.js";
@@ -461,8 +462,9 @@ program
   .option("--prompt-budget <level>",         "Prompt context budget: low | medium | high (default: medium)", "medium")
   .option("--merge-mode <mode>",             "ff-only | no-ff | cherry-pick (default: ff-only)", "ff-only")
   .option("--no-commit",                     "Do not commit changes in the worktree after a pass")
-  .option("--no-merge",                      "Do not merge the worktree branch back after a pass")
-  .option("--review-branch",                 "Keep changes on a review branch instead of merging (implies --no-merge)")
+  .option("--no-apply",                      "Do not apply run worktree changes to main tree at end (default: apply)")
+  .option("--merge",                         "Merge the run branch into main instead of applying as unstaged changes")
+  .option("--review-branch",                 "Keep changes on a review branch instead of merging (implies --no-apply)")
   .option("--auto-accept-passed",            "Automatically integrate and clean up passed tasks")
   .option("--cleanup-passed",                "Remove the worktree after a task passes")
   .option("--plan-only",                     "Run the planner then exit without executing tasks")
@@ -484,7 +486,19 @@ program
       template && template.trim().length > 0
         ? { tool: "custom", commandTemplate: template, timeoutSeconds: timeout }
         : { tool: "pi", timeoutSeconds: timeout };
-    const defaultCmd = opts.command ?? "";
+
+    // Auto-detect executor command if --command not supplied.
+    const detectDefaultCommand = (): string => {
+      if (opts.command && (opts.command as string).trim().length > 0) return opts.command as string;
+      for (const [bin, flag] of [["claude", "-p"], ["pi", "-p"]] as [string, string][]) {
+        try {
+          execFileSync(bin, ["--version"], { stdio: "ignore" });
+          return `${bin} ${flag} {prompt}`;
+        } catch { /* try next */ }
+      }
+      throw new LoopError("No executor found. Install 'claude' or 'pi', or pass --command.");
+    };
+    const defaultCmd = detectDefaultCommand();
     const agentConfig:    AgentConfig = makeAgent(defaultCmd);
     const plannerConfig:  AgentConfig = makeAgent(opts.plannerCommand  ?? defaultCmd);
     const grillConfig:    AgentConfig = makeAgent(opts.grillCommand    ?? defaultCmd);
@@ -529,7 +543,8 @@ program
       planOnly:            !!opts.planOnly,
       retryTaskId:         opts.retry            ?? "",
       commit:              opts.commit           !== false,
-      merge:               opts.merge            !== false && !opts.reviewBranch,
+      apply:               opts.apply            !== false && !opts.merge && !opts.reviewBranch,
+      merge:               !!opts.merge && !opts.reviewBranch,
       reviewBranchMode:    !!opts.reviewBranch,
       autoAcceptPassed:    !!opts.autoAcceptPassed,
       cleanupPassed:       !!opts.cleanupPassed,
