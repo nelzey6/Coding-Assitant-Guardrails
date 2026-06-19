@@ -150,6 +150,7 @@ Current TS rails:
 
 - All tasks share one run worktree/branch (`agentic/run-<timestamp>`); tasks chain via commits on that branch.
 - Worktree bootstrap commands can prepare ignored local dependencies, generated code, HDL/toolchain outputs, SDK/env links, or other local-only artifacts before task-grill/checks; bootstrap-owned paths are excluded from diff artifacts, scope rail, and commits. This mechanism is target-repo generic and is not specific to Node projects.
+- `run` refuses to start implicitly when `agentic.json` contains a task still marked `running`; it prints the last event/run directory and asks the operator to choose `reset-task <id> --apply`, `run --continue`, or `run --new-run` explicitly. This prevents accidental new run branches when the operator expected to resume an interrupted loop.
 - `run` enforces the policy clean-main-worktree gate when `autonomousLoop.requireCleanMainWorktree` is true. Use `--allow-dirty` only when intentionally running with uncommitted main-worktree changes.
 - Harness owns task status, verifier result handling, commit, merge, and cleanup.
 - Task-grill must pass before executor runs.

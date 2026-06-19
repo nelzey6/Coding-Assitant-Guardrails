@@ -61,6 +61,30 @@ function detectRepoRoot(): string {
   return process.cwd();
 }
 
+function failOnInterruptedRun(repoRoot: string, stateFile: string, runsRoot: string, allowContinue: boolean, allowNewRun: boolean): void {
+  if (allowContinue || allowNewRun) return;
+
+  const state = loadState(repoRoot, stateFile);
+  const runningTask = state?.tasks?.find((task) => task.status === "running");
+  if (!runningTask) return;
+
+  const events = loadEvents(repoRoot, runsRoot);
+  const lastTaskEvent = [...events].reverse().find((event) => event.task === runningTask.id);
+  const lastEvent = lastTaskEvent ?? events.at(-1);
+  const lastType = lastEvent?.type ?? "unknown";
+  const runDir = (lastEvent as { runDir?: string } | undefined)?.runDir ?? runningTask.lastRunDir ?? "unknown";
+
+  console.error(`Found interrupted agentic run: task '${runningTask.id}' is still marked running.`);
+  console.error(`Last event: ${lastType}`);
+  console.error(`Run directory: ${runDir}`);
+  console.error("");
+  console.error("Refusing to start another run implicitly. Choose one:");
+  console.error(`  npm run agent -- reset-task ${runningTask.id} --apply`);
+  console.error("  npm run agent -- run --continue   # acknowledge and resume with the existing state/worktree");
+  console.error("  npm run agent -- run --new-run    # intentionally bypass this guard");
+  process.exit(2);
+}
+
 program
   .name("agent")
   .description("TypeScript CLI for validation, planning, and task-grilled autonomous agent loops")
@@ -465,6 +489,8 @@ program
   .option("--no-apply",                      "Do not apply run worktree changes to main tree at end (default: apply)")
   .option("--merge",                         "Merge the run branch into main instead of applying as unstaged changes")
   .option("--review-branch",                 "Keep changes on a review branch instead of merging (implies --no-apply)")
+  .option("--continue",                      "Acknowledge an interrupted running task and resume with the existing state/worktree")
+  .option("--new-run",                       "Start intentionally despite an interrupted running task in agentic.json")
   .option("--auto-accept-passed",            "Automatically integrate and clean up passed tasks")
   .option("--cleanup-passed",                "Remove the worktree after a task passes")
   .option("--plan-only",                     "Run the planner then exit without executing tasks")
@@ -480,6 +506,7 @@ program
   .option("--no-decision-grill",             "Skip the per-task grill-with-docs self-interview (on by default)")
   .action((opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
+    failOnInterruptedRun(repoRoot, opts.state ?? DEFAULT_STATE_FILE, opts.runsRoot ?? DEFAULT_RUNS_ROOT, !!opts.continue, !!opts.newRun);
 
     const timeout = parseInt(opts.agentTimeout ?? "0", 10);
     const makeAgent = (template?: string): AgentConfig =>
