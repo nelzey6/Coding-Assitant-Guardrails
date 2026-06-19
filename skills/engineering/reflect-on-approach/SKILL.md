@@ -1,6 +1,6 @@
 ---
 name: reflect-on-approach
-description: Challenge and refine a technical approach from a fresh perspective before or during complex implementation work, and reassess whether a remaining plan is still valid after material discoveries. Use when a task is architecturally significant, cross-module, assumption-heavy, costly to reverse, or when the user asks to reassess, readjust, reconfirm, reflect, or reconsider an approach.
+description: Challenge and refine a technical approach from a fresh perspective before complex implementation work, and reassess whether a remaining plan is still valid after material discoveries. Use when a task is architecturally significant, cross-module, assumption-heavy, costly to reverse, or when the user asks to reassess, readjust, reconfirm, reflect, or reconsider an approach.
 ---
 
 # Reflect on Approach
@@ -18,8 +18,9 @@ Read the goal, task, acceptance criteria, repository guidance, relevant source a
 Keep these scopes separate:
 
 - `stance`: refine the technical approach before edits begin.
-- `checkpoint`: reassess the current task's stance after a planned implementation milestone.
 - `plan`: reassess pending tasks after a material outcome or discovery.
+
+If the approach naturally has milestones, prefer splitting them into independently verifiable tasks so the normal task-grill, verifier, and post-task plan review can run at task boundaries.
 
 ## Stance mode
 
@@ -36,17 +37,6 @@ Challenge it from a genuinely different perspective:
 Return `reconfirm`, `readjust`, `reassess`, or `needs_human`. `readjust` must provide a revised stance. `reassess` means more repository evidence is required. Do not edit implementation files in stance mode.
 
 In iterative rounds, respond to the previous critique rather than repeating it. Stop at the caller's round limit or convergence rule.
-
-## Checkpoint mode
-
-At each predefined milestone, compare actual evidence with the approved stance. Return:
-
-- `continue`: evidence supports the stance.
-- `adjust`: revise only the current task's approach or remaining checkpoints.
-- `needs_plan_review`: discoveries may invalidate pending tasks.
-- `needs_human`: continuing requires a decision the agent must not invent.
-
-Do not reorder, replace, or create pending tasks in checkpoint mode.
 
 ## Plan mode
 
@@ -65,7 +55,6 @@ Produce a structured result containing:
 - `perspectives_considered`
 - `recommended_changes`
 - `unresolved_risks`
-- `needs_plan_review`
 - `next_action`
 
 Recommendations must cite concrete repository evidence. Reconfirmation must explain why the challenged stance survived; never return a bare approval.

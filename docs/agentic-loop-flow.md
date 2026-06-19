@@ -22,7 +22,7 @@ Output:
 - tasks and dependencies
 - complexity: low | medium | high
 - complexity reasons
-- reflection checkpoint metadata
+- independently verifiable task boundaries
 State: planning → execution
   │
   ▼
@@ -44,22 +44,15 @@ Output: approved implementation stance
 Skill: tdd | diagnose | improve-codebase-architecture | zoom-out | etc.
 State: task running
   │
-  ├── planned milestone reached
-  │       ▼
-  │   [6. CHECKPOINT REFLECTION — PLANNED]
-  │   Skill: reflect-on-approach, checkpoint mode
-  │   Verdicts: continue | adjust | needs_plan_review | needs_human
-  │   Note: metadata exists; execution requires a future resumable executor lifecycle.
-  │
   ▼
-[7. VERIFICATION]
+[6. VERIFICATION]
 Agent: verifier
 Question: Was the task implemented correctly?
 Uses: acceptance criteria, checks, diff/scope, human gates
 Verdicts: pass | fail | needs_human
   │
   ▼
-[8. PLAN REFLECTION]
+[7. PLAN REFLECTION]
 Skill: reflect-on-approach, plan mode
 Current trigger: after every passed task unless disabled
 Question: Is the remaining plan still correct?
@@ -68,7 +61,7 @@ Verdicts: continue | adjust_remaining_tasks | replan | needs_human
   ├── adjust/replan → block stale pending tasks → planner creates replacements
   └── continue → select next task
   ▼
-[9. GOAL REVIEW]
+[8. GOAL REVIEW]
 Optional final cumulative review
 Question: Does completed work satisfy the original goal?
 State: complete | needs_human
@@ -79,7 +72,7 @@ State: complete | needs_human
 | Phase | Owns | Does not own |
 | --- | --- | --- |
 | `grill-with-docs` | Goal, requirements, terminology, acceptance criteria | Technical implementation stance |
-| Planner | Task graph, scope, workflow, complexity, checkpoint metadata | Execution |
+| Planner | Task graph, scope, workflow, complexity, task boundaries | Execution |
 | Task-grill | Current readiness, scope, safety, stale assumptions | Architecture refinement |
 | Stance reflection | Iterative technical approach refinement | Requirements or file edits |
 | Workflow executor | One approved task | Status, merge, plan mutation |
@@ -89,7 +82,7 @@ State: complete | needs_human
 
 ## Complexity and reflection
 
-The planner proposes `complexity`, `complexityReasons`, and optional `reflectionCheckpoints`. The harness may escalate complexity but never lower the proposal. Architecture work, broad scope, multiple dependencies, and high-risk scope can force `high`.
+The planner proposes `complexity` and `complexityReasons`. The harness may escalate complexity but never lower the proposal. Architecture work, broad scope, multiple dependencies, and high-risk scope can force `high`. High-complexity work should be split into independently verifiable dependent tasks instead of intra-task milestones.
 
 Before a high-complexity executor runs, fresh stance agents challenge ownership, seams, assumptions, reversibility, sequence, expected edits, and validation. The harness requires evidence, rejects worktree edits, persists `approved-stance.json`, and injects it into the executor prompt.
 
@@ -98,7 +91,7 @@ Post-task plan reflection runs after every passed task by default. `adjust_remai
 ## Implemented versus planned
 
 - Implemented: complexity resolution, 2–3 pre-edit stance rounds, approved stance injection, plan-mode post-task review.
-- Planned: fresh-agent reflection at implementation milestones. Metadata exists, but the executor is not yet resumable.
+- Non-goal: mid-task pause/resume checkpoint reflection. Use smaller independently verifiable tasks instead.
 - Compatibility: periodic architect checkpointing remains available but defaults off.
 
 ## Main artifacts

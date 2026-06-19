@@ -52,7 +52,6 @@ export interface AgenticTask {
   artifacts?: unknown[];
   complexity?: "low" | "medium" | "high";
   complexityReasons?: string[];
-  reflectionCheckpoints?: Array<{ id: string; after: string; status?: string }>;
   approvedStanceFile?: string;
 }
 

@@ -38,7 +38,6 @@ export interface Task {
   artifacts?: string[];
   complexity?: "low" | "medium" | "high";
   complexityReasons?: string[];
-  reflectionCheckpoints?: Array<{ id: string; after: string; status?: "pending" | "passed" }>;
   approvedStanceFile?: string;
 }
 

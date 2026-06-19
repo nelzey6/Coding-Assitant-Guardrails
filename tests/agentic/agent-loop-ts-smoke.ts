@@ -143,7 +143,6 @@ if (__promptContent.includes("Write stance reflection JSON only to:")) {
     perspectives_considered: ["ownership", "reversibility"],
     recommended_changes: round >= 2 ? [] : ["keep the change behind one owning module"],
     unresolved_risks: [],
-    needs_plan_review: false,
     next_action: round >= 2 ? "implement approved stance" : "run another reflection round",
     stance: {
       owningModule: "task-owned module",
