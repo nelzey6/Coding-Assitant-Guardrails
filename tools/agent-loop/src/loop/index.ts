@@ -26,7 +26,7 @@ import { appendEvent } from "../events/index.js";
 import { safeSlug, createWorktree, worktreeExists, removeWorktree, git as gitTool, GitError } from "../tools/index.js";
 import { invokeAgent, invokeAgentWithLog, getTaskChecks, type AgentConfig } from "../agent/index.js";
 import { invokeChecks, parseMetricLines } from "../checks/index.js";
-import { getTaskScope, getOutOfScopeFiles, testFastVerifierAllowed, testTaskIsHighRisk, isTaskUnscoped } from "../scope/index.js";
+import { getTaskScope, getOutOfScopeFiles, testFastVerifierAllowed, testTaskIsHighRisk, isTaskUnscoped, resolveTaskComplexity } from "../scope/index.js";
 import {
   syncCodeGraph,
   writeCodeGraphContext,
@@ -41,6 +41,7 @@ import {
   writeArchitectCheckpointPrompt,
   writeDecisionGrillPrompt,
   writePostTaskReviewPrompt,
+  writeStanceReflectionPrompt,
   validatePlannerResult,
   validateDecisions,
   getPromptBudgetLimits,
@@ -620,6 +621,71 @@ interface DecisionGrillOutcome {
   escalateReason: string;
 }
 
+interface StanceReflectionResult {
+  mode: "stance";
+  verdict: "reconfirm" | "readjust" | "reassess" | "needs_human";
+  summary?: string;
+  evidence?: string[];
+  unresolved_risks?: string[];
+  stance?: Record<string, unknown>;
+}
+
+async function runStanceReflectionPhase(
+  cfg: Required<LoopConfig>,
+  agentCallCounter: { count: number },
+  task: Task,
+  runDir: string,
+  worktreePath: string,
+  codeGraphFile: string,
+  decisions: Record<string, unknown>[]
+): Promise<{ result: StanceReflectionResult; resultFile: string }> {
+  const baseline = git(["status", "--porcelain"], worktreePath);
+  let priorResultFile = "";
+  let result: StanceReflectionResult | undefined;
+  const rounds = 3;
+
+  for (let round = 1; round <= rounds; round++) {
+    const promptFile = join(runDir, `stance-reflection-${round}.md`);
+    const resultFile = join(runDir, `stance-reflection-${round}.json`);
+    const logFile = join(runDir, `stance-reflection-${round}.log`);
+    writeStanceReflectionPrompt(promptFile, {
+      repoRoot: cfg.repoRoot, task, round, resultFile, priorResultFile,
+      codeGraphFile, decisionGrillDecisions: decisions,
+    });
+    appendEvent(cfg.repoRoot, "stance_reflection_started", { task: task.id, round, prompt: promptFile, resultFile }, cfg.runsRoot, cfg.stateFile);
+    agentCallCounter.count++;
+    await invokeAgentWithLog(promptFile, cfg.grillAgent, worktreePath, logFile);
+    if (!existsSync(resultFile)) throw new LoopError(`Stance reflection did not write ${resultFile}`);
+    if (git(["status", "--porcelain"], worktreePath) !== baseline) {
+      throw new LoopError(`Stance reflection edited the worktree before implementation for ${task.id}`);
+    }
+    result = JSON.parse(readFileSync(resultFile, "utf-8")) as StanceReflectionResult;
+    if (result.mode !== "stance" || !["reconfirm", "readjust", "reassess", "needs_human"].includes(result.verdict)) {
+      throw new LoopError(`Invalid stance reflection result for ${task.id} round ${round}`);
+    }
+    if (!result.summary?.trim() || !(result.evidence?.length) || !result.stance) {
+      throw new LoopError(`Stance reflection for ${task.id} round ${round} lacks summary, evidence, or stance`);
+    }
+    appendEvent(cfg.repoRoot, "stance_reflection_finished", { task: task.id, round, verdict: result.verdict, summary: result.summary }, cfg.runsRoot, cfg.stateFile);
+    priorResultFile = resultFile;
+    if (result.verdict === "needs_human") throw new LoopError(`Stance reflection needs human input for ${task.id}: ${result.summary ?? ""}`);
+    if (round >= 2 && result.verdict === "reconfirm") break;
+    if (round === rounds && result.verdict === "reassess") {
+      throw new LoopError(`Stance reflection could not establish an implementation stance for ${task.id} after ${rounds} rounds`);
+    }
+  }
+
+  const approved = result!;
+  const approvedFile = join(runDir, "approved-stance.json");
+  writeFileSync(approvedFile, JSON.stringify(approved, null, 2) + "\n", "utf-8");
+  const state = loadState(cfg.repoRoot, cfg.stateFile)!;
+  const current = getTasks(state).find((t) => t.id === task.id);
+  if (current) current.approvedStanceFile = approvedFile;
+  writeState(cfg.repoRoot, state, cfg.stateFile);
+  appendEvent(cfg.repoRoot, "stance_approved", { task: task.id, resultFile: approvedFile, rounds: priorResultFile }, cfg.runsRoot, cfg.stateFile);
+  return { result: approved, resultFile: approvedFile };
+}
+
 // Run a grill-with-docs self-interview before the executor edits.
 // Validates the decision contract; re-grills ONCE if the result is shallow or low-confidence
 // without escalation; escalates to a halting reason if it's still inadequate or any decision
@@ -730,7 +796,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     allowDirty:                  config.allowDirty                  ?? false,
     goalReview:                  config.goalReview                  ?? false,
     postTaskReview:              config.postTaskReview              ?? true,
-    architectCheckpointInterval: config.architectCheckpointInterval ?? 3,
+    architectCheckpointInterval: config.architectCheckpointInterval ?? 0,
     decisionGrill:               config.decisionGrill               ?? true,
     repoRoot:           config.repoRoot,
     agent:              config.agent,
@@ -944,6 +1010,33 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         recordDecisions(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, outcome.accepted);
       }
 
+      const complexity = resolveTaskComplexity(task as any, policy);
+      task.complexity = complexity.level;
+      task.complexityReasons = complexity.reasons;
+      {
+        const complexityState = loadState(cfg.repoRoot, cfg.stateFile)!;
+        const persistedTask = getTasks(complexityState).find((t) => t.id === taskId);
+        if (persistedTask) {
+          persistedTask.complexity = complexity.level;
+          persistedTask.complexityReasons = complexity.reasons;
+          writeState(cfg.repoRoot, complexityState, cfg.stateFile);
+        }
+      }
+      appendEvent(cfg.repoRoot, "task_complexity_resolved", { task: taskId, level: complexity.level, reasons: complexity.reasons }, cfg.runsRoot, cfg.stateFile);
+
+      let approvedStance: StanceReflectionResult | undefined;
+      if (complexity.level === "high") {
+        try {
+          const stance = await runStanceReflectionPhase(cfg, agentCallCounter, task, runDir, worktreePath, codeGraphFile, acceptedDecisions);
+          approvedStance = stance.result;
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "stance_reflection", reason });
+          copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+          throw err;
+        }
+      }
+
       // Warn when no scope is declared — the diff-scope rail cannot bound the change
       if (isTaskUnscoped(task as any)) {
         const warnMsg = `Task ${taskId} has no declared scope. The diff-scope rail is inactive for this task; all file changes will be allowed. Declare 'scope' globs in the task to enable scope enforcement.`;
@@ -965,6 +1058,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         policy,
         taskGrillResult: taskGrillResultObj,
         decisionGrillDecisions: acceptedDecisions,
+        approvedStance,
       });
 
       appendEvent(cfg.repoRoot, "executor_started", { task: taskId, prompt: executorPrompt, log: executorLog }, cfg.runsRoot, cfg.stateFile);

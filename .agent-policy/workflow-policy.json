@@ -157,6 +157,25 @@
           "Give the exact recommended continuation command or next human decision."
         ]
       }
+    },
+    "reflect-on-approach": {
+      "skillName": "reflect-on-approach",
+      "phase": "reflection",
+      "routeWhen": [
+        "high-complexity task before implementation",
+        "planned implementation checkpoint",
+        "material discovery may invalidate the remaining plan"
+      ],
+      "autoLoopUse": "Use stance mode before high-complexity execution and plan mode after material outcomes. The harness owns triggers, clean-diff enforcement, verdict routing, and task mutation.",
+      "executorBlock": {
+        "requiredWorkflow": "reflect-on-approach",
+        "expectedLoop": [
+          "Inspect repository evidence from a fresh perspective.",
+          "Challenge assumptions, ownership, reversibility, and validation.",
+          "Return the mode-specific structured verdict.",
+          "Do not mutate task state or pending plan directly."
+        ]
+      }
     }
   },
   "humanGates": [

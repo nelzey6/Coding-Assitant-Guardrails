@@ -475,7 +475,7 @@ program
   .option("--no-finalize-docs",              "Skip the finalize-docs agent after all tasks pass")
   .option("--goal-review",                   "Run a goal-review agent after all tasks pass; halts with needs_human if gaps detected")
   .option("--no-post-task-review",           "Skip the default plan-validity review after each passed task")
-  .option("--architect-checkpoint-interval <n>", "Run an architect checkpoint every N passed tasks (0 = disabled, default: 3)", "3")
+  .option("--architect-checkpoint-interval <n>", "Legacy cumulative architect checkpoint interval (0 = disabled, default: 0)", "0")
   .option("--decision-grill",                "Run the per-task design decision self-interview (default)")
   .option("--no-decision-grill",             "Skip the per-task grill-with-docs self-interview (on by default)")
   .action((opts) => {
@@ -554,7 +554,7 @@ program
       finalizeDocs:                opts.finalizeDocs !== false,
       goalReview:                  !!opts.goalReview,
       postTaskReview:              opts.postTaskReview !== false,
-      architectCheckpointInterval: parseInt(opts.architectCheckpointInterval ?? "3", 10),
+      architectCheckpointInterval: parseInt(opts.architectCheckpointInterval ?? "0", 10),
       decisionGrill:               opts.decisionGrill !== false,
     };
 

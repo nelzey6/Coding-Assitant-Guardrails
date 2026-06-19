@@ -10,6 +10,9 @@ export interface PlannedTask {
   acceptanceCriteria: string[];
   validation: string[];
   dependsOn: string[];
+  complexity?: "low" | "medium" | "high";
+  complexityReasons?: string[];
+  reflectionCheckpoints?: Array<{ id: string; after: string; status?: "pending" | "passed" }>;
 }
 
 export interface PlanResult {

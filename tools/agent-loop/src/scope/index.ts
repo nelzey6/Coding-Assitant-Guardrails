@@ -18,6 +18,34 @@ export interface FastVerifierDecision {
   reason: string;
 }
 
+export type TaskComplexity = "low" | "medium" | "high";
+
+export interface ComplexityDecision {
+  level: TaskComplexity;
+  reasons: string[];
+}
+
+export function resolveTaskComplexity(task: AgenticTask, policy: WorkflowPolicy): ComplexityDecision {
+  const proposed = task.complexity ?? "low";
+  const reasons = [...(task.complexityReasons ?? [])];
+  let level: TaskComplexity = proposed;
+  const raise = (next: TaskComplexity, reason: string): void => {
+    const rank = { low: 0, medium: 1, high: 2 } as const;
+    if (rank[next] > rank[level]) level = next;
+    if (!reasons.includes(reason)) reasons.push(reason);
+  };
+
+  if (task.kind === "implementation") raise("medium", "implementation task");
+  if (task.kind === "architecture" || task.workflow === "improve-codebase-architecture") {
+    raise("high", "architecture workflow or task kind");
+  }
+  if ((task.dependsOn ?? []).length >= 2) raise("high", "multiple task dependencies");
+  if (getTaskScope(task).length >= 4) raise("high", "broad declared scope");
+  if (testTaskIsHighRisk(task, policy) && proposed === "medium") raise("high", "planner-proposed complexity plus high-risk scope");
+
+  return { level, reasons };
+}
+
 export function getTaskScope(task: AgenticTask): string[] {
   if (!task.scope) return [];
   return (task.scope as string[]).filter((s) => s && s.trim().length > 0);

@@ -38,14 +38,17 @@ Each run goes through these phases per task:
 | **Plan** | Planner agent reads the goal, runs `grill-with-docs` discovery, produces a task graph with acceptance criteria, scope globs, and validation commands. |
 | **Task-grill** | Before any edits: a fresh agent re-reads the repo and answers "Is this task still understood, scoped, and safe?" If not, it replans rather than guessing. |
 | **Decision-grill** | Design forks are resolved with 2–4 evidenced options. The chosen option becomes a **binding rule** injected into the executor prompt. |
+| **Approach reflection** | High-complexity tasks receive 2–3 fresh `reflect-on-approach` stance rounds before implementation begins. |
 | **Execute** | Executor agent works inside a shared run worktree (`agentic/run-<timestamp>`) on a dedicated branch. Uses the canonical workflow skill (`tdd`, `diagnose`, `zoom-out`, etc.). |
 | **Scope rail** | Harness checks `git diff` before the verifier. Any file outside the task's declared scope fails the task immediately. |
 | **Verify** | Multi-vote adversarial verifiers — each is told to *refute* first. Majority pass required for high-risk tasks. |
 | **Post-task review** | After each passed task: is the remaining plan still valid? |
-| **Architect checkpoint** | Every 3 passed tasks: cumulative diff reviewed against the original goal. |
+| **Plan reflection** | After each passed task, `reflect-on-approach` reassesses pending work and may trigger replanning. |
 | **Apply** | All task commits are applied to your main tree as unstaged changes. Run worktree is cleaned up. |
 
 State persists in `agentic.json` so runs survive interruption and resume where they left off.
+
+See the [current workflow diagram](./docs/agentic-loop-flow.md) for states, skills, verdicts, and implemented versus planned checkpoints.
 
 ---
 
@@ -132,7 +135,7 @@ The loop is designed to fail loudly rather than silently produce wrong output:
 - **Scope enforcement** — each task declares a glob list of files it may touch. Out-of-scope changes fail immediately before the verifier runs.
 - **Adversarial verifiers** — verifiers are explicitly told to refute the result. Multi-vote required for implementation/architecture tasks.
 - **Retry budget** — failures retry with a failure-analysis artifact so the next attempt knows what went wrong. Budget exhaustion escalates to `needs_human`.
-- **Architect checkpoints** — after every N passed tasks the remaining plan is reviewed for drift.
+- **Complexity-gated stance reflection** — high-complexity work is challenged before edits; periodic architect checkpoints remain optional and default off.
 - **CodeGraph sync** — the code knowledge graph is synced before each task and after apply so every agent sees accurate symbol information.
 
 ---
@@ -161,6 +164,7 @@ The loop selects a workflow skill for each task. These are also usable standalon
 | [`zoom-out`](./skills/engineering/zoom-out/SKILL.md) | Unfamiliar or cross-module tasks | Understand code in broader context |
 | [`improve-codebase-architecture`](./skills/engineering/improve-codebase-architecture/SKILL.md) | Structural cleanup tasks | Refactor a module boundary |
 | [`prototype`](./skills/engineering/prototype/SKILL.md) | Design or state-machine exploration | Build a throwaway prototype |
+| [`reflect-on-approach`](./skills/engineering/reflect-on-approach/SKILL.md) | Complex or assumption-heavy technical work | Reassess, readjust, and reconfirm an implementation stance |
 | [`setup-matt-pocock-skills`](./skills/engineering/setup-matt-pocock-skills/SKILL.md) | Repo agent-skill setup | Seed agent docs and issue-tracker conventions |
 | [`to-issues`](./skills/engineering/to-issues/SKILL.md) | Break plans into tracked work | Convert a plan into issues |
 | [`to-prd`](./skills/engineering/to-prd/SKILL.md) | Product planning handoff | Turn context into a PRD |

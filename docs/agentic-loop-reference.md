@@ -19,7 +19,7 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 8. Runs configured **checks** (global `--checks` + task `validation` commands).
 9. Runs a **verifier** agent (multi-vote for high-risk tasks); requires `verifier-result.json` with verdict `pass`, `fail`, or `needs_human`.
 10. Runs a **post-task plan review** after every passed task to decide whether the remaining plan is still valid.
-11. Runs an **architect checkpoint** every three passed tasks by default; the checkpoint may force replanning.
+11. Optionally runs a legacy **architect checkpoint** when `--architect-checkpoint-interval` is configured; it defaults off.
 12. On failure: records `failureHistory`, marks `needs_retry` or `needs_human` based on retry budget.
 13. Repeats until all tasks pass or the iteration budget is exhausted.
 14. On completion: applies run branch to main tree as **unstaged changes** (default) or merges if `--merge` is set.
@@ -63,7 +63,7 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 --allow-dirty                Allow starting run with uncommitted changes in main worktree
 --goal-review                Run goal-review agent after all tasks pass
 --no-post-task-review        Skip the default plan-validity review after each passed task
---architect-checkpoint-interval <n>  Run architect checkpoint every N passed tasks (0 = off, default: 3)
+--architect-checkpoint-interval <n>  Run legacy architect checkpoint every N passed tasks (0 = off, default: 0)
 --no-decision-grill          Skip the per-task design decision self-interview
 --no-finalize-docs           Skip final PROJECT.md refresh after all tasks pass
 ```

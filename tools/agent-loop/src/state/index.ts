@@ -36,6 +36,10 @@ export interface Task {
   attempts?: number;
   scope?: string[];
   artifacts?: string[];
+  complexity?: "low" | "medium" | "high";
+  complexityReasons?: string[];
+  reflectionCheckpoints?: Array<{ id: string; after: string; status?: "pending" | "passed" }>;
+  approvedStanceFile?: string;
 }
 
 export interface AgenticState {

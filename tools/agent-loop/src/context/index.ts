@@ -50,6 +50,10 @@ export interface AgenticTask {
   reviewWorktree?: string;
   failureHistory?: unknown[];
   artifacts?: unknown[];
+  complexity?: "low" | "medium" | "high";
+  complexityReasons?: string[];
+  reflectionCheckpoints?: Array<{ id: string; after: string; status?: string }>;
+  approvedStanceFile?: string;
 }
 
 export interface RepoContext {

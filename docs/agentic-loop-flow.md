@@ -1,234 +1,124 @@
-# Agentic Loop — How It Works
+# Agentic Loop — Current Workflow
 
-The agentic loop is an autonomous coding harness that turns a goal into small, safe tasks and executes them one at a time in isolated git worktrees. A fresh agent is spawned for each phase so context never bleeds between tasks.
+The loop turns a goal into scoped tasks and uses fresh agents to challenge readiness, technical approach, correctness, and remaining-plan validity.
 
----
+## Workflow
 
-## High-level phases
-
-```
-Goal
- │
- ▼
-┌─────────────┐
-│  Discovery  │  grill-with-docs: inspect repo, resolve decisions, stop for human input only when necessary
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│   Planning  │  split goal into small tasks, each assigned one canonical workflow
-└──────┬──────┘
-       │  (loop per task)
-       ▼
-┌─────────────┐
-│  Task-Grill │  fresh agent: is the task still valid, scoped, and safe?
-└──────┬──────┘
-       │ ready / needs_replan / needs_human / blocked
-       ▼
-┌─────────────┐
-│  Execution  │  fresh agent runs inside an isolated git worktree/branch
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│   Checks    │  run configured validation commands + task smoke tests
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ Verification│  fresh verifier agent (or multi-vote for high-risk tasks)
-└──────┬──────┘
-       │ pass / fail / needs_human
-       ▼
-┌─────────────┐
-│ Plan Review │  after each passed task: is the remaining plan still valid?
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ Checkpoint  │  after major checkpoints: architecture review / replan
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  Reflection │  persist lessons, handover notes, assumption updates
-└──────┬──────┘
-       │
-       ▼
-    Merge or
-    hold for review
-```
-
----
-
-## Full loop — Mermaid flowchart
-
-```mermaid
-flowchart TD
-    GOAL([fa:fa-flag Goal]) --> LOAD[Load agentic.json\nor create from --goal]
-
-    LOAD --> HAS_TASKS{Tasks exist?}
-    HAS_TASKS -- No --> PLANNER[Planner agent\ngrill-with-docs discovery\nwrites grill-transcript.md]
-    PLANNER --> PLAN_VALID{Plan valid?\nbudget + complexity check}
-    PLAN_VALID -- Fail --> PLANNER
-    PLAN_VALID -- OK --> PICK
-    HAS_TASKS -- Yes --> PICK
-
-    PICK[Pick next pending /\nneeds_retry task] --> NO_TASK{Any task\nrunnable?}
-    NO_TASK -- No --> DONE([fa:fa-check Done])
-    NO_TASK -- Yes --> WORKTREE[Shared run worktree\n.worktrees/run-timestamp\nbranch agentic/run-timestamp]
-
-    WORKTREE --> GRILL[Task-Grill agent\nre-inspect repo + history\nbefore any edits]
-
-    GRILL --> VERDICT{Verdict?}
-    VERDICT -- needs_human --> STOP_H([fa:fa-user Human gate\nmark needs_human])
-    VERDICT -- blocked --> STOP_B([fa:fa-ban Blocked\nstop before edits])
-    VERDICT -- needs_replan --> REPLAN[Mark task blocked\nrun Planner again]
-    REPLAN --> REPLAN_BUDGET{Replan\nbudget OK?}
-    REPLAN_BUDGET -- Exhausted --> STOP_H
-    REPLAN_BUDGET -- OK --> CONVERGENCE{Same task IDs\nas last replan?}
-    CONVERGENCE -- Yes --> STOP_H
-    CONVERGENCE -- No --> PICK
-
-    VERDICT -- ready --> EXECUTOR[Executor agent\nruns inside worktree\nfollows canonical SKILL.md]
-
-    EXECUTOR --> SCOPE{Scope declared?}
-    SCOPE -- No --> WARN[emit scope_missing_warning\nloop continues]
-    WARN --> CHECKS
-    SCOPE -- Yes --> SCOPE_RAIL{Changed files\noutside scope?}
-    SCOPE_RAIL -- Yes --> RETRY_SCOPE[scope_violation\nretry with offending paths]
-    RETRY_SCOPE --> RETRY_BUDGET{Retry\nbudget OK?}
-    RETRY_BUDGET -- Exhausted --> STOP_H
-    RETRY_BUDGET -- OK --> GRILL
-    SCOPE_RAIL -- No --> CHECKS
-
-    CHECKS[Run validation commands\nglobal checks + task.validation\nparse METRIC lines] --> CHECKS_OK{Checks pass?}
-    CHECKS_OK -- Fail --> RETRY_CHK[record failureHistory\nneeds_retry or needs_human]
-    RETRY_CHK --> RETRY_BUDGET2{Retry\nbudget OK?}
-    RETRY_BUDGET2 -- OK --> GRILL
-    RETRY_BUDGET2 -- Exhausted --> STOP_H
-    CHECKS_OK -- Pass --> VERIFIER
-
-    VERIFIER{High-risk\ntask?}
-    VERIFIER -- Yes --> MULTI_VOTE[Multi-vote verifier\nN independent refute-first\nagents, majority pass required]
-    VERIFIER -- No --> SINGLE[Single verifier agent]
-    MULTI_VOTE --> VER_RESULT{Verdict?}
-    SINGLE --> VER_RESULT
-
-    VER_RESULT -- needs_human --> STOP_H
-    VER_RESULT -- fail --> RETRY_CHK
-    VER_RESULT -- pass --> MERGE
-
-    MERGE{End of run?}
-    MERGE -- apply (default) --> APPLY[Apply run branch to main\nas unstaged changes\nclean up worktree]
-    MERGE -- --merge flag --> COMMIT[Commit + merge\nrun branch → main]
-    APPLY --> POST_REVIEW[Post-task plan review\nis remaining plan still valid?]
-    COMMIT --> POST_REVIEW
-    POST_REVIEW --> POST_VERDICT{Verdict?}
-    POST_VERDICT -- continue --> CHECKPOINT
-    POST_VERDICT -- adjust_remaining_tasks / replan --> POST_REPLAN[Block stale pending tasks\nrun Planner again]
-    POST_REPLAN --> PICK
-    POST_VERDICT -- needs_human --> STOP_H
-
-    CHECKPOINT{Major checkpoint\ninterval reached?}
-    CHECKPOINT -- No --> REFLECT
-    CHECKPOINT -- Yes --> ARCH[Architect checkpoint\nreview cumulative drift]
-    ARCH --> ARCH_VERDICT{Verdict?}
-    ARCH_VERDICT -- continue --> REFLECT
-    ARCH_VERDICT -- replan --> REPLAN
-    ARCH_VERDICT -- needs_human --> STOP_H
-
-    REFLECT[Persist assumptions\nwrite handover.md\nupdate state] --> FINALIZE{All tasks\ndone?}
-    FINALIZE -- No --> PICK
-    FINALIZE -- Yes --> FINAL_DOCS[Finalize docs\nupdate PROJECT.md\nwrite final-summary.md]
-    FINAL_DOCS --> DONE
+```text
+GOAL
+  │
+  ▼
+[1. DISCOVERY]
+Skill: grill-with-docs
+Question: What should be built?
+Output: clarified goal, decisions, acceptance criteria
+State: discovery → planning
+  │
+  ▼
+[2. PLANNING]
+Agent: planner
+Uses: workflow policy + repository evidence
+Output:
+- tasks and dependencies
+- complexity: low | medium | high
+- complexity reasons
+- reflection checkpoint metadata
+State: planning → execution
+  │
+  ▼
+[3. TASK READINESS]
+Phase: task-grill
+Question: Is the next task still valid, scoped, and safe?
+Verdicts: ready | needs_replan | needs_human | blocked
+  │
+  ▼
+[4. APPROACH REFLECTION] — high-complexity tasks only
+Skill: reflect-on-approach, stance mode
+Question: Is this implementation approach actually good?
+Runs: 2–3 fresh-context refinement rounds in a clean worktree
+Verdicts: reconfirm | readjust | reassess | needs_human
+Output: approved implementation stance
+  │
+  ▼
+[5. IMPLEMENTATION]
+Skill: tdd | diagnose | improve-codebase-architecture | zoom-out | etc.
+State: task running
+  │
+  ├── planned milestone reached
+  │       ▼
+  │   [6. CHECKPOINT REFLECTION — PLANNED]
+  │   Skill: reflect-on-approach, checkpoint mode
+  │   Verdicts: continue | adjust | needs_plan_review | needs_human
+  │   Note: metadata exists; execution requires a future resumable executor lifecycle.
+  │
+  ▼
+[7. VERIFICATION]
+Agent: verifier
+Question: Was the task implemented correctly?
+Uses: acceptance criteria, checks, diff/scope, human gates
+Verdicts: pass | fail | needs_human
+  │
+  ▼
+[8. PLAN REFLECTION]
+Skill: reflect-on-approach, plan mode
+Current trigger: after every passed task unless disabled
+Question: Is the remaining plan still correct?
+Verdicts: continue | adjust_remaining_tasks | replan | needs_human
+  │
+  ├── adjust/replan → block stale pending tasks → planner creates replacements
+  └── continue → select next task
+  ▼
+[9. GOAL REVIEW]
+Optional final cumulative review
+Question: Does completed work satisfy the original goal?
+State: complete | needs_human
 ```
 
----
+## Responsibility boundaries
 
-## What each phase does
+| Phase | Owns | Does not own |
+| --- | --- | --- |
+| `grill-with-docs` | Goal, requirements, terminology, acceptance criteria | Technical implementation stance |
+| Planner | Task graph, scope, workflow, complexity, checkpoint metadata | Execution |
+| Task-grill | Current readiness, scope, safety, stale assumptions | Architecture refinement |
+| Stance reflection | Iterative technical approach refinement | Requirements or file edits |
+| Workflow executor | One approved task | Status, merge, plan mutation |
+| Verifier | Correctness, checks, scope, human gates | Choosing a new approach |
+| Plan reflection | Remaining-plan validity | Direct task mutation |
+| Harness | State, retries, replans, worktrees, apply/merge | Open-ended reasoning |
 
-### Discovery (Planner)
-The planner uses `grill-with-docs` style reasoning: it restates the goal, inspects repo docs and code for evidence, and resolves decisions autonomously. It only stops for human input when a product or domain decision cannot be safely invented. The output is `agentic.json` with a task list and `grill-transcript.md` as a visible audit trail.
+## Complexity and reflection
 
-### Task-Grill
-Before every executor turn, a fresh agent re-reads the repo and recent loop history and answers: *Is the task still understood, correctly scoped, and safe to execute right now?* Possible verdicts:
+The planner proposes `complexity`, `complexityReasons`, and optional `reflectionCheckpoints`. The harness may escalate complexity but never lower the proposal. Architecture work, broad scope, multiple dependencies, and high-risk scope can force `high`.
 
-| Verdict | Harness action |
+Before a high-complexity executor runs, fresh stance agents challenge ownership, seams, assumptions, reversibility, sequence, expected edits, and validation. The harness requires evidence, rejects worktree edits, persists `approved-stance.json`, and injects it into the executor prompt.
+
+Post-task plan reflection runs after every passed task by default. `adjust_remaining_tasks` and `replan` block stale pending tasks and invoke the planner. Completed tasks remain historical facts.
+
+## Implemented versus planned
+
+- Implemented: complexity resolution, 2–3 pre-edit stance rounds, approved stance injection, plan-mode post-task review.
+- Planned: fresh-agent reflection at implementation milestones. Metadata exists, but the executor is not yet resumable.
+- Compatibility: periodic architect checkpointing remains available but defaults off.
+
+## Main artifacts
+
+| Artifact | Purpose |
 | --- | --- |
-| `ready` | Inject result into executor prompt and proceed. |
-| `needs_replan` | Mark task blocked, re-run planner, continue with replacement tasks. |
-| `needs_human` | Stop before edits, surface the decision. |
-| `blocked` | Stop before edits, record the blocker. |
+| `agentic.json` | Goal, task graph, complexity, assumptions, and statuses |
+| `.agent-runs/events.jsonl` | Lifecycle audit log |
+| `grill-transcript.md` | Discovery evidence and decisions |
+| `task-grill-result.json` | Readiness verdict |
+| `stance-reflection-<n>.json` | Iterative stance review |
+| `approved-stance.json` | Stance injected into executor |
+| `checks.log` / `diff.patch` | Validation and changed code |
+| `verifier-result.json` | Correctness verdict |
+| `post-task-review-result.json` | Remaining-plan verdict |
 
-### Execution
-A fresh executor agent works inside an isolated git worktree on a dedicated branch. It reads `AGENTS.md`/`CLAUDE.md`, follows the canonical `SKILL.md` for the selected workflow (e.g. `tdd`, `diagnose`, `improve-codebase-architecture`), and produces a diff. The harness — not the agent — owns task status, merges, and cleanup.
+## Related documentation
 
-### Checks
-The harness runs every command in `agentic.json` `checks`, task `validation`, and CLI `--checks`. Commands may emit `METRIC key=value` lines for structured observability. Failures trigger retry (up to `--max-retries`) before escalating to `needs_human`.
-
-### Scope rail
-If a task declares a `scope` glob list, the harness diffs changed files after the executor and before the verifier. Any file outside scope is a retryable failure with the offending paths fed back into the next task-grill prompt. Tasks with no scope emit a warning but still proceed.
-
-### Verification
-A fresh verifier agent reads the task JSON, acceptance criteria, diff, checks output, and human-gate list from the policy. For high-risk tasks (implementation/architecture with a declared scope or matching a human-gate path), multiple independent "refute-first" verifier agents vote; a majority pass is required.
-
-### Post-task plan review
-After each passed task, a fresh reviewer reassesses whether the remaining task graph is still valid. This phase does not re-verify the completed task and does not execute edits. It checks whether assumptions changed, remaining scopes are still right, validation still proves the goal, and the next tasks are still correctly sliced and ordered.
-
-| Verdict | Harness action |
-| --- | --- |
-| `continue` | Proceed to the next task or checkpoint. |
-| `adjust_remaining_tasks` | Block stale pending/retry tasks, run the planner, and continue with replacement tasks. |
-| `replan` | Block stale pending/retry tasks, run the planner, and continue with the new plan. |
-| `needs_human` | Stop with a human gate before more autonomous work. |
-
-### Architect checkpoint
-Every three passed tasks by default, the harness runs a broader checkpoint over the cumulative diff and remaining plan. Use `--architect-checkpoint-interval <n>` to change the interval or `0` to disable it.
-
-### Reflection
-The harness persists `assumptionsStillValid`/`assumptionsChanged` back into `state.assumptions`, writes `handover.md` for future agents, and appends lifecycle events to `.agent-runs/events.jsonl`.
-
----
-
-## Key files on disk
-
-| File / Path | Purpose |
-| --- | --- |
-| `agentic.json` | Task graph and loop state for the current goal. |
-| `.agent-runs/events.jsonl` | Append-only lifecycle event log (audit/debug). |
-| `.agent-runs/<run>/grill-transcript.md` | Planner's visible Q&A and evidence trail. |
-| `.agent-runs/<run>/task-grill.md` | Task-grill prompt (re-understanding gate). |
-| `.agent-runs/<run>/task-grill-result.json` | Task-grill structured verdict. |
-| `.agent-runs/<run>/executor.md` | Executor prompt (includes task JSON + task-grill result). |
-| `.agent-runs/<run>/verifier.md` | Verifier prompt (includes diff, checks output, human gates). |
-| `.agent-runs/<run>/verifier-result.json` | Verifier verdict: `pass`, `fail`, or `needs_human`. |
-| `.agent-runs/<run>/handover.md` | Continuation note for the next agent turn. |
-| `.agent-runs/<run>/failure-analysis.json` | Phase/attempt/reason/diff-stat on every failure. |
-| `.worktrees/run-<timestamp>/` | Shared run worktree — all tasks commit onto the same branch. |
-
----
-
-## Safety defaults at a glance
-
-- Main worktree stays clean — all tasks run in a shared `agentic/run-<timestamp>` branch/worktree.
-- Default apply mode: run branch applied as unstaged changes at the end — nothing is committed until you decide.
-- Harness (not the executor) marks pass/fail and manages the worktree.
-- Task-grill must return `ready` before any edits happen.
-- Post-task review runs after every passed task to reassess whether the remaining plan is still valid.
-- Architect checkpoints run every three passed tasks by default and may force a replan.
-- Scope rail blocks out-of-scope file changes before the verifier sees them.
-- Fast verifier requires low-risk task kind + declared scope.
-- Retry budget prevents infinite loops; exhaustion escalates to `needs_human`.
-- Replan budget + convergence detection prevent the planner from cycling.
-- Human gates from `.agent-policy/workflow-policy.json` are checked by the verifier.
-
----
-
-## Related docs
-
-- [Root README](../README.md) — quick start, install, and which workflow to use
-- [PROJECT.md](../PROJECT.md) — TS architecture map, module table, and validation coverage
-- [agentic-loop SKILL.md](../skills/engineering/agentic-loop/SKILL.md) — skill contract and routing rules
-- [scripts/agentic/README.md](../scripts/agentic/README.md) — legacy PowerShell harness command reference
-- [ADR-0002](../adrs/0002-ts-agent-loop-autonomous-runner.md) — architecture decision for the TS runner
+- [Root README](../README.md)
+- [Agentic loop reference](./agentic-loop-reference.md)
+- [PROJECT.md](../PROJECT.md)
+- [reflect-on-approach skill](../skills/engineering/reflect-on-approach/SKILL.md)
+- [ADR-0003](../adrs/0003-complexity-gated-approach-reflection.md)

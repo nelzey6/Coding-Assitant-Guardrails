@@ -57,7 +57,7 @@ Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA
 | `tools/agent-loop/src/state/index.ts` | `agentic.json` schema helpers, task selection, task status changes, attempts, failure history (including `failureAnalysisFile` pointer), planner result merge, and replan tracking (`replanCount`, `lastReplanTaskIds`). |
 | `tools/agent-loop/src/agent/index.ts` | Agent invocation adapters for `claude`, `pi`, and custom command templates. |
 | `tools/agent-loop/src/checks/index.ts` | Validation command execution, timeout handling, `.env` file loading for checks, structured `METRIC key=value` parsing. |
-| `tools/agent-loop/src/scope/index.ts` | Scope glob matching, out-of-scope diff detection with harness-owned ignore globs, unscoped task detection, fast-verifier eligibility, high-risk task detection. |
+| `tools/agent-loop/src/scope/index.ts` | Scope glob matching, out-of-scope diff detection with harness-owned ignore globs, unscoped task detection, deterministic complexity escalation, fast-verifier eligibility, and high-risk task detection. |
 | `tools/agent-loop/src/events/index.ts` | `.agent-runs/events.jsonl` append/load/format helpers. |
 | `tools/agent-loop/src/reporting/index.ts` | Human/JSON output for status, summary, last-failure, why-stuck, doctor, reset, and accept. |
 | `tools/agent-loop/src/policy/index.ts` | Loads workflow policy from `.agent-policy/workflow-policy.json` or `templates/agent-policy/workflow-policy.json`. |
@@ -94,6 +94,7 @@ The current TS run loop is:
 5. Run configured worktree bootstrap commands, if any, and mark configured bootstrap artifacts ignored for scope/diff/commit.
 6. Run task-grill before executor edits.
 6. If task-grill returns `ready`, inject its result into executor prompt and run executor.
+7. Resolve task complexity. Before high-complexity execution, run two to three clean-worktree `reflect-on-approach` stance rounds and inject the approved stance into the executor prompt.
 7. If task-grill returns `needs_replan`, mark stale task `blocked`, record `task_replan_requested`, enforce replan budget, check for plan convergence, run planner again, and continue to replacement tasks.
 8. If task-grill returns `needs_human` or `blocked`, stop before executor edits.
 9. Run configured checks from state-level `checks`, task `validation`, and CLI `--checks`. Checks can load a configured env file. Artifact-only discovery/investigation/zoom-out tasks skip task validation unless extra CLI checks are explicitly provided.
@@ -164,7 +165,8 @@ Current TS rails:
 - After each `ready` task-grill verdict, `assumptionsStillValid` and `assumptionsChanged` fields from the result are persisted back into `state.assumptions` (tagged `[valid]`/`[changed]`) and emitted as an `assumptions_updated` event. The current assumption list is forwarded into every subsequent task-grill prompt so drift is visible across turns.
 - `--goal-review` (opt-in): after all tasks pass, a goal-review agent judges the cumulative diff against `state.goal` and emits `goal_review_finished`. A `needs_human` verdict halts the loop before finalize-docs.
 - Post-task plan review is default-on after every passed task. It reviews assumption drift, remaining task slicing/scope/order, and validation design. `adjust_remaining_tasks` and `replan` block stale pending/retry tasks before planner appends replacements; `needs_human` halts.
-- `--architect-checkpoint-interval <n>` (default 3, `0` = disabled): every N passed tasks, an architect checkpoint agent reviews the plan and cumulative diff for drift. Verdicts: `continue` (proceed), `replan` (call planner again, counts against replan budget), `needs_human` (halt).
+- `--architect-checkpoint-interval <n>` (default 0): optional legacy cumulative checkpoint. It is disabled by default because post-task plan reflection owns remaining-plan drift.
+- High-complexity tasks run iterative `reflect-on-approach` stance review before executor edits. The harness rejects stance agents that dirty the worktree and records the approved stance as a run artifact.
 - `--decision-grill` (opt-in): before each executor turn, a grill-with-docs self-interview surfaces genuine design/product decisions and answers them itself with evidence. The harness enforces a decision contract via `validateDecisions` (each decision needs 2-4 evidenced options, exactly one marked recommended, plus `whyItMatters`/`selfAnswer`/`confidence`/`escalate`). Shallow or low-confidence-without-escalate results trigger exactly one re-grill (`decision_grill_regrill`); if still inadequate, or any decision sets `escalate:true`/stays low-confidence, the task escalates to `needs_human`. Answered decisions are flattened into `state.decisions` and emitted as `decisions_recorded`. The planner result's `decisions` are validated by the same contract and normalized to strings on merge.
 - `accept` and `reset-task` are dry-run by default and require `--apply` to mutate.
 

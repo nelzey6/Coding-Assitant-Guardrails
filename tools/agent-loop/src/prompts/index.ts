@@ -316,10 +316,11 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "Allowed verdicts: planned, needs_human, blocked.",
     "Allowed task statuses in planner output: pending, needs_human, blocked.",
     "Allowed task kinds: discovery, investigation, implementation, architecture, maintenance, handoff.",
-    "Each task must have: id, title, kind, workflow, status, priority, acceptanceCriteria, validation, dependsOn, failureHistory, artifacts, scope.",
+    "Each task must have: id, title, kind, workflow, status, priority, acceptanceCriteria, validation, dependsOn, failureHistory, artifacts, scope, complexity, complexityReasons, reflectionCheckpoints.",
     "Use one workflow per task. Use dependencies for workflow sequences. Use only canonical workflows from the policy.",
     "Keep tasks small and independently verifiable. Split broad goals into dependent tasks.",
     "Always set `scope` to the forward-slash glob list of files the task may change. Keep scope tight (5 globs or fewer), but include every file implied by acceptance criteria, including new focused test files when direct helper-level proof requires them.",
+    "Set complexity to low, medium, or high and give concrete complexityReasons. Architecture, broad cross-module, assumption-heavy, or costly-to-reverse work should be high. For high-complexity work, define 1-3 reflectionCheckpoints as {id, after, status:'pending'} milestones.",
     "Task-size budget (enforced by the harness): at most 7 acceptanceCriteria, at most 5 scope globs, implementation/architecture tasks must have at least one acceptanceCriterion.",
     "",
     "For every genuine design/product/architecture decision the plan forces, run a grill-with-docs self-interview: weigh 2-4 real options with concrete repo/docs evidence, mark one recommended, answer it yourself. Set escalate:true only when evidence genuinely cannot settle it.",
@@ -348,7 +349,7 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
       tasks: [],
       artifacts: ["path/to/grill-transcript.md"],
     }, null, 2),
-    `Each task object: ${JSON.stringify({ id: "...", title: "...", kind: "...", workflow: "...", status: "pending", priority: 1, acceptanceCriteria: [], validation: [], dependsOn: [], failureHistory: [], artifacts: [], scope: ["scripts/agentic/**"] })}`,
+    `Each task object: ${JSON.stringify({ id: "...", title: "...", kind: "...", workflow: "...", status: "pending", priority: 1, acceptanceCriteria: [], validation: [], dependsOn: [], failureHistory: [], artifacts: [], scope: ["scripts/agentic/**"], complexity: "low|medium|high", complexityReasons: [], reflectionCheckpoints: [] })}`,
     priorFailureBlock,
     "",
     `Goal: ${state.goal ?? ""}`,
@@ -398,13 +399,14 @@ export interface ExecutorPromptOptions {
   policy: WorkflowPolicy;
   taskGrillResult?: unknown;
   decisionGrillDecisions?: Record<string, unknown>[];
+  approvedStance?: unknown;
 }
 
 export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOptions): void {
   const {
     repoRoot, runsRoot, stateFile, budget, task, iteration, runDir,
     eventLogPath: evLogPath, codeGraphFile = "", policy, taskGrillResult,
-    decisionGrillDecisions = [],
+    decisionGrillDecisions = [], approvedStance,
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
@@ -441,6 +443,12 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
       }),
       "",
     ] : []),
+    ...(approvedStance ? [
+      "Approved implementation stance — treat this as the current technical approach:",
+      JSON.stringify(approvedStance, null, 2),
+      "If repository evidence invalidates it, stop and record the conflict; do not silently choose a different architecture.",
+      "",
+    ] : []),
     `Iteration: ${iteration}`,
     `State file: ${stateFile}`,
     `Selected workflow: ${workflow}`,
@@ -466,6 +474,41 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     task: task.id,
     codegraph: codeGraphFile,
   });
+}
+
+export interface StanceReflectionPromptOptions {
+  repoRoot: string;
+  task: Task;
+  round: number;
+  resultFile: string;
+  priorResultFile?: string;
+  codeGraphFile?: string;
+  decisionGrillDecisions?: Record<string, unknown>[];
+}
+
+export function writeStanceReflectionPrompt(promptFile: string, opts: StanceReflectionPromptOptions): void {
+  const skill = skillInstruction("reflect-on-approach", opts.repoRoot,
+    "Use stance mode. Challenge the implementation route from a fresh perspective. Do not edit repository files."
+  );
+  const prior = opts.priorResultFile && existsSync(opts.priorResultFile)
+    ? readFileSync(opts.priorResultFile, "utf-8")
+    : "(first round: propose and challenge an initial stance)";
+  const content = [
+    "You are a fresh technical stance reviewer before implementation begins.",
+    skill,
+    "",
+    `Round: ${opts.round}`,
+    `CodeGraph context: ${opts.codeGraphFile ?? ""}`,
+    "Read repository guidance, relevant source, tests, and decisions. Do not edit files.",
+    `Write stance reflection JSON only to: ${opts.resultFile}`,
+    'Schema: { "mode":"stance", "verdict":"reconfirm|readjust|reassess|needs_human", "summary":"...", "evidence":[], "assumptions_challenged":[], "perspectives_considered":[], "recommended_changes":[], "unresolved_risks":[], "needs_plan_review":false, "next_action":"...", "stance": { "owningModule":"...", "boundaries":[], "sequence":[], "expectedEdits":[], "validation":[], "assumptions":[], "rejectedAlternatives":[] } }',
+    "A bare approval is invalid. Reconfirmation must explain what was challenged and why the stance survived.",
+    "Task:", JSON.stringify(opts.task, null, 2),
+    "Resolved decisions:", JSON.stringify(opts.decisionGrillDecisions ?? [], null, 2),
+    "Previous round:", prior,
+  ].join("\n");
+  mkdirSync(dirname(promptFile), { recursive: true });
+  writeFileSync(promptFile, content, "utf-8");
 }
 
 export interface TaskGrillPromptOptions {
@@ -1036,6 +1079,7 @@ export function writePostTaskReviewPrompt(promptFile: string, opts: PostTaskRevi
 
   const content = [
     "You are the post-task plan reviewer for an autonomous agentic loop.",
+    skillInstruction("reflect-on-approach", repoRoot, "Use plan mode. Reassess pending work; do not verify the completed implementation or edit tasks directly."),
     "",
     "The verifier already judged whether the completed task passed. Your job is different: reassess whether the remaining plan is still valid after this completed slice.",
     "Spend intelligence on assumptions, validation design, task slicing, and plan drift. Do not propose executor edits here.",
@@ -1223,6 +1267,14 @@ export function validatePlannerResult(
     if (!allowedWorkflows.includes(task["workflow"] as string)) errors.push(`${id} has invalid workflow: ${task["workflow"]}`);
     if (!allowedStatuses.includes(task["status"] as string)) errors.push(`${id} has invalid status: ${task["status"]}`);
     if (task["priority"] == null) errors.push(`${id} missing priority`);
+    const complexity = task["complexity"] as string | undefined;
+    if (complexity != null && !["low", "medium", "high"].includes(complexity)) {
+      errors.push(`${id} has invalid complexity: ${complexity}`);
+    }
+    if (complexity === "high") {
+      const reasons = (task["complexityReasons"] as unknown[] | undefined) ?? [];
+      if (reasons.length === 0) errors.push(`${id} is high complexity without complexityReasons`);
+    }
 
     const ac = (task["acceptanceCriteria"] as unknown[] | undefined) ?? [];
     if (ac.length > 7) errors.push(`${id} has too many acceptanceCriteria (${ac.length} > 7); split the task`);

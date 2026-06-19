@@ -127,6 +127,36 @@ if (__promptContent.includes("Write task-grill JSON only to:")) {
   }
   process.exit(0);
 }
+if (__promptContent.includes("Write stance reflection JSON only to:")) {
+  const m = __promptContent.match(/Write stance reflection JSON only to: (.+)/);
+  if (!m) throw new Error("no stance reflection result path");
+  const resultPath = m[1].trim();
+  __mkdirSync(__dirname(resultPath), { recursive: true });
+  const roundMatch = __promptContent.match(/Round: (\d+)/);
+  const round = roundMatch ? Number(roundMatch[1]) : 1;
+  __writeFileSync(resultPath, JSON.stringify({
+    mode: "stance",
+    verdict: round >= 2 ? "reconfirm" : "readjust",
+    summary: round >= 2 ? "revised stance survived fresh challenge" : "tighten the owning module and validation route",
+    evidence: ["task JSON", "repository guidance"],
+    assumptions_challenged: ["first approach is necessarily smallest"],
+    perspectives_considered: ["ownership", "reversibility"],
+    recommended_changes: round >= 2 ? [] : ["keep the change behind one owning module"],
+    unresolved_risks: [],
+    needs_plan_review: false,
+    next_action: round >= 2 ? "implement approved stance" : "run another reflection round",
+    stance: {
+      owningModule: "task-owned module",
+      boundaries: ["declared scope"],
+      sequence: ["focused test", "minimal implementation", "validation"],
+      expectedEdits: ["declared scope only"],
+      validation: ["configured checks"],
+      assumptions: [],
+      rejectedAlternatives: ["broad rewrite"]
+    }
+  }), "utf-8");
+  process.exit(0);
+}
 if (__promptContent.includes("Write post-task review JSON only to:")) {
   const m = __promptContent.match(/Write post-task review JSON only to: (.+)/);
   if (!m) throw new Error("no post-task review result path");
@@ -167,6 +197,22 @@ if (__promptContent.includes("Write your verdict JSON only to:") && __promptCont
     assessment: "checkpoint still valid",
     suggestedChanges: []
   }), "utf-8");
+  process.exit(0);
+}
+if (__promptContent.includes("You are finalizing a completed agentic loop run.")) {
+  const m = __promptContent.match(/Always write a final human checkpoint summary to: (.+)/);
+  if (!m) throw new Error("no finalize summary path");
+  const summaryPath = m[1].trim();
+  __mkdirSync(__dirname(summaryPath), { recursive: true });
+  __writeFileSync(summaryPath, "# Final summary\\n\\nSmoke finalization complete.", "utf-8");
+  process.exit(0);
+}
+if (__promptContent.includes("You are verifying the finalize-docs phase")) {
+  const m = __promptContent.match(/Write a JSON verdict to: (.+)/);
+  if (!m) throw new Error("no finalize verifier result path");
+  const resultPath = m[1].trim();
+  __mkdirSync(__dirname(resultPath), { recursive: true });
+  __writeFileSync(resultPath, JSON.stringify({ verdict: "pass", summary: "smoke finalization valid", issues: [] }), "utf-8");
   process.exit(0);
 }
 ${body}
@@ -235,6 +281,8 @@ function assert(condition: boolean, msg: string): void {
 const results: { name: string; ok: boolean; error?: string }[] = [];
 
 function runCase(name: string, fn: () => void): void {
+  const filter = process.env.AGENTIC_SMOKE_FILTER;
+  if (filter && !name.toLowerCase().includes(filter.toLowerCase())) return;
   try {
     fn();
     results.push({ name, ok: true });
@@ -273,7 +321,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-apply"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const state = readState(dir);
@@ -302,7 +350,7 @@ throw new Error("executor/verifier should not run after task-grill stop");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-apply"]);
     assert(r.status !== 0, "expected non-zero exit when task-grill stops");
     const state = readState(dir);
     assert(state.tasks[0].status === "needs_human", `expected needs_human, got ${state.tasks[0].status}`);
@@ -378,7 +426,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--no-merge"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--no-apply"], 90_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     const stale = state.tasks.find((t: any) => t.id === "task-001");
@@ -470,7 +518,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "4", "--no-merge"], 120_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "4", "--no-apply"], 120_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     const adjusted = state.tasks.find((t: any) => t.id === "task-003");
@@ -507,7 +555,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-apply"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
@@ -539,7 +587,7 @@ writeFileSync("outside.txt", "sneaky", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-apply"]);
     // non-zero exit expected (needs_human path)
     const state = readState(dir);
     assert(state.tasks[0].status !== "passed", `task must not pass after scope violation, got ${state.tasks[0].status}`);
@@ -577,7 +625,7 @@ writeFileSync("allowed/in.txt", "ok", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-apply"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
@@ -616,10 +664,10 @@ writeFileSync("allowed/in.txt", "ok", "utf-8");
     const r = runCLI(dir, [
       "run",
       "--command", fakeCommand(agent),
-      "--worktree-bootstrap", "mkdir -p generated && echo bootstrap > generated/client.txt",
+      "--worktree-bootstrap", "node -e \"require('fs').mkdirSync('generated',{recursive:true});require('fs').writeFileSync('generated/client.txt','bootstrap')\"",
       "--worktree-bootstrap-ignore", "generated/**",
       "--max-iterations", "1",
-      "--no-merge",
+      "--no-apply",
     ]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
@@ -657,7 +705,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--check-env-file", join(dir, ".env.local"), "--max-iterations", "1", "--no-merge"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--check-env-file", join(dir, ".env.local"), "--max-iterations", "1", "--no-apply"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
@@ -701,7 +749,7 @@ if (handoverMatch) {
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-apply"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const checksLog = readEvents(dir).find((e) => e.type === "checks_started")?.log;
     assert(!!checksLog, "missing checks_started log path");
@@ -736,7 +784,7 @@ writeFileSync("out.txt", "ok", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge", "--fast-verifier"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-apply", "--fast-verifier"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const events = readEvents(dir);
@@ -765,7 +813,7 @@ writeFileSync("out.txt", "ok", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge", "--fast-verifier"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-apply", "--fast-verifier"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const events = readEvents(dir);
@@ -805,7 +853,7 @@ if (content.includes('"attempts": 2') || content.includes('"attempts":2')) {
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--max-retries", "2", "--no-merge", "--no-decision-grill", "--no-post-task-review"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--max-retries", "2", "--no-apply", "--no-decision-grill", "--no-post-task-review"], 90_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const state = readState(dir);
@@ -844,7 +892,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["commit", "-m", "initial"], dir);
 
     // max-retries 1 means after 2 attempts (1 original + 1 retry) it escalates
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "4", "--max-retries", "1", "--no-merge"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "4", "--max-retries", "1", "--no-apply"], 90_000);
     assert(r.status !== 0, "expected non-zero exit when budget exhausted");
     const state = readState(dir);
     assert(state.tasks[0].status === "needs_human", `expected needs_human, got ${state.tasks[0].status}`);
@@ -910,7 +958,7 @@ if (content.includes('"attempts": 2') || content.includes('"attempts":2')) {
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--max-retries", "2", "--no-merge", "--no-decision-grill", "--no-post-task-review"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "3", "--max-retries", "2", "--no-apply", "--no-decision-grill", "--no-post-task-review"], 90_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const state = readState(dir);
@@ -986,7 +1034,7 @@ throw new Error("executor/verifier must not run in replan-budget test");
     git(["commit", "-m", "initial"], dir);
 
     // maxReplans=1: first replan (sessionReplanCount=1) is allowed, second (count=2) triggers budget exhaustion
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "5", "--max-replans", "1", "--no-merge"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "5", "--max-replans", "1", "--no-apply"], 90_000);
     assert(r.status !== 0, "expected non-zero exit when replan budget exhausted");
     const events = readEvents(dir);
     assert(hasEvent(events, "replan_budget_exhausted"), "expected replan_budget_exhausted event");
@@ -1050,7 +1098,7 @@ throw new Error("executor/verifier must not run when convergence detected");
     git(["commit", "-m", "initial"], dir);
 
     // maxReplans=5 so budget won't fire first; convergence fires when plan is identical
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "5", "--max-replans", "5", "--no-merge"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "5", "--max-replans", "5", "--no-apply"], 90_000);
     assert(r.status !== 0, "expected non-zero exit on convergence failure");
     const events = readEvents(dir);
     assert(hasEvent(events, "replan_convergence_failure"), "expected replan_convergence_failure event");
@@ -1105,7 +1153,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--no-decision-grill", "--no-post-task-review"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--no-decision-grill", "--no-post-task-review"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const state = readState(dir);
@@ -1172,7 +1220,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--goal-review", "--no-decision-grill", "--no-post-task-review"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--goal-review", "--no-decision-grill", "--no-post-task-review"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const events = readEvents(dir);
     assert(hasEvent(events, "goal_review_started"), "expected goal_review_started event");
@@ -1231,7 +1279,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--goal-review", "--no-decision-grill", "--no-post-task-review"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--goal-review", "--no-decision-grill", "--no-post-task-review"]);
     assert(r.status !== 0, "expected non-zero exit when goal review returns needs_human");
     const events = readEvents(dir);
     assert(hasEvent(events, "goal_review_finished"), "expected goal_review_finished event");
@@ -1301,7 +1349,7 @@ else if (content.includes('"id": "task-002"')) writeFileSync("out2.txt", "done",
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "5", "--no-merge", "--architect-checkpoint-interval", "2", "--no-decision-grill", "--no-post-task-review"], 120_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "5", "--no-apply", "--architect-checkpoint-interval", "2", "--no-decision-grill", "--no-post-task-review"], 120_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks.every((t: any) => t.status === "passed"), `not all tasks passed: ${JSON.stringify(state.tasks.map((t: any) => t.status))}`);
@@ -1401,7 +1449,7 @@ else if (content.includes('"id": "task-003"')) writeFileSync("out3.txt", "done",
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "8", "--no-merge", "--architect-checkpoint-interval", "2", "--no-decision-grill", "--no-post-task-review"], 180_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "8", "--no-apply", "--architect-checkpoint-interval", "2", "--no-decision-grill", "--no-post-task-review"], 180_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     const task3 = state.tasks.find((t: any) => t.id === "task-003");
@@ -1476,7 +1524,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "3", "--no-merge", "--no-decision-grill", "--no-post-task-review"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "3", "--no-apply", "--no-decision-grill", "--no-post-task-review"], 90_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks.length > 0, "expected tasks to be planned");
@@ -1547,7 +1595,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill", "--no-post-task-review"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--decision-grill", "--no-post-task-review"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
@@ -1615,7 +1663,7 @@ throw new Error("executor/verifier must not run after decision-grill escalation"
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill", "--no-post-task-review"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--decision-grill", "--no-post-task-review"], 90_000);
     assert(r.status !== 0, "expected non-zero exit when decision grill escalates");
     const state = readState(dir);
     assert(state.tasks[0].status === "needs_human", `expected needs_human, got ${state.tasks[0].status}`);
@@ -1688,7 +1736,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-merge", "--decision-grill", "--no-post-task-review"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--decision-grill", "--no-post-task-review"], 90_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
@@ -1802,7 +1850,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "4", "--no-merge", "--decision-grill"], 120_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "4", "--no-apply", "--decision-grill", "--no-finalize-docs"], 120_000);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
     const state = readState(dir);
     const stale = state.tasks.find((t: any) => t.id === "task-002");
@@ -1878,7 +1926,7 @@ else if (content.includes('"id": "task-002"')) writeFileSync("out2.txt", "done",
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "5", "--no-merge", "--architect-checkpoint-interval", "2", "--no-decision-grill", "--no-post-task-review"], 120_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "5", "--no-apply", "--architect-checkpoint-interval", "2", "--no-decision-grill", "--no-post-task-review"], 120_000);
     assert(r.status !== 0, "expected non-zero exit when architect checkpoint returns needs_human");
     const events = readEvents(dir);
     assert(hasEvent(events, "architect_checkpoint_finished"), "expected architect_checkpoint_finished event");
@@ -1936,7 +1984,7 @@ writeFileSync("out2.txt", "done", "utf-8");
     git(["commit", "-m", "initial"], dir);
 
     // grill(1) + executor(1) = 2 calls for task-1. Budget fires at iteration 2 top.
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "5", "--max-agent-calls", "2", "--no-merge", "--no-decision-grill", "--no-post-task-review", "--fast-verifier"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "5", "--max-agent-calls", "2", "--no-apply", "--no-decision-grill", "--no-post-task-review", "--fast-verifier"], 90_000);
     assert(r.status !== 0, "expected non-zero exit when agent-call budget exhausted");
     const events = readEvents(dir);
     assert(hasEvent(events, "budget_exhausted"), "expected budget_exhausted event");
@@ -2008,7 +2056,7 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "3", "--no-merge", "--no-decision-grill"], 90_000);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "3", "--no-apply", "--no-decision-grill"], 90_000);
     assert(r.status !== 0, "expected non-zero exit when post-task review returns needs_human");
     const events = readEvents(dir);
     assert(hasEvent(events, "post_task_review_finished"), "expected post_task_review_finished event");
@@ -2121,12 +2169,12 @@ writeFileSync("output.txt", "done", "utf-8");
     git(["commit", "-m", "initial"], dir);
     writeFileSync(join(dir, "dirty.txt"), "uncommitted", "utf-8");
 
-    const blocked = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge"]);
+    const blocked = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-apply"]);
     assert(blocked.status !== 0, "dirty main worktree should block run by default");
     assert((blocked.stderr + blocked.stdout).includes("Main worktree is dirty"), `expected dirty gate message, got stdout=${blocked.stdout} stderr=${blocked.stderr}`);
     assert(!existsSync(join(dir, ".worktrees", "task-001")), "dirty gate should stop before creating task worktree");
 
-    const allowed = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-merge", "--allow-dirty"]);
+    const allowed = runCLI(dir, ["run", "--command", fakeCommand(agent), "--max-iterations", "1", "--no-apply", "--allow-dirty"]);
     assert(allowed.status === 0, `--allow-dirty should allow run\nstdout: ${allowed.stdout}\nstderr: ${allowed.stderr}`);
     const state = readState(dir);
     assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
