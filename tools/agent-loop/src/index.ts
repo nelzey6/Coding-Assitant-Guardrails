@@ -509,9 +509,15 @@ program
     failOnInterruptedRun(repoRoot, opts.state ?? DEFAULT_STATE_FILE, opts.runsRoot ?? DEFAULT_RUNS_ROOT, !!opts.continue, !!opts.newRun);
 
     const timeout = parseInt(opts.agentTimeout ?? "0", 10);
+    const detectTool = (template: string): AgentConfig["tool"] => {
+      const t = template.trim();
+      if (/(?:^|\s|[/\\])pi(?:\s|$)/.test(t)) return "pi";
+      if (/(?:^|\s|[/\\])claude(?:\s|$)/.test(t)) return "claude";
+      return "custom";
+    };
     const makeAgent = (template?: string): AgentConfig =>
       template && template.trim().length > 0
-        ? { tool: "custom", commandTemplate: template, timeoutSeconds: timeout }
+        ? { tool: detectTool(template), commandTemplate: template, timeoutSeconds: timeout }
         : { tool: "pi", timeoutSeconds: timeout };
 
     // Auto-detect executor command if --command not supplied.
