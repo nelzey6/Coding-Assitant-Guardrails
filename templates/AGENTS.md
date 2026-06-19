@@ -193,6 +193,10 @@ Discover commands from `PROJECT.md`, docs, CI, task runners, or build files. Use
 
 Before handoff, summarize validation and note residual risks.
 
+## Git Commits
+
+When you create a git commit, write an extensive commit message. Use a concise subject plus a body that explains what changed, why it changed, notable design or safety considerations, and validation performed.
+
 ## Agentic Loop Overlay
 
 These rules apply when this agent is running as an executor, task-grill, decision-grill, verifier, or planner inside an autonomous agentic loop harness (detectable by the presence of a task JSON in the prompt, a `runDir` path, or a `resultFile` instruction).
