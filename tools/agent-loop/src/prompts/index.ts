@@ -108,6 +108,21 @@ function git(args: string[], cwd?: string): string {
   }
 }
 
+// Run `codegraph sync` in the given directory to bring the index up to date after file changes.
+// If the index is not initialized, runs `codegraph init -i` first. Silent no-op if codegraph is not on PATH.
+export function syncCodeGraph(workingDirectory = "."): void {
+  try {
+    const statusOut = execFileSync("codegraph", ["status", workingDirectory], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 });
+    if (statusOut.includes("Not initialized")) {
+      execFileSync("codegraph", ["init", "-i", workingDirectory], { encoding: "utf-8", stdio: "ignore", timeout: 120_000 });
+    } else {
+      execFileSync("codegraph", ["sync", workingDirectory], { encoding: "utf-8", stdio: "ignore", timeout: 60_000 });
+    }
+  } catch {
+    // codegraph not installed or failed — non-fatal
+  }
+}
+
 // Generate the codegraph context file by invoking the repo's context helper scripts.
 // Falls back to a stub when the helper is not found or fails.
 export function writeCodeGraphContext(outputFile: string, workingDirectory = "."): void {
@@ -282,7 +297,7 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "",
     `The harness provided a context packet at: ${repoContextFile}`,
     `The harness also generated optional CodeGraph context at: ${codeGraphFile}`,
-    "Use CodeGraph context for orientation before broad manual search, then verify conclusions against source files. If the artifact says CodeGraph is unavailable, continue normally.",
+    "Use CodeGraph context for orientation before broad manual search, then verify conclusions against source files. If the artifact says CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding.",
     "Inspect deeper in the repository when needed.",
     "",
     "When planning validation, match proof to workflow. Discovery/investigation/zoom-out tasks may be proven by artifacts and evidence notes; do not attach implementation test commands to artifact-only discovery tasks. Implementation/architecture tasks need focused task.validation commands when behavior or code changes should be proven. If a task adds or changes a small smoke test/check that directly proves the change, include that command in task.validation so the harness runs it before verification. Prefer `pwsh -File path/to/smoke.ps1`; mention `powershell.exe` only as legacy fallback.",
@@ -421,7 +436,7 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     `Run directory: ${runDir}`,
     `CodeGraph context: ${codeGraphFile}`,
     "",
-    "Use CodeGraph context for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions by reading source files. If CodeGraph is unavailable, continue normally.",
+    "Use CodeGraph context for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions by reading source files. If CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding.",
     "",
     `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
     recentHistory,

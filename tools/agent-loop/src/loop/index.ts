@@ -28,6 +28,7 @@ import { invokeAgent, invokeAgentWithLog, getTaskChecks, type AgentConfig } from
 import { invokeChecks, parseMetricLines } from "../checks/index.js";
 import { getTaskScope, getOutOfScopeFiles, testFastVerifierAllowed, testTaskIsHighRisk, isTaskUnscoped } from "../scope/index.js";
 import {
+  syncCodeGraph,
   writeCodeGraphContext,
   writeRepoContext,
   writePlannerPrompt,
@@ -801,6 +802,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         }
       }
       // Task-grill: re-check understanding immediately before execution.
+      syncCodeGraph(worktreePath);
       writeCodeGraphContext(codeGraphFile, worktreePath);
       writeTaskGrillPrompt(taskGrillPrompt, {
         repoRoot: cfg.repoRoot,
@@ -1082,6 +1084,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
             if      (cfg.mergeMode === "ff-only")     git(["merge", "--ff-only", branch], cfg.repoRoot);
             else if (cfg.mergeMode === "no-ff")       git(["merge", "--no-ff", branch, "-m", `agentic: merge ${taskId}`], cfg.repoRoot);
             else if (cfg.mergeMode === "cherry-pick") git(["cherry-pick", branch], cfg.repoRoot);
+            syncCodeGraph(cfg.repoRoot);
           } else {
             console.log(`No tracked branch changes to merge for ${taskId}.`);
           }
