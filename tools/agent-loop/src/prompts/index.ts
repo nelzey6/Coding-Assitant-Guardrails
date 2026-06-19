@@ -397,12 +397,14 @@ export interface ExecutorPromptOptions {
   codeGraphFile?: string;
   policy: WorkflowPolicy;
   taskGrillResult?: unknown;
+  decisionGrillDecisions?: Record<string, unknown>[];
 }
 
 export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOptions): void {
   const {
     repoRoot, runsRoot, stateFile, budget, task, iteration, runDir,
     eventLogPath: evLogPath, codeGraphFile = "", policy, taskGrillResult,
+    decisionGrillDecisions = [],
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
@@ -429,6 +431,16 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     "- Use `pwsh -File` in harness and smoke-test command examples. Mention `powershell.exe` only as a legacy Windows PowerShell compatibility fallback when explicitly needed.",
     "- If the task JSON has a non-empty `scope`, change only files matching those globs. The harness enforces this as a hard pre-verifier rail: files changed outside scope fail the task. If you must touch a file outside scope, stop and record it in the handover instead of editing it.",
     "",
+    ...(decisionGrillDecisions.length > 0 ? [
+      "Binding decisions — the decision grill resolved these before you run. Treat each as a hard rule:",
+      ...decisionGrillDecisions.map((d) => {
+        const chosen = String(d["chosen"] ?? "").trim();
+        const why = String(d["whyItMatters"] ?? "").trim();
+        const q = String(d["question"] ?? "").trim();
+        return `- ${q}: ${chosen}${why ? ` (${why})` : ""}`;
+      }),
+      "",
+    ] : []),
     `Iteration: ${iteration}`,
     `State file: ${stateFile}`,
     `Selected workflow: ${workflow}`,

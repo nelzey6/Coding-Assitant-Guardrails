@@ -909,6 +909,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       );
 
       // Decision grill: self-interview genuine design forks before editing (opt-in).
+      let acceptedDecisions: Record<string, unknown>[] = [];
       if (cfg.decisionGrill) {
         const outcome = await runDecisionGrillPhase(
           cfg, agentCallCounter, task, iteration, runDir, codeGraphFile, worktreePath, eventLogPath
@@ -918,6 +919,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
           throw new LoopError(`Decision grill halted ${taskId} before executor edits: ${outcome.escalateReason}`);
         }
+        acceptedDecisions = outcome.accepted;
         recordDecisions(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, outcome.accepted);
       }
 
@@ -941,6 +943,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         codeGraphFile,
         policy,
         taskGrillResult: taskGrillResultObj,
+        decisionGrillDecisions: acceptedDecisions,
       });
 
       appendEvent(cfg.repoRoot, "executor_started", { task: taskId, prompt: executorPrompt, log: executorLog }, cfg.runsRoot, cfg.stateFile);
