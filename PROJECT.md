@@ -34,6 +34,8 @@ npm run agent -- init "my goal here"
 # Resume current goal (applies changes as unstaged diff when done)
 npm run agent -- run --checks "cd tools/agent-loop && npx tsc --noEmit"
 
+Local agent-session invocation note: when launching the loop from another agent, pass `--command "pi --approve --no-session -p \"@{prompt}\""` so pi trusts project-local files and each harness phase starts from a fresh session.
+
 # Run with worktree bootstrap/env support for repos with ignored local artifacts.
 # Bootstrap commands are generic shell commands: they can link deps, source an SDK,
 # generate code, prepare HDL/toolchain outputs, or create any local-only fixture.
