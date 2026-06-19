@@ -603,11 +603,16 @@ async function runPostTaskReviewPhase(
     throw new LoopError(`Post-task review returned needs_human after ${taskId}: ${result.assessment ?? "(no assessment)"}`);
   }
 
-  if (result.verdict === "replan" || result.verdict === "adjust_remaining_tasks") {
-    const phase = result.verdict === "replan" ? "post_task_review" : "post_task_adjustment";
+  if (result.verdict === "adjust_remaining_tasks") {
+    appendEvent(cfg.repoRoot, "post_task_review_advisory_recorded", { task: taskId, verdict: result.verdict, assessment: result.assessment, suggestedChanges: result.suggestedChanges }, cfg.runsRoot, cfg.stateFile);
+    console.log(`Post-task review advisory recorded; continuing to next task. ${result.assessment ?? ""}`);
+    return;
+  }
+
+  if (result.verdict === "replan") {
     appendEvent(cfg.repoRoot, "post_task_review_replan", { task: taskId, verdict: result.verdict, assessment: result.assessment, suggestedChanges: result.suggestedChanges }, cfg.runsRoot, cfg.stateFile);
-    blockRemainingPlanForReplan(cfg, phase, result.assessment ?? `post-task review requested ${result.verdict}`, resultFile);
-    await runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, phase, result.assessment ?? `post-task review requested ${result.verdict}`);
+    blockRemainingPlanForReplan(cfg, "post_task_review", result.assessment ?? "post-task review requested replan", resultFile);
+    await runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, "post_task_review", result.assessment ?? "post-task review requested replan");
     return;
   }
 

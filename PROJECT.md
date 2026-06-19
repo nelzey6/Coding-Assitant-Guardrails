@@ -108,7 +108,7 @@ The current TS run loop is:
 15. On pass, commit to the shared run branch (not to main).
 16. Write handover/progress artifacts.
 17. Run post-task plan review by default. This fresh review asks whether the remaining plan is still correctly sliced, scoped, ordered, and validated after the completed task. Verdicts: `continue`, `adjust_remaining_tasks`, `replan`, `needs_human`.
-18. On post-task review `adjust_remaining_tasks` or `replan`, block stale pending/retry tasks, enforce the replan budget/convergence guard, run planner again, and continue to replacement tasks.
+18. On post-task review `adjust_remaining_tasks`, record the advice as an advisory event and continue to the next runnable task; task-grill remains the just-in-time gate for deciding whether that specific task needs replan. On post-task review `replan`, block stale pending/retry tasks, enforce the replan budget/convergence guard, run planner again, and continue to replacement tasks.
 19. Every three passed tasks by default, run architect checkpoint over cumulative diff and remaining plan; `replan` calls planner, `needs_human` halts.
 20. When no runnable tasks remain, treat `passed` and `blocked` as terminal statuses. If all unfinished work is terminal, apply run branch to main tree as unstaged changes (default) or merge (`--merge`), clean up run worktree, and complete.
 
@@ -166,7 +166,7 @@ Current TS rails:
 - `--rebase-before-verify`: optional gate that rebases the worktree on loop-start HEAD and re-runs checks before the verifier, catching post-merge integration failures early.
 - After each `ready` task-grill verdict, `assumptionsStillValid` and `assumptionsChanged` fields from the result are persisted back into `state.assumptions` (tagged `[valid]`/`[changed]`) and emitted as an `assumptions_updated` event. The current assumption list is forwarded into every subsequent task-grill prompt so drift is visible across turns.
 - `--goal-review` (opt-in): after all tasks pass, a goal-review agent judges the cumulative diff against `state.goal` and emits `goal_review_finished`. A `needs_human` verdict halts the loop before finalize-docs.
-- Post-task plan review is default-on after every passed task. It reviews assumption drift, remaining task slicing/scope/order, and validation design. `adjust_remaining_tasks` and `replan` block stale pending/retry tasks before planner appends replacements; `needs_human` halts.
+- Post-task plan review is default-on after every passed task. It reviews assumption drift, remaining task slicing/scope/order, and validation design. `adjust_remaining_tasks` records advisory feedback and continues so task-grill can make the next just-in-time replan decision; `replan` blocks stale pending/retry tasks before planner appends replacements; `needs_human` halts.
 - `--architect-checkpoint-interval <n>` (default 0): optional legacy cumulative checkpoint. It is disabled by default because post-task plan reflection owns remaining-plan drift.
 - High-complexity tasks run iterative `reflect-on-approach` stance review before executor edits. The harness rejects stance agents that dirty the worktree and records the approved stance as a run artifact.
 - `--decision-grill` (opt-in): before each executor turn, a grill-with-docs self-interview surfaces genuine design/product decisions and answers them itself with evidence. The harness enforces a decision contract via `validateDecisions` (each decision needs 2-4 evidenced options, exactly one marked recommended, plus `whyItMatters`/`selfAnswer`/`confidence`/`escalate`). Shallow or low-confidence-without-escalate results trigger exactly one re-grill (`decision_grill_regrill`); if still inadequate, or any decision sets `escalate:true`/stays low-confidence, the task escalates to `needs_human`. Answered decisions are flattened into `state.decisions` and emitted as `decisions_recorded`. The planner result's `decisions` are validated by the same contract and normalized to strings on merge.
@@ -199,7 +199,7 @@ Known gaps before calling the TS runner production-default:
 - goal review: `--goal-review` pass verdict allows completion, `needs_human` halts before finalize-docs
 - post-task review: default `continue` verdict runs after passed tasks
 - post-task review: `replan` verdict blocks stale remaining tasks, calls planner, and continues with replacement task
-- post-task review: `adjust_remaining_tasks` verdict blocks stale tasks, calls planner (phase `post_task_adjustment`), and continues
+- post-task review: `adjust_remaining_tasks` records an advisory event and continues to the next runnable task without calling planner
 - post-task review: `needs_human` verdict halts loop before any dependent task runs
 - architect checkpoint: `continue` verdict proceeds, `replan` verdict calls planner and continues with new task
 - architect checkpoint: `needs_human` verdict halts loop without running further tasks

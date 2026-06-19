@@ -1751,11 +1751,10 @@ writeFileSync("output.txt", "done", "utf-8");
 });
 
 // ── case 19: post-task review adjust_remaining_tasks ─────────────────────────
-// Same code path as replan but verdict is "adjust_remaining_tasks" and the
-// emitted phase is "post_task_adjustment". The stale remaining task must be
-// blocked and a replacement task must run and pass.
+// adjust_remaining_tasks is advisory: the loop records feedback and continues
+// to the next runnable task. Task-grill remains the just-in-time replan gate.
 
-runCase("post-task review: adjust_remaining_tasks blocks stale task and replans", () => {
+runCase("post-task review: adjust_remaining_tasks records advisory and continues", () => {
   const dir = tmpRepo("post-task-adjust");
   try {
     writeState(dir, baseState(
@@ -1817,22 +1816,7 @@ if (content.includes("Write post-task review JSON only to:")) {
   process.exit(0);
 }
 if (content.includes("Write planner JSON only to:")) {
-  const m = content.match(/Write planner JSON only to: (.+)/);
-  const pp = m[1].trim();
-  mkdirSync(dirname(pp), { recursive: true });
-  writeFileSync(pp, JSON.stringify({
-    verdict: "planned", summary: "narrowed remaining task", decisions: [], assumptions: [],
-    openQuestions: [], blockers: [], artifacts: [],
-    tasks: [{
-      id: "task-003", title: "Narrowed task", kind: "maintenance", workflow: "tdd",
-      status: "pending", priority: 3,
-      acceptanceCriteria: ["adjusted.txt exists"], validation: [],
-      dependsOn: [], failureHistory: [], artifacts: [], scope: ["adjusted.txt"]
-    }]
-  }), "utf-8");
-  const gm = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/);
-  if (gm) { mkdirSync(dirname(gm[1].trim()), { recursive: true }); writeFileSync(gm[1].trim(), "# Grill\\nAdjusted.", "utf-8"); }
-  process.exit(0);
+  throw new Error("planner must not run for adjust_remaining_tasks advisory");
 }
 if (content.includes("Write JSON only to this path:")) {
   const m = content.match(/Write JSON only to this path: (.+)/);
@@ -1841,8 +1825,7 @@ if (content.includes("Write JSON only to this path:")) {
   writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
   process.exit(0);
 }
-if (content.includes('"id": "task-002"')) throw new Error("executor must not run stale task-002 after adjust_remaining_tasks");
-if (content.includes('"id": "task-003"')) { writeFileSync("adjusted.txt", "done", "utf-8"); process.exit(0); }
+if (content.includes('"id": "task-002"')) { writeFileSync("stale.txt", "done", "utf-8"); process.exit(0); }
 writeFileSync("output.txt", "done", "utf-8");
 `, "utf-8");
 
@@ -1854,13 +1837,13 @@ writeFileSync("output.txt", "done", "utf-8");
     const state = readState(dir);
     const stale = state.tasks.find((t: any) => t.id === "task-002");
     const adjusted = state.tasks.find((t: any) => t.id === "task-003");
-    assert(stale?.status === "blocked", `expected task-002 blocked, got ${stale?.status}`);
-    assert(adjusted?.status === "passed", `expected task-003 passed, got ${adjusted?.status}`);
+    assert(stale?.status === "passed", `expected task-002 passed, got ${stale?.status}`);
+    assert(!adjusted, "did not expect planner-created task-003");
     const events = readEvents(dir);
-    assert(hasEvent(events, "post_task_review_replan"), "expected post_task_review_replan event");
-    const ev = events.find((e: any) => e.type === "post_task_review_replan");
+    assert(hasEvent(events, "post_task_review_advisory_recorded"), "expected advisory event");
+    const ev = events.find((e: any) => e.type === "post_task_review_advisory_recorded");
     assert(ev?.verdict === "adjust_remaining_tasks", `expected verdict=adjust_remaining_tasks, got ${ev?.verdict}`);
-    assert(hasEvent(events, "planner_finished"), "expected planner_finished after adjust_remaining_tasks");
+    assert(!hasEvent(events, "post_task_review_replan"), "did not expect replan event for adjust_remaining_tasks");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }
