@@ -17,9 +17,17 @@ function isEtimeout(err: unknown): boolean {
 }
 
 // On Windows, wrap a shell command in a PS1 script that propagates exit codes.
+// The harness accepts common shell command strings from CLI/task JSON. Windows
+// PowerShell 5 does not support bash/Pwsh-style `&&`, so translate the simple
+// command-chaining form operators commonly pass for checks.
+function normalizeWindowsPowerShellCommand(command: string): string {
+  return command.replace(/\s+&&\s+/g, "; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; ");
+}
+
 function psScript(command: string): string {
-  const trimmed = command.trimStart();
-  const invocation = trimmed.startsWith('"') ? `& ${command}` : command;
+  const normalized = normalizeWindowsPowerShellCommand(command);
+  const trimmed = normalized.trimStart();
+  const invocation = trimmed.startsWith('"') ? `& ${normalized}` : normalized;
   return `${invocation}\nexit $LASTEXITCODE`;
 }
 
