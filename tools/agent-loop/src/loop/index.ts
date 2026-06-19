@@ -639,7 +639,12 @@ async function runStanceReflectionPhase(
   codeGraphFile: string,
   decisions: Record<string, unknown>[]
 ): Promise<{ result: StanceReflectionResult; resultFile: string }> {
-  const baseline = git(["status", "--porcelain"], worktreePath);
+  const worktreeSnapshot = (): string => git(["status", "--porcelain", "--untracked-files=all"], worktreePath)
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .sort()
+    .join("\n");
+  const baseline = worktreeSnapshot();
   let priorResultFile = "";
   let result: StanceReflectionResult | undefined;
   const rounds = 3;
@@ -656,8 +661,9 @@ async function runStanceReflectionPhase(
     agentCallCounter.count++;
     await invokeAgentWithLog(promptFile, cfg.grillAgent, worktreePath, logFile);
     if (!existsSync(resultFile)) throw new LoopError(`Stance reflection did not write ${resultFile}`);
-    if (git(["status", "--porcelain"], worktreePath) !== baseline) {
-      throw new LoopError(`Stance reflection edited the worktree before implementation for ${task.id}`);
+    const afterReflection = worktreeSnapshot();
+    if (afterReflection !== baseline) {
+      throw new LoopError(`Stance reflection edited the worktree before implementation for ${task.id}\nBefore:\n${baseline || "(clean)"}\nAfter:\n${afterReflection || "(clean)"}`);
     }
     result = JSON.parse(readFileSync(resultFile, "utf-8")) as StanceReflectionResult;
     if (result.mode !== "stance" || !["reconfirm", "readjust", "reassess", "needs_human"].includes(result.verdict)) {
