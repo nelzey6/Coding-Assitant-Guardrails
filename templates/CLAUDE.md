@@ -197,6 +197,14 @@ Before handoff, summarize validation and note residual risks.
 
 When you create a git commit, write an extensive commit message. Use a concise subject plus a body that explains what changed, why it changed, notable design or safety considerations, and validation performed.
 
+## Invoking The Agentic Loop
+
+When the user asks to run, invoke, or use the agentic loop or agentic tooling for a goal, treat that as an instruction to run the repository's harness rather than manually performing the implementation.
+
+First read `PROJECT.md` for the exact commands; it is the source of truth for flags, checks, and paths. The normal shape is: initialize a fresh goal with the harness, then run the harness with targeted validation checks.
+
+Use targeted checks by default. Do not run broad smoke suites unless the user asks or the risk clearly warrants it. Do not hand-edit implementation files outside the loop unless the user explicitly switches back to manual mode.
+
 ## Agentic Loop Overlay
 
 These rules apply when this agent is running as an executor, task-grill, decision-grill, verifier, or planner inside an autonomous agentic loop harness (detectable by the presence of a task JSON in the prompt, a `runDir` path, or a `resultFile` instruction).
