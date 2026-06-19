@@ -1,5 +1,5 @@
 import { spawnSync, spawn } from "child_process";
-import { mkdirSync, readFileSync, appendFileSync, createWriteStream, writeFileSync, unlinkSync } from "fs";
+import { mkdirSync, readFileSync, appendFileSync, createWriteStream, writeFileSync, unlinkSync, existsSync } from "fs";
 import { dirname, resolve, join } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
@@ -166,29 +166,103 @@ export function invokeAgent(
   }
 }
 
+export interface TokenUsage {
+  tool: AgentTool | "custom";
+  phase: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  costUsd: number | null;
+}
+
+function extractClaudeUsage(logPath: string, phase: string): TokenUsage | null {
+  if (!existsSync(logPath)) return null;
+  const lines = readFileSync(logPath, "utf-8").split("\n").filter(Boolean).reverse();
+  for (const line of lines) {
+    try {
+      const d = JSON.parse(line) as Record<string, unknown>;
+      if (d.type === "result" && d.usage && typeof d.usage === "object") {
+        const u = d.usage as Record<string, number>;
+        return {
+          tool: "claude",
+          phase,
+          input: u.input_tokens ?? 0,
+          output: u.output_tokens ?? 0,
+          cacheRead: u.cache_read_input_tokens ?? 0,
+          cacheWrite: u.cache_creation_input_tokens ?? 0,
+          totalTokens: (u.input_tokens ?? 0) + (u.output_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+          costUsd: typeof d.total_cost_usd === "number" ? d.total_cost_usd : null,
+        };
+      }
+    } catch { /* skip non-JSON lines */ }
+  }
+  return null;
+}
+
+function extractPiUsage(logPath: string, phase: string): TokenUsage | null {
+  if (!existsSync(logPath)) return null;
+  const lines = readFileSync(logPath, "utf-8").split("\n").filter(Boolean).reverse();
+  for (const line of lines) {
+    try {
+      const d = JSON.parse(line) as Record<string, unknown>;
+      if (d.type === "agent_end" && Array.isArray(d.messages)) {
+        const msgs = d.messages as Array<Record<string, unknown>>;
+        const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
+        const u = (lastAssistant?.usage ?? {}) as Record<string, unknown>;
+        const cost = (u.cost ?? {}) as Record<string, number>;
+        return {
+          tool: "pi",
+          phase,
+          input: typeof u.input === "number" ? u.input : 0,
+          output: typeof u.output === "number" ? u.output : 0,
+          cacheRead: typeof u.cacheRead === "number" ? u.cacheRead : 0,
+          cacheWrite: typeof u.cacheWrite === "number" ? u.cacheWrite : 0,
+          totalTokens: typeof u.totalTokens === "number" ? u.totalTokens : 0,
+          costUsd: typeof cost.total === "number" && cost.total > 0 ? cost.total : null,
+        };
+      }
+    } catch { /* skip non-JSON lines */ }
+  }
+  return null;
+}
+
+export function extractTokenUsage(logPath: string, tool: AgentTool | "custom", phase: string): TokenUsage | null {
+  if (tool === "claude") return extractClaudeUsage(logPath, phase);
+  if (tool === "pi") return extractPiUsage(logPath, phase);
+  return null;
+}
+
 /**
  * Invoke an agent, streaming output live to stdout AND teeing to logPath.
  * On error, appends the error message to the log before re-throwing.
+ * Returns token usage extracted from the log, or null if unavailable.
  */
 export async function invokeAgentWithLog(
   promptFile: string,
   config: AgentConfig,
   workingDirectory: string,
-  logPath: string
-): Promise<void> {
+  logPath: string,
+  phase = "agent"
+): Promise<TokenUsage | null> {
   mkdirSync(dirname(logPath), { recursive: true });
 
   const timeout = config.timeoutSeconds ?? 0;
   const resolvedPrompt = resolve(promptFile);
 
   let command: string;
+  let effectiveTool: AgentTool | "custom";
   if (config.commandTemplate) {
     command = config.commandTemplate.replace("{prompt}", resolvedPrompt);
+    effectiveTool = "custom";
   } else if (config.tool === "claude") {
     const prompt = readFileSync(promptFile, "utf-8").replace(/'/g, "'\\''");
-    command = `claude -p '${prompt}'`;
+    command = `claude -p '${prompt}' --output-format json`;
+    effectiveTool = "claude";
   } else if (config.tool === "pi") {
-    command = `pi -p "@${resolvedPrompt}"`;
+    command = `pi -p "@${resolvedPrompt}" --mode json`;
+    effectiveTool = "pi";
   } else {
     throw new AgentError(`--tool custom requires --command`);
   }
@@ -200,6 +274,8 @@ export async function invokeAgentWithLog(
     appendFileSync(logPath, `ERROR: ${msg}\n`, "utf-8");
     throw err;
   }
+
+  return extractTokenUsage(logPath, effectiveTool, phase);
 }
 
 /**

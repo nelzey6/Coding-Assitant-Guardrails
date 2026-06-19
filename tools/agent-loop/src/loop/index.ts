@@ -24,7 +24,7 @@ import {
 } from "../state/index.js";
 import { appendEvent } from "../events/index.js";
 import { safeSlug, createWorktree, worktreeExists, removeWorktree, git as gitTool, GitError } from "../tools/index.js";
-import { invokeAgent, invokeAgentWithLog, getTaskChecks, type AgentConfig } from "../agent/index.js";
+import { invokeAgent, invokeAgentWithLog, getTaskChecks, type AgentConfig, type TokenUsage } from "../agent/index.js";
 import { invokeChecks, parseMetricLines } from "../checks/index.js";
 import { getTaskScope, getOutOfScopeFiles, testFastVerifierAllowed, testTaskIsHighRisk, isTaskUnscoped, resolveTaskComplexity } from "../scope/index.js";
 import {
@@ -133,6 +133,21 @@ function git(args: string[], cwd?: string): string {
     const msg = err instanceof GitError ? err.message : String(err);
     throw new LoopError(msg);
   }
+}
+
+function emitTokenUsage(cfg: Required<LoopConfig>, usage: TokenUsage | null, taskId?: string): void {
+  if (!usage) return;
+  appendEvent(cfg.repoRoot, "token_usage", {
+    ...(taskId ? { task: taskId } : {}),
+    phase: usage.phase,
+    tool: usage.tool,
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    totalTokens: usage.totalTokens,
+    ...(usage.costUsd !== null ? { costUsd: usage.costUsd } : {}),
+  }, cfg.runsRoot, cfg.stateFile);
 }
 
 function timestamp(): string {
@@ -359,7 +374,7 @@ async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter:
   appendEvent(cfg.repoRoot, "finalize_docs_started", { runDir, prompt: promptFile, summary: summaryFile }, cfg.runsRoot, cfg.stateFile);
   console.log("=== Agentic finalize-docs ===");
   agentCallCounter.count++;
-  await invokeAgentWithLog(promptFile, cfg.executorAgent, cfg.repoRoot, executorLog);
+  emitTokenUsage(cfg, await invokeAgentWithLog(promptFile, cfg.executorAgent, cfg.repoRoot, executorLog, "finalize-docs"));
 
   if (!existsSync(summaryFile)) {
     writeFileSync(summaryFile, `# Agentic final summary\n\nFinalizer did not create a summary; inspect ${executorLog}.`, "utf-8");
@@ -373,7 +388,7 @@ async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter:
     resultFile: verifierResult,
   });
   agentCallCounter.count++;
-  await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, cfg.repoRoot, verifierLog);
+  emitTokenUsage(cfg, await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, cfg.repoRoot, verifierLog, "finalize-docs-verifier"));
 
   const verifierVerdict = (() => {
     if (!existsSync(verifierResult)) return "fail";
@@ -424,7 +439,7 @@ async function runGoalReviewPhase(
   appendEvent(cfg.repoRoot, "goal_review_started", { runDir, prompt: promptFile, resultFile }, cfg.runsRoot, cfg.stateFile);
   console.log("=== Agentic goal review ===");
   agentCallCounter.count++;
-  await invokeAgentWithLog(promptFile, cfg.plannerAgent, cfg.repoRoot, logFile);
+  emitTokenUsage(cfg, await invokeAgentWithLog(promptFile, cfg.plannerAgent, cfg.repoRoot, logFile, "goal-review"));
 
   if (!existsSync(resultFile)) throw new LoopError(`Goal review agent did not write ${resultFile}`);
   const result = JSON.parse(readFileSync(resultFile, "utf-8")) as GoalReviewResult;
@@ -535,7 +550,7 @@ async function runArchitectCheckpointPhase(
   appendEvent(cfg.repoRoot, "architect_checkpoint_started", { runDir, prompt: promptFile, resultFile, passedCount }, cfg.runsRoot, cfg.stateFile);
   console.log(`=== Agentic architect checkpoint (${passedCount} tasks passed) ===`);
   agentCallCounter.count++;
-  await invokeAgentWithLog(promptFile, cfg.plannerAgent, cfg.repoRoot, logFile);
+  emitTokenUsage(cfg, await invokeAgentWithLog(promptFile, cfg.plannerAgent, cfg.repoRoot, logFile, "architect-checkpoint"));
 
   if (!existsSync(resultFile)) throw new LoopError(`Architect checkpoint agent did not write ${resultFile}`);
   const result = JSON.parse(readFileSync(resultFile, "utf-8")) as ArchitectCheckpointResult;
@@ -593,7 +608,7 @@ async function runPostTaskReviewPhase(
   appendEvent(cfg.repoRoot, "post_task_review_started", { task: taskId, runDir, prompt: promptFile, resultFile }, cfg.runsRoot, cfg.stateFile);
   console.log(`=== Agentic post-task review: ${taskId} ===`);
   agentCallCounter.count++;
-  await invokeAgentWithLog(promptFile, cfg.grillAgent, cfg.repoRoot, logFile);
+  emitTokenUsage(cfg, await invokeAgentWithLog(promptFile, cfg.grillAgent, cfg.repoRoot, logFile, "post-task-review"), taskId);
 
   if (!existsSync(resultFile)) throw new LoopError(`Post-task review agent did not write ${resultFile}`);
   const result = JSON.parse(readFileSync(resultFile, "utf-8")) as PostTaskReviewResult;
@@ -664,7 +679,7 @@ async function runStanceReflectionPhase(
     });
     appendEvent(cfg.repoRoot, "stance_reflection_started", { task: task.id, round, prompt: promptFile, resultFile }, cfg.runsRoot, cfg.stateFile);
     agentCallCounter.count++;
-    await invokeAgentWithLog(promptFile, cfg.grillAgent, worktreePath, logFile);
+    emitTokenUsage(cfg, await invokeAgentWithLog(promptFile, cfg.grillAgent, worktreePath, logFile, "stance-reflection"), task.id);
     if (!existsSync(resultFile)) throw new LoopError(`Stance reflection did not write ${resultFile}`);
     const afterReflection = worktreeSnapshot();
     if (afterReflection !== baseline) {
@@ -724,7 +739,7 @@ async function runDecisionGrillPhase(
     });
     appendEvent(cfg.repoRoot, "decision_grill_started", { task: task.id, prompt: promptFile, resultFile, reGrill: !!priorShallowFeedback }, cfg.runsRoot, cfg.stateFile);
     agentCallCounter.count++;
-    await invokeAgentWithLog(promptFile, cfg.grillAgent, worktreePath, logFile);
+    emitTokenUsage(cfg, await invokeAgentWithLog(promptFile, cfg.grillAgent, worktreePath, logFile, "decision-grill"), task.id);
     if (!existsSync(resultFile)) throw new LoopError(`Decision grill did not write ${resultFile}`);
     const parsed = JSON.parse(readFileSync(resultFile, "utf-8")) as { decisions?: Record<string, unknown>[] };
     const decisions = parsed.decisions ?? [];
@@ -965,7 +980,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       });
       appendEvent(cfg.repoRoot, "task_grill_started", { task: taskId, prompt: taskGrillPrompt, resultFile: taskGrillResult, log: taskGrillLog }, cfg.runsRoot, cfg.stateFile);
       agentCallCounter.count++;
-      await invokeAgentWithLog(taskGrillPrompt, cfg.grillAgent, worktreePath, taskGrillLog);
+      emitTokenUsage(cfg, await invokeAgentWithLog(taskGrillPrompt, cfg.grillAgent, worktreePath, taskGrillLog, "task-grill"), taskId);
       if (!existsSync(taskGrillResult)) throw new LoopError(`Task grill did not write ${taskGrillResult}`);
       const taskGrillResultObj = JSON.parse(readFileSync(taskGrillResult, "utf-8")) as TaskGrillResult;
       appendEvent(cfg.repoRoot, "task_grill_finished", { task: taskId, verdict: taskGrillResultObj.verdict, resultFile: taskGrillResult, understanding: taskGrillResultObj.understanding }, cfg.runsRoot, cfg.stateFile);
@@ -1075,7 +1090,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       appendEvent(cfg.repoRoot, "executor_started", { task: taskId, prompt: executorPrompt, log: executorLog }, cfg.runsRoot, cfg.stateFile);
       try {
         agentCallCounter.count++;
-        await invokeAgentWithLog(executorPrompt, cfg.executorAgent, worktreePath, executorLog);
+        emitTokenUsage(cfg, await invokeAgentWithLog(executorPrompt, cfg.executorAgent, worktreePath, executorLog, "executor"), taskId);
         appendEvent(cfg.repoRoot, "executor_passed", { task: taskId, log: executorLog }, cfg.runsRoot, cfg.stateFile);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1193,7 +1208,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           writeVerifierPrompt(verifierPrompt, { repoRoot: cfg.repoRoot, runsRoot: cfg.runsRoot, stateFile: cfg.stateFile, budget: cfg.budget, task, worktreePath, checkOutput, resultFile: verifierResult, eventLogPath, policy, adversarial: false });
           appendEvent(cfg.repoRoot, "verifier_started", { task: taskId, prompt: verifierPrompt, resultFile: verifierResult, log: verifierLog, votes: 1 }, cfg.runsRoot, cfg.stateFile);
           agentCallCounter.count++;
-          await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, worktreePath, verifierLog);
+          emitTokenUsage(cfg, await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, worktreePath, verifierLog, "verifier"), taskId);
           if (!existsSync(verifierResult)) throw new LoopError(`Verifier did not write ${verifierResult}`);
           verifierResultObj = JSON.parse(readFileSync(verifierResult, "utf-8")) as VerifierResult;
         } else {
@@ -1209,9 +1224,10 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
             appendEvent(cfg.repoRoot, "verifier_started", { task: taskId, prompt: vPrompt, resultFile: vResult, log: vLog, vote: v, votes }, cfg.runsRoot, cfg.stateFile);
             agentCallCounter.count++;
           }
-          await Promise.all(voteSlots.map(({ prompt: vPrompt, log: vLog }) =>
-            invokeAgentWithLog(vPrompt, cfg.verifierAgent, worktreePath, vLog)
+          const voteUsages = await Promise.all(voteSlots.map(({ prompt: vPrompt, log: vLog, v }) =>
+            invokeAgentWithLog(vPrompt, cfg.verifierAgent, worktreePath, vLog, `verifier-vote-${v}`)
           ));
+          voteUsages.forEach((u) => emitTokenUsage(cfg, u, taskId));
           const voteResults: VerifierResult[] = voteSlots.map(({ result: vResult, v }) => {
             if (!existsSync(vResult)) throw new LoopError(`Verifier vote ${v} did not write ${vResult}`);
             const vr = JSON.parse(readFileSync(vResult, "utf-8")) as VerifierResult;
