@@ -492,7 +492,7 @@ program
       if (opts.command && (opts.command as string).trim().length > 0) return opts.command as string;
       for (const [bin, flag] of [["claude", "-p"], ["pi", "-p"]] as [string, string][]) {
         try {
-          execFileSync(bin, ["--version"], { stdio: "ignore" });
+          execFileSync(bin, ["--version"], { stdio: "ignore", shell: true });
           return `${bin} ${flag} {prompt}`;
         } catch { /* try next */ }
       }
