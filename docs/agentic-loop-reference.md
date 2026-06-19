@@ -9,30 +9,31 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 
 ## How it works
 
-1. Loads `agentic.json`, or creates it via a planner agent when `--goal` is given and no tasks exist yet.
+1. Loads `agentic.json`, or creates it via a planner agent when no tasks exist yet.
 2. Runs grill-with-docs-style discovery during planning and writes `.agent-runs/<planner-run>/grill-transcript.md` with the question/evidence/answer/proposal trail.
-3. Picks the next `pending` or `needs_retry` task (by priority, then dependency order).
-4. Creates one git worktree under `.worktrees/<task-id>` on branch `agentic/<task-id>`.
+3. Creates one shared git worktree under `.worktrees/run-<timestamp>` on branch `agentic/run-<timestamp>` — all tasks in the run commit onto this branch.
+4. Picks the next `pending` or `needs_retry` task (by priority, then dependency order).
 5. Runs a **task-grill** agent to confirm the task is still understood and safe before any edits.
-6. Runs an **executor** agent in the worktree.
-7. Runs configured **checks** (global `--checks` + task `validation` commands).
-8. Runs a **verifier** agent; requires `verifier-result.json` with verdict `pass`, `fail`, or `needs_human`.
-9. On pass: commits + merges (unless `--no-merge` / `--review-branch`).
+6. Runs a **decision-grill** agent to resolve design forks with evidenced options; accepted decisions become binding rules in the executor prompt.
+7. Runs an **executor** agent in the shared run worktree.
+8. Runs configured **checks** (global `--checks` + task `validation` commands).
+9. Runs a **verifier** agent (multi-vote for high-risk tasks); requires `verifier-result.json` with verdict `pass`, `fail`, or `needs_human`.
 10. Runs a **post-task plan review** after every passed task to decide whether the remaining plan is still valid.
 11. Runs an **architect checkpoint** every three passed tasks by default; the checkpoint may force replanning.
 12. On failure: records `failureHistory`, marks `needs_retry` or `needs_human` based on retry budget.
 13. Repeats until all tasks pass or the iteration budget is exhausted.
+14. On completion: applies run branch to main tree as **unstaged changes** (default) or merges if `--merge` is set.
 
 ---
 
 ## All flags
 
 ```
---command <template>         Custom default agent command; {prompt} = prompt file path. Omit to use pi.
---planner-command <tpl>      Planner/replan/checkpoint command (defaults to --command or pi)
---grill-command <tpl>        Task-grill/decision-grill/post-task review command (defaults to --command or pi)
---executor-command <tpl>     Executor command (defaults to --command or pi)
---verifier-command <tpl>     Separate verifier command (defaults to --command or pi)
+--command <template>         Custom default agent command; {prompt} = prompt file path. Auto-detects claude/pi if omitted.
+--planner-command <tpl>      Planner/replan/checkpoint command (defaults to --command or auto-detected)
+--grill-command <tpl>        Task-grill/decision-grill/post-task review command (defaults to --command or auto-detected)
+--executor-command <tpl>     Executor command (defaults to --command or auto-detected)
+--verifier-command <tpl>     Separate verifier command (defaults to --command or auto-detected)
 --checks <cmd>               Extra check command, repeatable; merged with task.validation
 --worktree-bootstrap <cmd>   Bootstrap command run inside each task worktree before agents/checks
 --worktree-bootstrap-ignore <path>  Bootstrap artifact path ignored by scope/diff/commit
@@ -49,11 +50,11 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 --agent-timeout <n>          Timeout for each agent invocation
 --check-timeout <n>          Timeout for each check command
 --prompt-budget low|medium|high  How much context to inline in prompts (default: medium)
---merge-mode ff-only|no-ff|cherry-pick  Merge strategy (default: ff-only)
+--merge-mode ff-only|no-ff|cherry-pick  Merge strategy when --merge is set (default: ff-only)
 --no-commit                  Don't commit changes after a pass
---no-merge                   Don't merge after a pass; keep branch for review
+--no-apply                   Don't apply run branch to main tree at the end; keep the run branch intact
+--merge                      Merge run branch into main instead of applying as unstaged changes
 --review-branch              Use agentic/review/<id> namespace and don't touch active branch
---auto-accept-passed         Immediately accept + clean up after verifier pass (with --no-merge)
 --cleanup-passed             Remove worktree after a task passes
 --plan-only                  Run planner only, write agentic.json, then stop
 --retry <task-id>            Force-retry a specific needs_retry/failed task
@@ -75,18 +76,35 @@ Worktree bootstrap is intentionally language/toolchain-neutral. Use it for Node 
 
 ## Review flows
 
-### Default — auto-merge on pass
+### Default — apply as unstaged changes
 
-Tasks merge into the active branch immediately after verifier pass. Nothing to do after the run.
+When the run completes, the harness applies the run branch to your main working tree as **unstaged changes** and cleans up the run worktree. You see the full diff, stage what you want, and commit when you're ready.
 
-### `--no-merge` — human reviews before integration
+```bash
+agentic-loop run --checks "npm test"
+# ... loop runs ...
+git status        # see all changed files
+git diff          # review the full diff
+git add -p        # stage selectively
+git commit        # your commit, your message
+```
 
-```powershell
-agentic-loop run --no-merge --checks "npm test"
-# inspect the diff
-git diff HEAD...agentic/task-001
-# accept when satisfied
-agentic-loop accept task-001
+### `--merge` — auto-merge on completion
+
+Merges the run branch into your active branch immediately after all tasks pass. Nothing staged in your working tree.
+
+```bash
+agentic-loop run --merge --checks "npm test"
+```
+
+### `--no-apply` — keep the run branch intact
+
+Skips both apply and merge. The run branch (`agentic/run-<timestamp>`) stays around for manual inspection.
+
+```bash
+agentic-loop run --no-apply --checks "npm test"
+# inspect later
+git diff HEAD...agentic/run-20260619-102207
 ```
 
 ### `--review-branch` — separate staging namespace
@@ -96,22 +114,6 @@ Uses `agentic/review/<id>` branches. Active branch is never touched until you ac
 ```powershell
 agentic-loop run --review-branch --checks "npm test"
 agentic-loop accept task-001
-```
-
-### `--auto-accept-passed` — unattended validation without human review
-
-Validates and merges immediately. Skips the human review step.
-
-```powershell
-agentic-loop run --no-merge --auto-accept-passed --checks "npm test"
-```
-
-### `--merge-mode apply` — inspect without committing
-
-Applies the task with `git cherry-pick --no-commit`. Changes land staged in your worktree; branch is kept intact.
-
-```powershell
-agentic-loop accept task-001 --merge-mode apply
 ```
 
 ---

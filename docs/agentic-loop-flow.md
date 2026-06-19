@@ -76,7 +76,7 @@ flowchart TD
 
     PICK[Pick next pending /\nneeds_retry task] --> NO_TASK{Any task\nrunnable?}
     NO_TASK -- No --> DONE([fa:fa-check Done])
-    NO_TASK -- Yes --> WORKTREE[Create git worktree\n.worktrees/task-id\non branch agentic/task-id]
+    NO_TASK -- Yes --> WORKTREE[Shared run worktree\n.worktrees/run-timestamp\nbranch agentic/run-timestamp]
 
     WORKTREE --> GRILL[Task-Grill agent\nre-inspect repo + history\nbefore any edits]
 
@@ -119,11 +119,11 @@ flowchart TD
     VER_RESULT -- fail --> RETRY_CHK
     VER_RESULT -- pass --> MERGE
 
-    MERGE{Merge mode?}
-    MERGE -- ff-only / cherry-pick / no-ff --> COMMIT[Commit + merge\ntask branch → main]
-    MERGE -- no-merge / review-branch --> HOLD[Hold branch for\nhuman review\n--accept to integrate]
-    COMMIT --> POST_REVIEW[Post-task plan review\nis remaining plan still valid?]
-    HOLD --> POST_REVIEW
+    MERGE{End of run?}
+    MERGE -- apply (default) --> APPLY[Apply run branch to main\nas unstaged changes\nclean up worktree]
+    MERGE -- --merge flag --> COMMIT[Commit + merge\nrun branch → main]
+    APPLY --> POST_REVIEW[Post-task plan review\nis remaining plan still valid?]
+    COMMIT --> POST_REVIEW
     POST_REVIEW --> POST_VERDICT{Verdict?}
     POST_VERDICT -- continue --> CHECKPOINT
     POST_VERDICT -- adjust_remaining_tasks / replan --> POST_REPLAN[Block stale pending tasks\nrun Planner again]
@@ -205,14 +205,15 @@ The harness persists `assumptionsStillValid`/`assumptionsChanged` back into `sta
 | `.agent-runs/<run>/verifier-result.json` | Verifier verdict: `pass`, `fail`, or `needs_human`. |
 | `.agent-runs/<run>/handover.md` | Continuation note for the next agent turn. |
 | `.agent-runs/<run>/failure-analysis.json` | Phase/attempt/reason/diff-stat on every failure. |
-| `.worktrees/<task-id>/` | Isolated git worktree for one task's edits. |
+| `.worktrees/run-<timestamp>/` | Shared run worktree — all tasks commit onto the same branch. |
 
 ---
 
 ## Safety defaults at a glance
 
-- Main worktree stays clean — one task per isolated branch/worktree.
-- Harness (not the executor) marks pass/fail and merges.
+- Main worktree stays clean — all tasks run in a shared `agentic/run-<timestamp>` branch/worktree.
+- Default apply mode: run branch applied as unstaged changes at the end — nothing is committed until you decide.
+- Harness (not the executor) marks pass/fail and manages the worktree.
 - Task-grill must return `ready` before any edits happen.
 - Post-task review runs after every passed task to reassess whether the remaining plan is still valid.
 - Architect checkpoints run every three passed tasks by default and may force a replan.

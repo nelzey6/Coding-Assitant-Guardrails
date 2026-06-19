@@ -1104,7 +1104,6 @@ export function writeFinalizeDocsPrompt(promptFile: string, opts: FinalizeDocsPr
   const { repoRoot, runsRoot, stateFile, budget, state, summaryFile } = opts;
 
   const stateJson = JSON.stringify(state, null, 2);
-  const limits = getPromptBudgetLimits(budget);
   const recentHistory = getRecentHistoryText(repoRoot, runsRoot, 30, budget);
   const diffStat = git(["diff", "--stat", "HEAD"], repoRoot);
   const projectState = existsSync(join(repoRoot, "PROJECT.md")) ? "PROJECT.md exists" : "PROJECT.md missing";
@@ -1112,18 +1111,23 @@ export function writeFinalizeDocsPrompt(promptFile: string, opts: FinalizeDocsPr
     ? "CONTEXT.md exists (planning-stage grill-with-docs ownership)"
     : "CONTEXT.md missing";
 
+  const skillBlock = skillInstruction(
+    "update-project-md",
+    repoRoot,
+    "Update PROJECT.md with durable technical facts: commands, architecture, module roles, validation, constraints. Keep edits concise and factual. Do not add transient run state."
+  );
+
   const content = [
     "You are finalizing a completed agentic loop run.",
     "",
-    "Goal: update durable repository markdowns only when the completed work changed durable facts.",
+    "Goal: update PROJECT.md with durable technical facts discovered or changed during this run.",
     "",
-    "Rules:",
-    "- Use the canonical update-project-md behavior for PROJECT.md.",
-    "- Update PROJECT.md for technical facts: commands, architecture, validation, workflows, debugging, file roles, setup changes.",
-    "- Do not normally edit CONTEXT.md here; CONTEXT.md belongs to the planning grill-with-docs stage. Only touch it if execution discovered a durable domain/product fact that could not have been known during planning, and explain that exception in the final summary.",
-    "- Do not edit AGENTS.md or CLAUDE.md unless the task explicitly changed agent policy.",
-    "- Keep edits concise and factual. Do not add transient run logs.",
-    "- If no durable docs need changes, leave the markdown files unchanged and explain why in the final summary.",
+    skillBlock,
+    "",
+    "Additional rules for this phase:",
+    "- Do not edit CONTEXT.md here; it belongs to the planning grill-with-docs stage. Only touch it if execution discovered a durable domain/product fact that could not have been known during planning.",
+    "- Do not edit AGENTS.md or CLAUDE.md unless the run explicitly changed agent policy.",
+    "- If no durable facts changed, leave PROJECT.md unchanged and explain why in the summary.",
     `- Always write a final human checkpoint summary to: ${summaryFile}`,
     "",
     "Docs available:",
@@ -1136,8 +1140,55 @@ export function writeFinalizeDocsPrompt(promptFile: string, opts: FinalizeDocsPr
     "Recent harness events:",
     recentHistory,
     "",
-    "Current uncommitted diff stat before doc finalization:",
+    "Uncommitted diff stat (what the run changed):",
     diffStat,
+  ].join("\n");
+
+  mkdirSync(dirname(promptFile), { recursive: true });
+  writeFileSync(promptFile, content, "utf-8");
+}
+
+export interface FinalizeDocsVerifierPromptOptions {
+  repoRoot: string;
+  runWorktreePath: string;
+  summaryFile: string;
+  resultFile: string;
+}
+
+export function writeFinalizeDocsVerifierPrompt(promptFile: string, opts: FinalizeDocsVerifierPromptOptions): void {
+  const { repoRoot, runWorktreePath, summaryFile, resultFile } = opts;
+
+  // Run branch diff — shows what the tasks actually changed
+  const diffStat = (() => { try { return git(["diff", "--stat", "HEAD"], runWorktreePath); } catch { return ""; } })();
+  // PROJECT.md diff — shows what the finalizer just wrote in the main tree
+  const diff     = (() => { try { return git(["diff", "HEAD", "--", "PROJECT.md"], repoRoot); } catch { return ""; } })();
+  const projectMdContent = (() => {
+    const p = join(repoRoot, "PROJECT.md");
+    try { return existsSync(p) ? readFileSync(p, "utf-8").slice(0, 6000) : "(missing)"; } catch { return "(unreadable)"; }
+  })();
+
+  const content = [
+    "You are verifying the finalize-docs phase of a completed agentic run.",
+    "",
+    "The executor was asked to update PROJECT.md with durable technical facts from the run.",
+    "",
+    `Write a JSON verdict to: ${resultFile}`,
+    `Schema: { "verdict": "pass|fail|needs_human", "summary": "...", "issues": [] }`,
+    "",
+    "Pass if PROJECT.md was meaningfully updated to reflect the run's changes, OR if the run genuinely introduced no new durable facts worth recording.",
+    "Fail if PROJECT.md was not touched when it clearly should have been, or if the changes are trivially cosmetic.",
+    "needs_human if you cannot determine whether the update is correct.",
+    "",
+    "Git diff stat (all files this run changed):",
+    diffStat || "(no changes)",
+    "",
+    "PROJECT.md diff:",
+    diff || "(no changes to PROJECT.md)",
+    "",
+    "Current PROJECT.md (first 6000 chars):",
+    projectMdContent,
+    "",
+    `Executor summary: ${summaryFile}`,
   ].join("\n");
 
   mkdirSync(dirname(promptFile), { recursive: true });

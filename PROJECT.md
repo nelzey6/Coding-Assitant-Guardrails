@@ -31,13 +31,13 @@ npm run agent -- run --help
 # Start a new goal (archives existing agentic.json if present, writes fresh state)
 npm run agent -- init "my goal here"
 
-# Resume current goal
-npm run agent -- run --no-merge --checks "cd tools/agent-loop && npx tsc --noEmit"
+# Resume current goal (applies changes as unstaged diff when done)
+npm run agent -- run --checks "cd tools/agent-loop && npx tsc --noEmit"
 
 # Run with worktree bootstrap/env support for repos with ignored local artifacts.
 # Bootstrap commands are generic shell commands: they can link deps, source an SDK,
 # generate code, prepare HDL/toolchain outputs, or create any local-only fixture.
-npm run agent -- run --no-merge \
+npm run agent -- run \
   --worktree-bootstrap "./scripts/bootstrap-worktree.sh" \
   --worktree-bootstrap-ignore ".toolchain-cache/**" \
   --check-env-file .env.local
@@ -89,8 +89,8 @@ The current TS run loop is:
 
 1. Load policy and `agentic.json`.
 2. If no tasks exist, run planner. Planner must write `planner-result.json` and `grill-transcript.md`.
-3. Pick next runnable task: `pending` or `needs_retry` with passed dependencies.
-4. Create or reuse `.worktrees/<task-id>` on `agentic/<task-id>` or `agentic/review/<task-id>`.
+3. Create one shared run worktree at `.worktrees/run-<timestamp>` on branch `agentic/run-<timestamp>`; all tasks in the run commit onto this branch.
+4. Pick next runnable task: `pending` or `needs_retry` with passed dependencies.
 5. Run configured worktree bootstrap commands, if any, and mark configured bootstrap artifacts ignored for scope/diff/commit.
 6. Run task-grill before executor edits.
 6. If task-grill returns `ready`, inject its result into executor prompt and run executor.
@@ -102,12 +102,12 @@ The current TS run loop is:
 12. If `--rebase-before-verify` is set, rebase worktree on loop-start HEAD and re-run checks before the verifier.
 13. Run verifier unless `--fast-verifier` is requested and allowed for a low-risk scoped task.
 14. For high-risk tasks, run adversarial verifier votes unless overridden.
-15. On pass, optionally commit/merge or retain review branch/worktree.
+15. On pass, commit to the shared run branch (not to main).
 16. Write handover/progress artifacts.
 17. Run post-task plan review by default. This fresh review asks whether the remaining plan is still correctly sliced, scoped, ordered, and validated after the completed task. Verdicts: `continue`, `adjust_remaining_tasks`, `replan`, `needs_human`.
 18. On post-task review `adjust_remaining_tasks` or `replan`, block stale pending/retry tasks, enforce the replan budget/convergence guard, run planner again, and continue to replacement tasks.
 19. Every three passed tasks by default, run architect checkpoint over cumulative diff and remaining plan; `replan` calls planner, `needs_human` halts.
-20. When no runnable tasks remain, treat `passed` and `blocked` as terminal statuses. If all unfinished work is terminal, complete.
+20. When no runnable tasks remain, treat `passed` and `blocked` as terminal statuses. If all unfinished work is terminal, apply run branch to main tree as unstaged changes (default) or merge (`--merge`), clean up run worktree, and complete.
 
 ## Task-Grill Contract
 
@@ -145,7 +145,7 @@ Verdict behavior:
 
 Current TS rails:
 
-- One task per isolated worktree/branch.
+- All tasks share one run worktree/branch (`agentic/run-<timestamp>`); tasks chain via commits on that branch.
 - Worktree bootstrap commands can prepare ignored local dependencies, generated code, HDL/toolchain outputs, SDK/env links, or other local-only artifacts before task-grill/checks; bootstrap-owned paths are excluded from diff artifacts, scope rail, and commits. This mechanism is target-repo generic and is not specific to Node projects.
 - `run` enforces the policy clean-main-worktree gate when `autonomousLoop.requireCleanMainWorktree` is true. Use `--allow-dirty` only when intentionally running with uncommitted main-worktree changes.
 - Harness owns task status, verifier result handling, commit, merge, and cleanup.

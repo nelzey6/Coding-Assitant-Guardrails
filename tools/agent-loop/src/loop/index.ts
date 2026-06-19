@@ -36,6 +36,7 @@ import {
   writeExecutorPrompt,
   writeVerifierPrompt,
   writeFinalizeDocsPrompt,
+  writeFinalizeDocsVerifierPrompt,
   writeGoalReviewPrompt,
   writeArchitectCheckpointPrompt,
   writeDecisionGrillPrompt,
@@ -331,15 +332,18 @@ async function runPlannerPhase(
 }
 
 // Run finalize-docs phase after all tasks pass.
-async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter: { count: number }): Promise<void> {
-  const merged = git(["rev-parse", "HEAD"], cfg.repoRoot);
+// Executor updates PROJECT.md; a single-vote verifier confirms the file was actually updated.
+async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter: { count: number }, runWorktreePath: string): Promise<void> {
   const ts = timestamp();
   const runDir = join(cfg.repoRoot, cfg.runsRoot, `agentic-${ts}-finalize-docs`);
   mkdirSync(runDir, { recursive: true });
 
-  const promptFile  = join(runDir, "finalize-docs.md");
-  const logFile     = join(runDir, "finalize-docs.log");
-  const summaryFile = join(runDir, "final-summary.md");
+  const promptFile    = join(runDir, "finalize-docs.md");
+  const executorLog   = join(runDir, "finalize-docs.log");
+  const summaryFile   = join(runDir, "final-summary.md");
+  const verifierPrompt = join(runDir, "verifier.md");
+  const verifierResult = join(runDir, "verifier-result.json");
+  const verifierLog    = join(runDir, "verifier.log");
 
   const state = loadState(cfg.repoRoot, cfg.stateFile)!;
   writeFinalizeDocsPrompt(promptFile, {
@@ -352,19 +356,36 @@ async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter:
   });
 
   appendEvent(cfg.repoRoot, "finalize_docs_started", { runDir, prompt: promptFile, summary: summaryFile }, cfg.runsRoot, cfg.stateFile);
+  console.log("=== Agentic finalize-docs ===");
   agentCallCounter.count++;
-  await invokeAgentWithLog(promptFile, cfg.plannerAgent, cfg.repoRoot, logFile);
+  await invokeAgentWithLog(promptFile, cfg.executorAgent, cfg.repoRoot, executorLog);
 
   if (!existsSync(summaryFile)) {
-    writeFileSync(summaryFile, `# Agentic final summary\n\nFinalizer did not create a summary; inspect ${logFile}.`, "utf-8");
+    writeFileSync(summaryFile, `# Agentic final summary\n\nFinalizer did not create a summary; inspect ${executorLog}.`, "utf-8");
   }
 
-  const docChanges = (() => { try { return git(["status", "--porcelain", "--", "PROJECT.md"], cfg.repoRoot); } catch { return ""; } })();
-  if (docChanges && cfg.commit) {
-    git(["add", "PROJECT.md"], cfg.repoRoot);
-    git(["commit", "-m", "agentic: finalize docs"], cfg.repoRoot);
+  // Single-vote verifier: confirm PROJECT.md was actually updated with durable facts.
+  writeFinalizeDocsVerifierPrompt(verifierPrompt, {
+    repoRoot: cfg.repoRoot,
+    runWorktreePath,
+    summaryFile,
+    resultFile: verifierResult,
+  });
+  agentCallCounter.count++;
+  await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, cfg.repoRoot, verifierLog);
+
+  const verifierVerdict = (() => {
+    if (!existsSync(verifierResult)) return "fail";
+    try { return (JSON.parse(readFileSync(verifierResult, "utf-8")) as { verdict?: string }).verdict ?? "fail"; } catch { return "fail"; }
+  })();
+
+  appendEvent(cfg.repoRoot, "finalize_docs_finished", {
+    runDir, summary: summaryFile, verifierVerdict,
+  }, cfg.runsRoot, cfg.stateFile);
+
+  if (verifierVerdict === "fail") {
+    console.warn("finalize-docs verifier returned fail — PROJECT.md may not have been updated. Check:", verifierResult);
   }
-  appendEvent(cfg.repoRoot, "finalize_docs_finished", { runDir, summary: summaryFile, docsChanged: !!docChanges }, cfg.runsRoot, cfg.stateFile);
 }
 
 interface GoalReviewResult {
@@ -705,7 +726,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     cleanupPassed:      config.cleanupPassed      ?? false,
     fastVerifier:       config.fastVerifier       ?? false,
     rebaseBeforeVerify:          config.rebaseBeforeVerify          ?? false,
-    finalizeDocs:                config.finalizeDocs                ?? false,
+    finalizeDocs:                config.finalizeDocs                ?? true,
     allowDirty:                  config.allowDirty                  ?? false,
     goalReview:                  config.goalReview                  ?? false,
     postTaskReview:              config.postTaskReview              ?? true,
@@ -791,7 +812,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         throw new LoopError(`No runnable task available. Blocked by dependencies:\n${getBlockedDependencySummary(state)}`);
       }
       if (cfg.goalReview) await runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
-      if (cfg.finalizeDocs && cfg.merge) await runFinalizeDocsPhase(cfg, agentCallCounter);
+      if (cfg.finalizeDocs) await runFinalizeDocsPhase(cfg, agentCallCounter, runWorktreePath);
       applyRunWorktree(cfg, runBranch, runWorktreePath);
       console.log("<promise>COMPLETE</promise>");
       return;
@@ -1198,7 +1219,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       throw new LoopError(`Reached max iterations or no runnable task. Blocked by dependencies:\n${getBlockedDependencySummary(finalState)}`);
     }
     if (cfg.goalReview) await runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
-    if (cfg.finalizeDocs && cfg.merge) await runFinalizeDocsPhase(cfg, agentCallCounter);
+    if (cfg.finalizeDocs) await runFinalizeDocsPhase(cfg, agentCallCounter, runWorktreePath);
     applyRunWorktree(cfg, runBranch, runWorktreePath);
     console.log("<promise>COMPLETE</promise>");
     return;

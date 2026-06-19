@@ -1,30 +1,51 @@
 # Autonomous Coding Loop
 
-An autonomous agent harness that takes a goal, plans it into tasks, self-reviews each one before touching code, executes in isolated git worktrees, and verifies the result — all without human intervention per task.
+An autonomous agent harness that takes a goal, plans it into tasks, self-reviews each one before touching code, executes in isolated git worktrees, and hands you back an unstaged diff to review — all without human intervention per task.
 
-Built for [Codex](https://openai.com/codex), [Claude Code](https://claude.ai/code), and compatible CLI agents (`pi`, `claude`, custom).
+Built for [Claude Code](https://claude.ai/code) and compatible CLI agents (`claude`, `pi`, custom).
 
+```bash
+agentic-loop init "Refactor the auth module to use the new token store"
+agentic-loop run
 ```
-/agentic-loop Refactor the auth module to use the new token store
-```
 
-That's it. The loop plans, grills itself, executes, checks, and merges — or tells you exactly why it stopped.
+That's it. The loop plans, grills itself, executes, verifies — and when it's done, your main tree has the changes sitting unstaged, ready for you to review, stage, and commit.
 
 **→ [Quickstart — get running in 2 minutes](#quickstart)**
 
 ---
 
+## What this actually feels like
+
+You give the loop a goal in plain English. It:
+
+1. Reads your repo and figures out what the goal actually requires.
+2. Resolves design questions from evidence (naming, algorithm, placement) — binding those decisions before any code runs.
+3. Executes each task in an isolated branch/worktree, so your working tree stays clean throughout.
+4. Runs adversarial verifiers that try to *refute* the result before accepting it.
+5. Applies the final diff to your main tree as **unstaged changes** — you see exactly what changed, nothing is committed until you say so.
+
+You never need to babysit it mid-run. If it hits something that genuinely needs a human decision, it stops and tells you why.
+
+---
+
 ## How it works
 
-Each run goes through five phases per task:
+Each run goes through these phases per task:
 
-1. **Plan** — a planner agent reads the goal, runs a full `grill-with-docs` self-interview, and produces a task graph with acceptance criteria, scope globs, and validation commands.
-2. **Task-grill** — before the executor touches anything, a reviewer agent asks 15+ structured questions about scope, assumptions, risks, and design choices — and answers them from repo evidence.
-3. **Execute** — a fresh agent spawns in an isolated git worktree (`.worktrees/<task-id>/`) and works the task using the selected workflow skill (`tdd`, `diagnose`, `zoom-out`, etc.).
-4. **Verify** — a separate verifier agent reviews the diff, check output, and acceptance criteria, returning `pass`, `fail`, or `needs_human`.
-5. **Merge** — passed tasks merge back to main. Failed tasks are retried with a failure-analysis artifact so the next attempt knows what went wrong.
+| Phase | What happens |
+|---|---|
+| **Plan** | Planner agent reads the goal, runs `grill-with-docs` discovery, produces a task graph with acceptance criteria, scope globs, and validation commands. |
+| **Task-grill** | Before any edits: a fresh agent re-reads the repo and answers "Is this task still understood, scoped, and safe?" If not, it replans rather than guessing. |
+| **Decision-grill** | Design forks are resolved with 2–4 evidenced options. The chosen option becomes a **binding rule** injected into the executor prompt. |
+| **Execute** | Executor agent works inside a shared run worktree (`agentic/run-<timestamp>`) on a dedicated branch. Uses the canonical workflow skill (`tdd`, `diagnose`, `zoom-out`, etc.). |
+| **Scope rail** | Harness checks `git diff` before the verifier. Any file outside the task's declared scope fails the task immediately. |
+| **Verify** | Multi-vote adversarial verifiers — each is told to *refute* first. Majority pass required for high-risk tasks. |
+| **Post-task review** | After each passed task: is the remaining plan still valid? |
+| **Architect checkpoint** | Every 3 passed tasks: cumulative diff reviewed against the original goal. |
+| **Apply** | All task commits are applied to your main tree as unstaged changes. Run worktree is cleaned up. |
 
-The main branch stays clean throughout. State persists in `agentic.json` so runs survive interruption and resume where they left off.
+State persists in `agentic.json` so runs survive interruption and resume where they left off.
 
 ---
 
@@ -39,8 +60,6 @@ cd Coding-Assitant-Guardrails
 
 ### Step 2 — Install into your product repo
 
-This copies skills, harness shims, and agent guidance templates into your target repo:
-
 ```powershell
 # Windows
 .\scripts\bootstrap\setup-ai-skills.ps1 -Destination D:\Repos\MyProduct
@@ -51,32 +70,55 @@ This copies skills, harness shims, and agent guidance templates into your target
 ./scripts/bootstrap/setup-ai-skills.sh --destination "$HOME/src/my-product"
 ```
 
-This seeds `AGENTS.md`, `CLAUDE.md`, `PROJECT.md`, `CONTEXT.md`, and the `agentic-loop` shim into your product repo. Run `--help` for all options.
+This seeds `AGENTS.md`, `CLAUDE.md`, `PROJECT.md`, `CONTEXT.md`, and the `agentic-loop` shim into your product repo.
 
 ### Step 3 — Run the loop
 
-**Option A — Inside Claude Code (conversational, no terminal needed)**
+**Option A — Inside Claude Code (conversational)**
 
 ```
-/agentic-loop <your goal>
+/agentic-loop Refactor the auth module to use the new token store
 ```
 
-Claude plans the goal and works through each task in the conversation, printing progress after each one.
+**Option B — Terminal (fully unattended)**
 
-**Option B — Terminal (fully unattended, fresh agent per task)**
-
-```powershell
+```bash
 # From your product repo root
+agentic-loop init "Refactor the auth module to use the new token store"
+agentic-loop run
+```
+
+The loop auto-detects `claude` or `pi` as the executor. When it finishes, you get unstaged changes in your main tree.
+
+```bash
+# Optional: run with a specific check command
 agentic-loop run --checks "npm test"
+
+# Plan first, review agentic.json, then execute
+agentic-loop run --plan-only
+agentic-loop run
+
+# Skip the apply step — keep changes in the run branch instead
+agentic-loop run --no-apply
+
+# Auto-merge into main instead of applying unstaged
+agentic-loop run --merge
 ```
 
-`pi` is the default executor. Each task gets a brand-new process — no shared context, no accumulated mistakes across tasks.
+---
 
-```powershell
-agentic-loop run --command "claude -p {prompt}" --checks "npm test"  # use Claude instead
-agentic-loop run --plan-only                                         # plan, review agentic.json, then run
-agentic-loop run                                                     # resume from existing plan
+## After the run
+
+When the loop completes, you'll find:
+
+```bash
+git status        # unstaged changes ready to review
+git diff          # full diff of everything the loop did
+git add -p        # stage what you want, chunk by chunk
+git commit        # your commit, your message
 ```
+
+Nothing is committed until you decide to commit it.
 
 ---
 
@@ -84,22 +126,24 @@ agentic-loop run                                                     # resume fr
 
 The loop is designed to fail loudly rather than silently produce wrong output:
 
-- **Scope enforcement** — each task declares a glob list of files it may touch. Changes outside scope fail the task before the verifier runs.
-- **Task-grill gate** — execution is blocked if the pre-flight reviewer returns `needs_replan`, `needs_human`, or `blocked`.
-- **Decision-grill** — design decisions are weighed with 2–4 evidenced options before the executor acts. Shallow decisions are rejected by the harness.
-- **Failure analysis** — every failure writes a structured `failure-analysis.json` so retry attempts don't repeat the same mistake.
-- **Architect checkpoint** — after every N passed tasks the remaining plan is reviewed for drift before continuing.
-- **Goal review** — at the end the cumulative diff is judged against the original goal; gaps surface as `needs_human`.
+- **Clean-tree gate** — refuses to start with uncommitted changes unless `--allow-dirty`.
+- **Task-grill gate** — execution is blocked until a fresh reviewer returns `ready`. If the task is stale, it replans instead of guessing.
+- **Decision-grill** — design decisions resolved with evidence before code runs. Shallow or unanchored decisions are rejected by the harness.
+- **Scope enforcement** — each task declares a glob list of files it may touch. Out-of-scope changes fail immediately before the verifier runs.
+- **Adversarial verifiers** — verifiers are explicitly told to refute the result. Multi-vote required for implementation/architecture tasks.
+- **Retry budget** — failures retry with a failure-analysis artifact so the next attempt knows what went wrong. Budget exhaustion escalates to `needs_human`.
+- **Architect checkpoints** — after every N passed tasks the remaining plan is reviewed for drift.
+- **CodeGraph sync** — the code knowledge graph is synced before each task and after apply so every agent sees accurate symbol information.
 
 ---
 
 ## Diagnostics
 
-```powershell
-agentic-loop status                    # task list and what's next
-agentic-loop why-stuck                 # explain blocked or needs_human tasks
-agentic-loop last-failure              # most recent failure details
-agentic-loop reset-task <id> --apply   # clean up a stuck task and retry
+```bash
+agentic-loop status           # task list and what's next
+agentic-loop why-stuck        # explain blocked or needs_human tasks
+agentic-loop last-failure     # most recent failure details
+agentic-loop reset-task <id>  # clean up a stuck task and retry
 ```
 
 ---
@@ -109,7 +153,7 @@ agentic-loop reset-task <id> --apply   # clean up a stuck task and retry
 The loop selects a workflow skill for each task. These are also usable standalone in Claude/Codex:
 
 | Skill | When the loop uses it | Standalone use |
-| --- | --- | --- |
+|---|---|---|
 | [`agentic-loop`](./skills/engineering/agentic-loop/SKILL.md) | Goal-driven autonomous task loop | Prepare or run autonomous work |
 | [`grill-with-docs`](./skills/engineering/grill-with-docs/SKILL.md) | Planner discovery, ambiguous goals | Clarify requirements before implementing |
 | [`diagnose`](./skills/engineering/diagnose/SKILL.md) | Bugs, failures, unknown root cause | Debug a failing test or crash |
@@ -160,7 +204,7 @@ Use [`ralph-prd`](./skills/engineering/ralph-prd/SKILL.md) to generate the input
 ## Repository map
 
 | Path | Purpose |
-| --- | --- |
+|---|---|
 | [`tools/agent-loop/`](./tools/agent-loop/) | TypeScript harness CLI — planner, executor, verifier, state, prompts. |
 | [`skills/`](./skills/) | Workflow skills used by the loop and standalone. |
 | [`templates/`](./templates/) | Agent guidance files seeded into product repos on install. |
