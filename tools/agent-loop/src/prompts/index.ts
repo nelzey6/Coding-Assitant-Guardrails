@@ -511,9 +511,7 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
 export interface StanceReflectionPromptOptions {
   repoRoot: string;
   task: Task;
-  round: number;
   resultFile: string;
-  priorResultFile?: string;
   codeGraphFile?: string;
   decisionGrillDecisions?: Record<string, unknown>[];
 }
@@ -522,22 +520,22 @@ export function writeStanceReflectionPrompt(promptFile: string, opts: StanceRefl
   const skill = skillInstruction("reflect-on-approach", opts.repoRoot,
     "Use stance mode. Challenge the implementation route from a fresh perspective. Do not edit repository files."
   );
-  const prior = opts.priorResultFile && existsSync(opts.priorResultFile)
-    ? readFileSync(opts.priorResultFile, "utf-8")
-    : "(first round: propose and challenge an initial stance)";
   const content = [
     "You are a fresh technical stance reviewer before implementation begins.",
     skill,
     "",
-    `Round: ${opts.round}`,
+    "Run this self-challenge cycle on your own reasoning, in this one sitting, before writing anything to disk:",
+    "  1. Reassess: form an initial implementation stance and actively challenge it from a fresh perspective.",
+    "  2. Readjust: revise the stance to address whatever the challenge surfaced.",
+    "  3. Reconfirm: challenge the readjusted stance once more; let it stand only if it survives, or escalate to needs_human if it cannot.",
+    "Do not stop after the first pass. Walk through all three passes internally, then write only the final outcome.",
     `CodeGraph context: ${opts.codeGraphFile ?? ""}`,
     "Read repository guidance, relevant source, tests, and decisions. Do not edit files.",
     `Write stance reflection JSON only to: ${opts.resultFile}`,
-    'Schema: { "mode":"stance", "verdict":"reconfirm|readjust|reassess|needs_human", "summary":"...", "evidence":[], "assumptions_challenged":[], "perspectives_considered":[], "recommended_changes":[], "unresolved_risks":[], "next_action":"...", "stance": { "owningModule":"...", "boundaries":[], "sequence":[], "expectedEdits":[], "validation":[], "assumptions":[], "rejectedAlternatives":[] } }',
-    "A bare approval is invalid. Reconfirmation must explain what was challenged and why the stance survived.",
+    'Schema: { "mode":"stance", "verdict":"reconfirm|readjust|reassess|needs_human", "summary":"...", "evidence":[], "assumptions_challenged":[], "perspectives_considered":[], "recommended_changes":[], "unresolved_risks":[], "next_action":"...", "selfChallengeRounds":[{"pass":"reassess|readjust|reconfirm","note":"..."}], "stance": { "owningModule":"...", "boundaries":[], "sequence":[], "expectedEdits":[], "validation":[], "assumptions":[], "rejectedAlternatives":[] } }',
+    "A bare approval is invalid. The summary must explain what was challenged across all three passes and why the final stance survived, or how it changed.",
     "Task:", JSON.stringify(opts.task, null, 2),
     "Resolved decisions:", JSON.stringify(opts.decisionGrillDecisions ?? [], null, 2),
-    "Previous round:", prior,
   ].join("\n");
   mkdirSync(dirname(promptFile), { recursive: true });
   writeFileSync(promptFile, content, "utf-8");

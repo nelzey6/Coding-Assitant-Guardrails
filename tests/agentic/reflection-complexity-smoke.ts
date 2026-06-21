@@ -33,7 +33,6 @@ try {
   writeStanceReflectionPrompt(prompt, {
     repoRoot: process.cwd(),
     task: { id: "architecture", kind: "architecture", workflow: "improve-codebase-architecture" },
-    round: 1,
     resultFile: join(dir, "stance.json"),
   });
   const text = readFileSync(prompt, "utf-8");
