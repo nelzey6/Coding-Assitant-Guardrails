@@ -65,6 +65,40 @@ export function limitTextForPrompt(text: string, maxBytes: number, tailLines = 8
   return `[truncated for prompt: original ${bytes} bytes; showing tail]\n${tail}`;
 }
 
+// Extract only markdown heading lines (# / ## / ###) from a file to give the model
+// a compact outline of what a doc contains, without inlining the full body.
+// The model can `read` the file itself if it needs the detail.
+export function outlineHeadings(filePath: string, maxBytes = 600): string {
+  let text: string;
+  try {
+    text = readFileSync(filePath, "utf-8");
+  } catch {
+    return "(unreadable)";
+  }
+  const headings = text
+    .split(/\r?\n/)
+    .filter((l) => /^#{1,6}\s+\S/.test(l))
+    .map((l) => l.trim());
+  let out = headings.join(" | ");
+  if (Buffer.byteLength(out, "utf-8") > maxBytes) {
+    out = out.slice(0, maxBytes) + " …";
+  }
+  return out || "(no headings)";
+}
+
+// Phase-aware recent-history event counts. Live state is a time series; only the
+// tail matters, and different phases need different depth.
+export function phaseEventLimit(baseLimit: number, phase: "planner" | "executor" | "task_grill" | "verifier" | "review" | "default"): number {
+  switch (phase) {
+    case "planner":  return Math.min(baseLimit, 4);
+    case "verifier": return Math.min(baseLimit, 4);
+    case "review":   return Math.min(baseLimit, 6);
+    case "executor": return Math.min(baseLimit, 6);
+    case "task_grill": return Math.min(baseLimit, 6);
+    default:         return baseLimit;
+  }
+}
+
 export function getRecentHistoryText(
   repoRoot: string,
   runsRoot: string,
@@ -188,19 +222,30 @@ export function writeRepoContext(contextFile: string, opts: RepoContextOptions):
   const head   = git(["rev-parse", "--short", "HEAD"], repoRoot) || "unknown";
   const statusText = git(["status", "--short"], repoRoot) || "clean";
 
-  const topItems: string[] = [];
+  // Structural top-level summary instead of a raw 80-entry dump.
+  // Group entries into directories vs files so the model sees the repo shape.
+  const dirs: string[] = [];
+  const files: string[] = [];
   try {
-    const entries = readdirSync(repoRoot).slice(0, 80);
-    for (const e of entries) {
-      try { topItems.push(statSync(join(repoRoot, e)).isDirectory() ? `${e}/` : e); } catch { /* skip */ }
+    for (const e of readdirSync(repoRoot).slice(0, 80)) {
+      try {
+        (statSync(join(repoRoot, e)).isDirectory() ? dirs : files).push(e);
+      } catch { /* skip */ }
     }
   } catch { /* non-fatal */ }
+  const topSummary = [
+    `dirs: ${dirs.map((d) => `${d}/`).join(", ")}`,
+    `files: ${files.join(", ")}`,
+  ].join(" | ");
 
-  const readOrMissing = (name: string) => {
+  // Reference canonical docs by path + heading outline; do NOT inline the body.
+  // The model has read tools and pulls detail on demand, so we only tell it
+  // what each doc covers and where it lives.
+  const docRef = (name: string) => {
     const p = join(repoRoot, name);
-    return existsSync(p) ? readFileSync(p, "utf-8") : `${name} not found.`;
+    if (!existsSync(p)) return `- ${name}: not found`;
+    return `- ${name}: present at ${p}. Sections: ${outlineHeadings(p)}`;
   };
-  const flagOrMissing = (name: string) => existsSync(join(repoRoot, name)) ? `${name} present` : `${name} not found`;
 
   const content = [
     "# Agentic planner repository context",
@@ -212,24 +257,22 @@ export function writeRepoContext(contextFile: string, opts: RepoContextOptions):
     `- HEAD: ${head}`,
     `- Status: ${statusText}`,
     "",
-    "Agent cookbooks:",
-    `- ${flagOrMissing("AGENTS.md")}`,
-    `- ${flagOrMissing("CLAUDE.md")}`,
+    "Agent cookbooks (read if relevant):",
+    `- ${existsSync(join(repoRoot, "AGENTS.md")) ? "AGENTS.md present" : "AGENTS.md not found"}`,
+    `- ${existsSync(join(repoRoot, "CLAUDE.md")) ? "CLAUDE.md present" : "CLAUDE.md not found"}`,
     "",
     "Configured checks:",
-    checks.join("\n"),
+    checks.length ? checks.join("\n") : "(none)",
     "",
-    "Top-level files:",
-    topItems.join("\n"),
+    "Top-level structure:",
+    topSummary,
     "",
-    "PROJECT.md:",
-    readOrMissing("PROJECT.md"),
+    "Canonical docs (read the file itself for full detail; only the section outline is shown here):",
+    docRef("PROJECT.md"),
+    docRef("CONTEXT.md"),
     "",
-    "CONTEXT.md:",
-    readOrMissing("CONTEXT.md"),
-    "",
-    "CodeGraph context:",
-    codeGraphFile,
+    "CodeGraph context file:",
+    codeGraphFile || "(none)",
   ].join("\n");
 
   mkdirSync(dirname(contextFile), { recursive: true });
@@ -254,14 +297,10 @@ export interface PlannerPromptOptions {
 
 export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOptions): void {
   const {
-    repoRoot, runsRoot, stateFile, budget, state, resolvedPolicyFile,
+    repoRoot, runsRoot, stateFile, budget, state, policy, resolvedPolicyFile,
     plannerResultFile, repoContextFile, grillTranscriptFile, codeGraphFile,
     priorFailureAnalysisFile = "",
   } = opts;
-
-  const policyText = resolvedPolicyFile && existsSync(resolvedPolicyFile)
-    ? readFileSync(resolvedPolicyFile, "utf-8")
-    : "";
 
   const priorFailureBlock = (() => {
     if (!priorFailureAnalysisFile || !existsSync(priorFailureAnalysisFile)) return "";
@@ -325,36 +364,29 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "",
     "For every genuine design/product/architecture decision the plan forces, run a grill-with-docs self-interview: weigh 2-4 real options with concrete repo/docs evidence, mark one recommended, answer it yourself. Set escalate:true only when evidence genuinely cannot settle it.",
     "",
-    "Planner result schema:",
-    JSON.stringify({
-      verdict: "planned|needs_human|blocked",
-      summary: "...",
-      decisions: [
-        {
-          question: "...",
-          whyItMatters: "...",
-          optionsConsidered: [
-            { label: "...", evidence: "repo path / command / doc inspected", recommended: true },
-            { label: "...", evidence: "...", recommended: false },
-          ],
-          chosen: "...",
-          selfAnswer: "why I answered this myself without a human",
-          confidence: "high|medium|low",
-          escalate: false,
-        },
-      ],
-      assumptions: [],
-      openQuestions: [],
-      blockers: [],
-      tasks: [],
-      artifacts: ["path/to/grill-transcript.md"],
-    }, null, 2),
-    `Each task object: ${JSON.stringify({ id: "...", title: "...", kind: "...", workflow: "...", status: "pending", priority: 1, acceptanceCriteria: [], validation: [], dependsOn: [], failureHistory: [], artifacts: [], scope: ["scripts/agentic/**"], complexity: "low|medium|high", complexityReasons: [] })}`,
+    "Planner result schema (write valid JSON only):",
+    `{"verdict":"planned|needs_human|blocked","summary":"...","decisions":[{"question":"...","whyItMatters":"...","optionsConsidered":[{"label":"...","evidence":"repo path / command / doc inspected","recommended":true}],"chosen":"...","selfAnswer":"...","confidence":"high|medium|low","escalate":false}],"assumptions":[],"openQuestions":[],"blockers":[],"tasks":[],"artifacts":["${grillTranscriptFile}"]}`,
+    `Each task object: {"id":"...","title":"...","kind":"discovery|investigation|implementation|architecture|maintenance|handoff","workflow":"...","status":"pending","priority":1,"acceptanceCriteria":[],"validation":[],"dependsOn":[],"failureHistory":[],"artifacts":[],"scope":["path/**"],"complexity":"low|medium|high","complexityReasons":[]}`,
     priorFailureBlock,
     "",
     `Goal: ${state.goal ?? ""}`,
-    "Policy:",
-    policyText,
+    "Workflow policy (canonical workflow names, phases, and skills; read the policy file for full detail):",
+    resolvedPolicyFile && existsSync(resolvedPolicyFile) ? `${resolvedPolicyFile}` : "(policy file not resolved)",
+    JSON.stringify(
+      {
+        defaultDiscoveryWorkflow: policy.defaultDiscoveryWorkflow,
+        defaultExecutionWorkflow: policy.defaultExecutionWorkflow,
+        workflows: Object.fromEntries(
+          Object.entries(policy.workflows ?? {}).map(([k, v]) => {
+            const w = v as unknown as Record<string, unknown>;
+            return [k, { phase: w.phase, skill: w.skillName, default: w.default === true }];
+          })
+        ),
+        humanGates: policy.humanGates ?? [],
+      },
+      null,
+      0
+    ),
   ].join("\n");
 
   writePromptWithEvent(promptFile, content, "planner", repoRoot, runsRoot, stateFile, budget, {
@@ -413,7 +445,7 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
   const workflow = task.workflow ?? "tdd";
   const kind = task.kind ?? "implementation";
   const taskJson = JSON.stringify(task, null, 2);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "executor"), budget);
 
   const content = [
     "You are executing one task inside an agentic harness worktree.",
@@ -536,7 +568,7 @@ export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOp
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "task_grill"), budget);
   const taskJson = JSON.stringify(task, null, 2);
 
   const priorFailureBlock = (() => {
@@ -673,7 +705,7 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
 
   const checkOutputForPrompt = limitTextForPrompt(checkOutput, limits.checkBytes, 80);
   const gates = JSON.stringify(policy.humanGates ?? [], null, 2);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "verifier"), budget);
 
   const adversarialBlock = adversarial
     ? [
@@ -852,7 +884,7 @@ export function writeDecisionGrillPrompt(promptFile: string, opts: DecisionGrill
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "task_grill"), budget);
   const taskJson = JSON.stringify(task, null, 2);
 
   const reGrillBlock = priorShallowFeedback
@@ -937,7 +969,7 @@ export function writeGoalReviewPrompt(promptFile: string, opts: GoalReviewPrompt
   const { repoRoot, runsRoot, stateFile, budget, state, loopBaseRef, resultFile } = opts;
 
   const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "review"), budget);
   const passedTasks = (state.tasks ?? []).filter((t) => t.status === "passed");
   const passedSummary = passedTasks.length
     ? passedTasks.map((t) => `- ${t.id}: ${t.title ?? "(no title)"}`).join("\n")
@@ -996,7 +1028,7 @@ export function writeArchitectCheckpointPrompt(promptFile: string, opts: Archite
   const { repoRoot, runsRoot, stateFile, budget, state, loopBaseRef, passedCount, resultFile } = opts;
 
   const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "review"), budget);
   const tasks = state.tasks ?? [];
   const passedTasks = tasks.filter((t) => t.status === "passed");
   const remainingTasks = tasks.filter((t) => !["passed", "blocked"].includes(t.status ?? ""));
@@ -1069,7 +1101,7 @@ export function writePostTaskReviewPrompt(promptFile: string, opts: PostTaskRevi
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, limits.eventLimit, budget);
+  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "review"), budget);
   const tasks = state.tasks ?? [];
   const completedTask = tasks.find((t) => t.id === taskId);
   const remainingTasks = tasks.filter((t) => !["passed", "blocked"].includes(t.status ?? ""));

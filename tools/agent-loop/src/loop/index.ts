@@ -277,6 +277,7 @@ async function runPlannerPhase(
   const resultFile       = join(plannerRunDir, "planner-result.json");
   const grillFile        = join(plannerRunDir, "grill-transcript.md");
   const codeGraphFile    = join(plannerRunDir, "codegraph.md");
+  const plannerLogFile   = join(plannerRunDir, "planner.log");
 
   const state = loadState(cfg.repoRoot, cfg.stateFile)!;
 
@@ -301,10 +302,10 @@ async function runPlannerPhase(
     priorFailureAnalysisFile,
   });
 
-  appendEvent(cfg.repoRoot, "planner_started", { runDir: plannerRunDir, prompt: promptFile, resultFile, grillTranscript: grillFile }, cfg.runsRoot, cfg.stateFile);
+  appendEvent(cfg.repoRoot, "planner_started", { runDir: plannerRunDir, prompt: promptFile, resultFile, grillTranscript: grillFile, log: plannerLogFile }, cfg.runsRoot, cfg.stateFile);
   console.log("=== Agentic planner ===");
   agentCallCounter.count++;
-  invokeAgent(promptFile, cfg.plannerAgent, cfg.repoRoot);
+  emitTokenUsage(cfg, await invokeAgentWithLog(promptFile, cfg.plannerAgent, cfg.repoRoot, plannerLogFile, "planner"));
 
   if (!existsSync(resultFile)) throw new LoopError(`Planner did not write ${resultFile}`);
   if (!existsSync(grillFile))  throw new LoopError(`Planner did not write ${grillFile}`);
@@ -332,7 +333,7 @@ async function runPlannerPhase(
     writeFileSync(repairPrompt, repairContent, "utf-8");
     console.log("=== Agentic planner repair ===");
     agentCallCounter.count++;
-    invokeAgent(repairPrompt, cfg.plannerAgent, cfg.repoRoot);
+    emitTokenUsage(cfg, await invokeAgentWithLog(repairPrompt, cfg.plannerAgent, cfg.repoRoot, plannerLogFile, "planner-repair"));
     if (!existsSync(resultFile)) throw new LoopError(`Planner repair did not write ${resultFile}`);
     plannerResult = JSON.parse(readFileSync(resultFile, "utf-8")) as Record<string, unknown>;
     errors = [
