@@ -111,6 +111,62 @@ copy_template_if_missing() {
   echo "Created $destination"
 }
 
+# Upsert a template that contains <!-- BEGIN: GUARDRAILS MANAGED --> / <!-- END: GUARDRAILS MANAGED --> markers.
+# - If destination doesn't exist: copy entire source template.
+# - If destination exists and has markers: replace only the managed block.
+# - If destination exists but has no markers: append managed block at end.
+# - If source has no managed block: fall back to copy_template_if_missing.
+upsert_template_with_markers() {
+  local source="$1"
+  local destination="$2"
+  local marker_begin="<!-- BEGIN: GUARDRAILS MANAGED -->"
+  local marker_end="<!-- END: GUARDRAILS MANAGED -->"
+
+  if [ ! -f "$source" ]; then
+    echo "Template not found: $source" >&2
+    exit 1
+  fi
+
+  # Extract managed block from source (including marker lines)
+  local managed_block
+  managed_block="$(sed -n "/^${marker_begin}$/,/^${marker_end}$/p" "$source")"
+
+  if [ -z "$managed_block" ]; then
+    echo "No managed block markers found in $source — using full copy fallback" >&2
+    copy_template_if_missing "$source" "$destination"
+    return
+  fi
+
+  if [ ! -e "$destination" ]; then
+    # Destination doesn't exist: copy entire source
+    cp "$source" "$destination"
+    echo "Created $destination (with managed block)"
+    return 0
+  fi
+
+  # Check if destination already has markers
+  if grep -qF "$marker_begin" "$destination" 2>/dev/null; then
+    # Destination has markers: replace managed content in-place
+    local temp_file="${destination}.tmp-$$"
+
+    # Lines before the BEGIN marker
+    sed -n "1,/${marker_begin}/{/${marker_begin}/!p;}" "$destination" > "$temp_file"
+
+    # New managed block
+    printf '%s\n' "$managed_block" >> "$temp_file"
+
+    # Lines after the END marker (skip the END line itself)
+    sed -n "/${marker_end}/,\$p" "$destination" | tail -n +2 >> "$temp_file"
+
+    mv "$temp_file" "$destination"
+    echo "Updated managed block in $destination"
+  else
+    # Destination exists but has no markers: append managed block at end
+    printf '\n%s\n' "$managed_block" >> "$destination"
+    echo "Appended managed block to $destination"
+  fi
+}
+
 copy_repo_templates() {
   local template_root="$1"
   local destination_root="$2"
@@ -121,7 +177,7 @@ copy_repo_templates() {
     if [ "$FORCE_TEMPLATE_OVERWRITE" = "true" ]; then
       copy_template "$template_root/AGENTS.md" "$destination_root/AGENTS.md"
     else
-      copy_template_if_missing "$template_root/AGENTS.md" "$destination_root/AGENTS.md"
+      upsert_template_with_markers "$template_root/AGENTS.md" "$destination_root/AGENTS.md"
     fi
   fi
 
@@ -129,7 +185,7 @@ copy_repo_templates() {
     if [ "$FORCE_TEMPLATE_OVERWRITE" = "true" ]; then
       copy_template "$template_root/CLAUDE.md" "$destination_root/CLAUDE.md"
     else
-      copy_template_if_missing "$template_root/CLAUDE.md" "$destination_root/CLAUDE.md"
+      upsert_template_with_markers "$template_root/CLAUDE.md" "$destination_root/CLAUDE.md"
     fi
   fi
 

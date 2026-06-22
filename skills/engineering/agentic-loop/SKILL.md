@@ -110,12 +110,66 @@ Do not copy these skills' detailed procedures into loop prompts. Tell the agent 
 
 ## How to run
 
+### Discovery
+
+`agentic-loop` is a standalone TypeScript CLI installed by the skills setup script. It is available as `agentic-loop` on your PATH — **not a pi skill, not an MCP tool, not an npm package.** If the command is not found, re-run the setup script from the skills repo.
+
+```bash
+agentic-loop --help
+```
+
 ### Supported executors
 
 The harness auto-detects `claude` or `pi` on PATH — no `--command` needed in most cases. Override with `--command` when using a specific model or non-standard binary.
 
 - **`claude`** — Claude Code CLI, auto-detected if on PATH.
 - **`pi`** — Pi CLI, used as fallback if `claude` is not found.
+
+### Quick start
+
+```bash
+# Start a new goal (archives any existing agentic.json)
+agentic-loop init "description of the goal"
+
+# Run the loop with validation checks
+agentic-loop run --checks "<test or build command>"
+
+# Plan only — review agentic.json before executing
+agentic-loop run --plan-only
+```
+
+### Key flags
+
+| Flag | Effect |
+|---|---|
+| `--checks "cmd"` | Validation command run after each task |
+| `--plan-only` | Planner runs but no executor — review agentic.json first |
+| `--allow-dirty` | Skip clean-worktree gate |
+| `--merge` | Auto-merge run branch into main |
+| `--no-apply` | Keep changes on run branch, don't apply to working tree |
+| `--tool claude` | Use claude instead of default agent |
+| `--command "..."` | Custom agent invocation template (use `{prompt}` placeholder) |
+| `--planner-command "..."` | Custom planner agent template |
+
+### Check commands
+
+Read `PROJECT.md` Commands section for project-specific test/lint/build commands to pass as `--checks`. Use the smallest targeted check that proves the change. Common examples: `npm test`, `npm run typecheck`, `npm run lint`.
+
+### After the run
+
+The loop leaves changes as **unstaged diffs** in your working tree. Review with `git diff`, stage with `git add -p`, commit yourself. Nothing is committed automatically.
+
+### Diagnostics
+
+```bash
+agentic-loop status        # task list + what's next
+agentic-loop why-stuck     # explain blocked/needs_human tasks
+agentic-loop last-failure  # most recent failure details
+
+# Reset a stuck task and retry
+agentic-loop reset-task <task-id> --apply
+agentic-loop run
+```
 
 ### You are inside Claude Code right now
 
@@ -130,7 +184,7 @@ After all tasks pass, changed files are applied to the main working tree as **un
 
 ### From a terminal
 
-```powershell
+```bash
 # Start a new goal
 agentic-loop init "refactor the auth module to use JWT"
 
@@ -143,18 +197,6 @@ agentic-loop run              # resume from the plan
 
 # Opt into merge instead of apply (commits run branch into main)
 agentic-loop run --merge --checks "npm test"
-
-# Override executor or route expensive phases to a stronger model
-agentic-loop run --planner-command "claude --model claude-opus-4-8 -p {prompt}" \
-                 --command "claude --model claude-sonnet-4-6 -p {prompt}"
-```
-
-Inspect a running or stuck loop:
-
-```powershell
-agentic-loop status        # task list + what's next
-agentic-loop why-stuck     # explain blocked/needs_human tasks
-agentic-loop last-failure  # most recent failure details
 ```
 
 ### Pre-flight validation (this repo only)

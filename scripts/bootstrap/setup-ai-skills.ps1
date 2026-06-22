@@ -77,6 +77,66 @@ function Copy-TemplateIfMissing {
     Write-Host "Created $DestinationPath"
 }
 
+function Upsert-TemplateWithMarkers {
+    param(
+        [string]$Source,
+        [string]$DestinationPath
+    )
+
+    $markerBegin = "<!-- BEGIN: GUARDRAILS MANAGED -->"
+    $markerEnd   = "<!-- END: GUARDRAILS MANAGED -->"
+
+    if (!(Test-Path $Source)) {
+        throw "Template not found: $Source"
+    }
+
+    $sourceContent = Get-Content -LiteralPath $Source -Raw
+    if ($sourceContent -notmatch [regex]::Escape($markerBegin)) {
+        # Source has no managed block — fall back to copy-if-missing
+        if (!(Test-Path $DestinationPath)) {
+            Copy-Item -LiteralPath $Source -Destination $DestinationPath
+            Write-Host "Created $DestinationPath (no managed block in source)"
+        } else {
+            Write-Host "Keeping existing $DestinationPath (no managed block in source)"
+        }
+        return
+    }
+
+    # Extract managed block from source
+    $escapedBegin = [regex]::Escape($markerBegin)
+    $escapedEnd   = [regex]::Escape($markerEnd)
+    if ($sourceContent -match "(?s)${escapedBegin}.*${escapedEnd}") {
+        $managedBlock = $matches[0]
+    } else {
+        Write-Host "Could not extract managed block from $Source — using full copy fallback"
+        Copy-TemplateIfMissing -Source $Source -DestinationPath $DestinationPath
+        return
+    }
+
+    if (!(Test-Path $DestinationPath)) {
+        Copy-Item -LiteralPath $Source -Destination $DestinationPath
+        Write-Host "Created $DestinationPath (with managed block)"
+        return
+    }
+
+    $destContent = Get-Content -LiteralPath $DestinationPath -Raw
+
+    if ($destContent -match [regex]::Escape($markerBegin)) {
+        # Destination has markers: replace managed content in-place
+        $before = if ($destContent -match "(?s)^(.*?)${escapedBegin}") { $matches[1] } else { "" }
+        $after  = if ($destContent -match "(?s)${escapedEnd}(.*)$") { $matches[1] } else { "" }
+
+        $newContent = $before + $managedBlock + $after
+        Set-Content -LiteralPath $DestinationPath -Value $newContent -NoNewline
+        Write-Host "Updated managed block in $DestinationPath"
+    } else {
+        # Destination exists but has no markers: append managed block at end
+        $newContent = $destContent + "`n" + $managedBlock
+        Set-Content -LiteralPath $DestinationPath -Value $newContent -NoNewline
+        Write-Host "Appended managed block to $DestinationPath"
+    }
+}
+
 function Copy-RepoTemplates {
     param(
         [string]$ToolName,
@@ -89,13 +149,13 @@ function Copy-RepoTemplates {
     if ($ToolName -eq "Codex" -or $ToolName -eq "Both") {
         $agentsPath = Join-Path $DestinationRoot "AGENTS.md"
         if ($ForceTemplateOverwrite) { Copy-Template -Source (Join-Path $TemplateRoot "AGENTS.md") -DestinationPath $agentsPath }
-        else { Copy-TemplateIfMissing -Source (Join-Path $TemplateRoot "AGENTS.md") -DestinationPath $agentsPath }
+        else { Upsert-TemplateWithMarkers -Source (Join-Path $TemplateRoot "AGENTS.md") -DestinationPath $agentsPath }
     }
 
     if ($ToolName -eq "Claude" -or $ToolName -eq "Both") {
         $claudePath = Join-Path $DestinationRoot "CLAUDE.md"
         if ($ForceTemplateOverwrite) { Copy-Template -Source (Join-Path $TemplateRoot "CLAUDE.md") -DestinationPath $claudePath }
-        else { Copy-TemplateIfMissing -Source (Join-Path $TemplateRoot "CLAUDE.md") -DestinationPath $claudePath }
+        else { Upsert-TemplateWithMarkers -Source (Join-Path $TemplateRoot "CLAUDE.md") -DestinationPath $claudePath }
     }
 
     Copy-TemplateIfMissing -Source (Join-Path $TemplateRoot "PROJECT.md") -DestinationPath (Join-Path $DestinationRoot "PROJECT.md")
