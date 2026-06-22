@@ -539,28 +539,33 @@ program
       if (/(?:^|\s|[/\\])claude(?:\s|$)/.test(t)) return "claude";
       return "custom";
     };
+    const detectDefaultTool = (): "pi" | "claude" | null => {
+      for (const bin of ["pi", "claude"] as const) {
+        try {
+          execFileSync(bin, ["--version"], { stdio: "ignore", shell: true });
+          return bin;
+        } catch { /* try next */ }
+      }
+      return null;
+    };
+    const defaultTool = detectDefaultTool();
+    if (!defaultTool && !opts.command) {
+      throw new LoopError("No executor found. Install 'pi' or 'claude', or pass --command.");
+    }
+    // When no --command is supplied, use the native adapter for the detected
+    // tool (pi runs in JSON mode: pi -p "@<path>" --mode json, giving the
+    // harness token usage, cache totals, cost, structured lifecycle events,
+    // reliable completion detection, and machine-readable errors).
     const makeAgent = (template?: string): AgentConfig =>
       template && template.trim().length > 0
         ? { tool: detectTool(template), commandTemplate: template, timeoutSeconds: timeout }
-        : { tool: "pi", timeoutSeconds: timeout };
+        : { tool: defaultTool ?? "pi", timeoutSeconds: timeout };
 
-    // Auto-detect executor command if --command not supplied.
-    const detectDefaultCommand = (): string => {
-      if (opts.command && (opts.command as string).trim().length > 0) return opts.command as string;
-      for (const [bin, flag] of [["claude", "-p"], ["pi", "-p"]] as [string, string][]) {
-        try {
-          execFileSync(bin, ["--version"], { stdio: "ignore", shell: true });
-          return `${bin} ${flag} {prompt}`;
-        } catch { /* try next */ }
-      }
-      throw new LoopError("No executor found. Install 'claude' or 'pi', or pass --command.");
-    };
-    const defaultCmd = detectDefaultCommand();
-    const agentConfig:    AgentConfig = makeAgent(defaultCmd);
-    const plannerConfig:  AgentConfig = makeAgent(opts.plannerCommand  ?? defaultCmd);
-    const grillConfig:    AgentConfig = makeAgent(opts.grillCommand    ?? defaultCmd);
-    const executorConfig: AgentConfig = makeAgent(opts.executorCommand ?? defaultCmd);
-    const verifierConfig: AgentConfig = makeAgent(opts.verifierCommand ?? defaultCmd);
+    const agentConfig:    AgentConfig = makeAgent(opts.command);
+    const plannerConfig:  AgentConfig = makeAgent(opts.plannerCommand);
+    const grillConfig:    AgentConfig = makeAgent(opts.grillCommand);
+    const executorConfig: AgentConfig = makeAgent(opts.executorCommand);
+    const verifierConfig: AgentConfig = makeAgent(opts.verifierCommand);
 
     const mergeModeRaw = opts.mergeMode ?? "ff-only";
     if (!["ff-only", "no-ff", "cherry-pick"].includes(mergeModeRaw)) {
