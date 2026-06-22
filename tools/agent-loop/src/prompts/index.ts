@@ -919,7 +919,11 @@ export function validateDecisions(records: unknown): string[] {
     if (!["high", "medium", "low"].includes(d.confidence as string)) errors.push(`${tag} confidence must be high, medium, or low`);
     if (typeof d.escalate !== "boolean") errors.push(`${tag} escalate must be a boolean`);
 
-    const opts = Array.isArray(d.optionsConsidered) ? d.optionsConsidered : [];
+    // Accept optionsConsidered (canonical) and options (common alias) so a field-name
+    // mismatch doesn't trigger a wasteful re-grill pass.
+    const opts = Array.isArray(d.optionsConsidered) ? d.optionsConsidered
+      : Array.isArray((d as Record<string, unknown>).options) ? (d as Record<string, unknown>).options as DecisionOption[]
+      : [];
     if (opts.length < 2) {
       errors.push(`${tag} considered ${opts.length} option(s); weigh at least 2 real alternatives before answering yourself`);
     }
@@ -1100,6 +1104,24 @@ export function writePreflightPrompt(promptFile: string, opts: PreflightPromptOp
     `Write decision JSON only to: ${opts.decisionResultFile}`,
     "Each decision needs 2-4 evidenced options, exactly one recommended option, chosen, whyItMatters, selfAnswer, confidence high|medium|low, and escalate boolean.",
     "If no genuine decision exists, write {\"decisions\":[]}.",
+    "",
+    "The harness validates the JSON against this exact schema; field names must match verbatim (in particular the options array is `optionsConsidered`, not `options`):",
+    JSON.stringify({
+      decisions: [
+        {
+          question: "...",
+          whyItMatters: "...",
+          optionsConsidered: [
+            { label: "...", evidence: "repo path / command / doc inspected", recommended: true },
+            { label: "...", evidence: "...", recommended: false },
+          ],
+          chosen: "...",
+          selfAnswer: "why I answered this myself without a human",
+          confidence: "high|medium|low",
+          escalate: false,
+        },
+      ],
+    }, null, 2),
   ].join("\n");
   writePromptWithEvent(promptFile, content, "preflight", opts.repoRoot, opts.runsRoot, opts.stateFile, opts.budget, {
     task: opts.task.id,

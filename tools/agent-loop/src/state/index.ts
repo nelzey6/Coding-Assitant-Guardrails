@@ -263,7 +263,11 @@ export function updateAssumptionsFromGrill(
 // Flatten a (loosely-typed) decision record into the string form stored in state.decisions.
 // Kept here (rather than importing from prompts) so the state layer has no prompt dependency.
 export function flattenDecisionRecord(d: Record<string, unknown>, taskId: string): string {
-  const opts = Array.isArray(d["optionsConsidered"]) ? (d["optionsConsidered"] as Record<string, unknown>[]) : [];
+  // Accept optionsConsidered (canonical) and options (common alias) for resilience.
+  const optsRaw = Array.isArray(d["optionsConsidered"]) ? d["optionsConsidered"]
+    : Array.isArray(d["options"]) ? d["options"]
+    : [];
+  const opts = optsRaw as Record<string, unknown>[];
   const optStr = opts
     .map((o) => `${o["recommended"] === true ? "*" : "-"} ${o["label"] ?? ""} (${o["evidence"] ?? ""})`)
     .join(" | ");
