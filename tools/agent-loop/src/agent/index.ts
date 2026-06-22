@@ -251,11 +251,23 @@ export async function invokeAgentWithLog(
   const timeout = config.timeoutSeconds ?? 0;
   const resolvedPrompt = resolve(promptFile);
 
+  // Resolve which CLI the template targets, so we can pass the prompt file
+  // correctly. pi and claude both treat a bare path as a literal prompt
+  // string; they need `@<path>` to inline file contents.
+  const detectToolFromTemplate = (template: string): AgentTool => {
+    const t = template.trim();
+    if (/(?:^|\s|[/\\])pi(?:\s|$)/.test(t)) return "pi";
+    if (/(?:^|\s|[/\\])claude(?:\s|$)/.test(t)) return "claude";
+    return "custom";
+  };
+
   let command: string;
   let effectiveTool: AgentTool | "custom";
   if (config.commandTemplate) {
-    command = config.commandTemplate.replace("{prompt}", resolvedPrompt);
-    effectiveTool = "custom";
+    const templateTool = detectToolFromTemplate(config.commandTemplate);
+    const promptRef = templateTool === "custom" ? resolvedPrompt : `@${resolvedPrompt}`;
+    command = config.commandTemplate.replace("{prompt}", promptRef);
+    effectiveTool = templateTool;
   } else if (config.tool === "claude") {
     const prompt = readFileSync(promptFile, "utf-8").replace(/'/g, "'\\''");
     command = `claude -p '${prompt}' --output-format json`;
