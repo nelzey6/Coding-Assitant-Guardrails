@@ -1069,6 +1069,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         runsRoot: cfg.runsRoot,
         stateFile: cfg.stateFile,
         budget: cfg.budget,
+        state,
         task,
         iteration,
         runDir,

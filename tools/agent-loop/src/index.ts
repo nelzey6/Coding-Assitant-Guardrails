@@ -2,7 +2,7 @@
 import { program } from "commander";
 import { writeFileSync, existsSync, copyFileSync, mkdirSync, createWriteStream } from "fs";
 import { execFileSync } from "child_process";
-import { join, resolve, dirname } from "path";
+import { join, resolve, dirname, relative } from "path";
 import { loadContext } from "./context/index.js";
 import { loadPolicy } from "./policy/index.js";
 import { runValidation } from "./validators/index.js";
@@ -26,6 +26,22 @@ import { runAgenticLoop, LoopError, type LoopConfig } from "./loop/index.js";
 import type { AgentConfig } from "./agent/index.js";
 
 function collect(val: string, acc: string[]): string[] { return [...acc, val]; }
+
+function uniq(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function toRepoRelative(repoRoot: string, filePath: string): string {
+  const abs = resolve(repoRoot, filePath);
+  const rel = relative(repoRoot, abs).replace(/\\/g, "/");
+  return rel && !rel.startsWith("..") ? rel : abs;
+}
+
+function expandSpecContext(repoRoot: string, specDir: string): string[] {
+  const dir = resolve(repoRoot, specDir);
+  const candidates = ["spec.md", "plan.md", "tasks.md"].map((name) => join(dir, name));
+  return candidates.filter(existsSync).map((path) => toRepoRelative(repoRoot, path));
+}
 
 const DEFAULT_RUNS_ROOT = ".agent-runs";
 const DEFAULT_WORKTREE_ROOT = ".worktrees";
@@ -123,11 +139,17 @@ program
   )
   .option("--repo <path>", "Path to repo root (default: auto-detected from cwd)")
   .option("--runs-root <path>", "Event log / run artifact root (default: .agent-runs)")
+  .option("--context <file>", "Optional context file to include in the goal state; repeatable", collect, [] as string[])
+  .option("--spec <dir>", "Optional Spec Kit feature directory; expands existing spec.md, plan.md, and tasks.md into context files")
   .option("--json", "Output result as JSON")
   .action((goal: string, opts) => {
     const repoRoot  = opts.repo     ? resolve(opts.repo)     : detectRepoRoot();
     const runsRoot  = join(repoRoot, opts.runsRoot ?? DEFAULT_RUNS_ROOT);
     const stateFile = join(repoRoot, DEFAULT_STATE_FILE);
+    const contextFiles = uniq([
+      ...((opts.context as string[] | undefined) ?? []).map((path) => toRepoRelative(repoRoot, path)),
+      ...(opts.spec ? expandSpecContext(repoRoot, opts.spec) : []),
+    ]);
 
     let archived   = false;
     let archivePath = "";
@@ -151,16 +173,18 @@ program
       assumptions: [] as string[],
       openQuestions: [] as string[],
       blockers: [] as string[],
+      contextFiles,
       promptPolicy: { lessons: [] as string[] },
     };
     writeFileSync(stateFile, JSON.stringify(freshState, null, 2), "utf-8");
 
     if (opts.json) {
-      console.log(JSON.stringify({ archived, archivePath: archived ? archivePath : null, stateFile }));
+      console.log(JSON.stringify({ archived, archivePath: archived ? archivePath : null, stateFile, contextFiles }));
     } else {
       if (archived) console.log(`Archived previous goal to: ${archivePath}`);
       console.log(`Initialised new goal in: ${stateFile}`);
       console.log(`Goal: ${goal}`);
+      if (contextFiles.length) console.log(`Context files: ${contextFiles.join(", ")}`);
     }
   });
 

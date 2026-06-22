@@ -112,6 +112,17 @@ export function getRecentHistoryText(
   return recent.map(formatEventLine).join("\n");
 }
 
+export function getOperatorContextBlock(state: AgenticState | undefined): string[] {
+  const files = state?.contextFiles ?? [];
+  if (files.length === 0) return [];
+  return [
+    "Operator-supplied context files:",
+    ...files.map((file) => `- ${file}`),
+    "Read these files before planning or editing. Treat them as guidance and acceptance context; if they conflict with current repo evidence, surface the conflict instead of silently choosing.",
+    "",
+  ];
+}
+
 // Write a prompt file, creating parent dirs, and append a prompt_written event.
 export function writePromptWithEvent(
   promptFile: string,
@@ -370,6 +381,8 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     priorFailureBlock,
     "",
     `Goal: ${state.goal ?? ""}`,
+    "",
+    ...getOperatorContextBlock(state),
     "Workflow policy (canonical workflow names, phases, and skills; read the policy file for full detail):",
     resolvedPolicyFile && existsSync(resolvedPolicyFile) ? `${resolvedPolicyFile}` : "(policy file not resolved)",
     JSON.stringify(
@@ -423,6 +436,7 @@ export interface ExecutorPromptOptions {
   runsRoot: string;
   stateFile: string;
   budget: PromptBudget;
+  state?: AgenticState;
   task: Task;
   iteration: number;
   runDir: string;
@@ -436,7 +450,7 @@ export interface ExecutorPromptOptions {
 
 export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOptions): void {
   const {
-    repoRoot, runsRoot, stateFile, budget, task, iteration, runDir,
+    repoRoot, runsRoot, stateFile, budget, state, task, iteration, runDir,
     eventLogPath: evLogPath, codeGraphFile = "", policy, taskGrillResult,
     decisionGrillDecisions = [], approvedStance,
   } = opts;
@@ -488,6 +502,7 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     `Run directory: ${runDir}`,
     `CodeGraph context: ${codeGraphFile}`,
     "",
+    ...getOperatorContextBlock(state),
     "Use CodeGraph context for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions by reading source files. If CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding.",
     "",
     `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
@@ -649,6 +664,7 @@ export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOp
     "If a prior failure was environmental or scope-related, inspect current repo/worktree state before blocking. Do not treat a stale failure as active when current evidence shows bootstrap, env, or scope conditions have changed.",
     priorFailureBlock,
     "",
+    ...getOperatorContextBlock(opts.state),
     `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
     recentHistory,
     "",

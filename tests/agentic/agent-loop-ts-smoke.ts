@@ -2108,7 +2108,37 @@ runCase("init: existing agentic.json is archived and replaced", () => {
   }
 });
 
-// ── case 25: validate — zero skills is a failure unless explicit ─────────────
+// ── case 25: init — optional context and Spec Kit context ────────────────────
+// --context stores explicit context files, and --spec expands existing
+// spec.md/plan.md/tasks.md files without making Spec Kit mandatory.
+
+runCase("init: stores optional context and spec files", () => {
+  const dir = tmpRepo("init-context-spec");
+  try {
+    git(["commit", "--allow-empty", "-m", "initial"], dir);
+    mkdirSync(join(dir, "specs", "001-demo"), { recursive: true });
+    writeFileSync(join(dir, "design.md"), "# Design", "utf-8");
+    writeFileSync(join(dir, "specs", "001-demo", "spec.md"), "# Spec", "utf-8");
+    writeFileSync(join(dir, "specs", "001-demo", "plan.md"), "# Plan", "utf-8");
+    writeFileSync(join(dir, "specs", "001-demo", "tasks.md"), "# Tasks", "utf-8");
+
+    const r = runCLI(dir, ["init", "goal with context", "--context", "design.md", "--spec", "specs/001-demo", "--json"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+
+    const out = JSON.parse(r.stdout.trim());
+    assert(out.contextFiles.includes("design.md"), "expected explicit context file in JSON output");
+    assert(out.contextFiles.includes("specs/001-demo/spec.md"), "expected spec.md in JSON output");
+    assert(out.contextFiles.includes("specs/001-demo/plan.md"), "expected plan.md in JSON output");
+    assert(out.contextFiles.includes("specs/001-demo/tasks.md"), "expected tasks.md in JSON output");
+
+    const state = JSON.parse(readFileSync(out.stateFile, "utf-8"));
+    assert(state.contextFiles.length === 4, `expected four context files, got ${state.contextFiles.length}`);
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 26: validate — zero skills is a failure unless explicit ─────────────
 
 runCase("validate: zero discovered skills fails unless --allow-empty", () => {
   const dir = tmpRepo("validate-empty");

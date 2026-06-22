@@ -52,6 +52,8 @@ export interface AgenticState {
   assumptions?: string[];
   openQuestions?: string[];
   blockers?: string[];
+  /** Optional operator-supplied context files (for example Spec Kit spec/plan/tasks) that prompts should read before planning/execution. */
+  contextFiles?: string[];
   promptPolicy?: { lessons?: string[] };
   replanCount?: number;
   lastReplanTaskIds?: string[];
