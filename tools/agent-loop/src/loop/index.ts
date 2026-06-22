@@ -399,20 +399,29 @@ async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter:
     writeFileSync(summaryFile, `# Agentic final summary\n\nFinalizer did not create a summary; inspect ${executorLog}.`, "utf-8");
   }
 
-  // Single-vote verifier: confirm PROJECT.md was actually updated with durable facts.
-  writeFinalizeDocsVerifierPrompt(verifierPrompt, {
-    repoRoot: cfg.repoRoot,
-    runWorktreePath,
-    summaryFile,
-    resultFile: verifierResult,
-  });
-  agentCallCounter.count++;
-  emitTokenUsage(cfg, await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, cfg.repoRoot, verifierLog, "finalize-docs-verifier"));
+  // Skip verifier when the executor reports no durable facts changed.
+  let summaryText = "";
+  try { summaryText = readFileSync(summaryFile, "utf-8"); } catch { /* empty */ }
+  const trivialRun = /(?:no (?:durable|new) (?:facts|changes)|PROJECT\.md (?:was not |unchanged|already up.?to.?date)|nothing (?:to|worth) (?:update|record))/i.test(summaryText);
 
-  const verifierVerdict = (() => {
-    if (!existsSync(verifierResult)) return "fail";
-    try { return (JSON.parse(readFileSync(verifierResult, "utf-8")) as { verdict?: string }).verdict ?? "fail"; } catch { return "fail"; }
-  })();
+  let verifierVerdict = "skipped";
+  if (trivialRun) {
+    appendEvent(cfg.repoRoot, "finalize_docs_verifier_skipped", { runDir, reason: "executor reported no durable facts changed" }, cfg.runsRoot, cfg.stateFile);
+  } else {
+    writeFinalizeDocsVerifierPrompt(verifierPrompt, {
+      repoRoot: cfg.repoRoot,
+      runWorktreePath,
+      summaryFile,
+      resultFile: verifierResult,
+    });
+    agentCallCounter.count++;
+    emitTokenUsage(cfg, await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, cfg.repoRoot, verifierLog, "finalize-docs-verifier"));
+
+    verifierVerdict = (() => {
+      if (!existsSync(verifierResult)) return "fail";
+      try { return (JSON.parse(readFileSync(verifierResult, "utf-8")) as { verdict?: string }).verdict ?? "fail"; } catch { return "fail"; }
+    })();
+  }
 
   appendEvent(cfg.repoRoot, "finalize_docs_finished", {
     runDir, summary: summaryFile, verifierVerdict,
@@ -1294,7 +1303,14 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         appendProgress(join(cfg.repoRoot, cfg.runsRoot), taskId, verifierResultObj.summary ?? "", handoverFile);
 
         if (cfg.postTaskReview) {
-          await runPostTaskReviewPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef, taskId, runDir, verifierResult, handoverFile);
+          const remainingRunnable = (loadState(cfg.repoRoot, cfg.stateFile)!.tasks ?? []).filter(
+            (t) => t.id !== taskId && (t.status === "pending" || t.status === "needs_retry")
+          );
+          if (remainingRunnable.length > 0) {
+            await runPostTaskReviewPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef, taskId, runDir, verifierResult, handoverFile);
+          } else {
+            appendEvent(cfg.repoRoot, "post_task_review_skipped", { task: taskId, reason: "plan complete — no remaining runnable tasks" }, cfg.runsRoot, cfg.stateFile);
+          }
         }
 
         // Architect checkpoint: trigger every N passed tasks if configured.

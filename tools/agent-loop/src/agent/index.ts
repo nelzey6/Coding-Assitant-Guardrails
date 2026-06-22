@@ -50,7 +50,7 @@ function shellCapture(command: string, cwd: string, timeoutSeconds: number): str
  * Run a shell command, streaming output live to stdout AND appending to logPath.
  * Resolves when the process exits; rejects on non-zero exit or spawn error.
  */
-function spawnTee(command: string, cwd: string, timeoutSeconds: number, logPath: string): Promise<void> {
+function spawnTee(command: string, cwd: string, timeoutSeconds: number, logPath: string, filterVerboseJson = false): Promise<void> {
   return new Promise((resolve, reject) => {
     const isWindows = process.platform === "win32";
     const id = randomBytes(8).toString("hex");
@@ -76,9 +76,20 @@ function spawnTee(command: string, cwd: string, timeoutSeconds: number, logPath:
       }, timeoutSeconds * 1000);
     }
 
+    // Filter pi --mode json message_update events inline (97% of log volume).
+    let lineBuf = "";
+    const filterLine = filterVerboseJson
+      ? ((line: string) => { try { const e = JSON.parse(line) as { type?: string }; return e.type !== "message_update"; } catch { return true; } })
+      : undefined;
+
     const onData = (chunk: Buffer) => {
-      process.stdout.write(chunk);
-      logStream.write(chunk);
+      if (!filterLine) { process.stdout.write(chunk); logStream.write(chunk); return; }
+      lineBuf += chunk.toString("utf-8");
+      const lines = lineBuf.split("\n");
+      lineBuf = lines.pop() ?? "";
+      for (const line of lines) {
+        if (filterLine(line)) { const out = line + "\n"; process.stdout.write(out); logStream.write(out); }
+      }
     };
 
     child.stdout.on("data", onData);
@@ -93,6 +104,7 @@ function spawnTee(command: string, cwd: string, timeoutSeconds: number, logPath:
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (filterLine && lineBuf.length > 0 && filterLine(lineBuf)) { const out = lineBuf + "\n"; process.stdout.write(out); logStream.write(out); }
       logStream.end(() => {
         try { unlinkSync(scriptPath); } catch { /* ignore */ }
         if (code !== 0 && code !== null) {
@@ -211,42 +223,6 @@ function extractClaudeUsage(logPath: string, phase: string): TokenUsage | null {
   return null;
 }
 
-// Rewrite a pi --mode json log, dropping verbose streaming events that are
-// useless for diagnostics and token extraction. Keeps session/agent_*/
-// turn_*/message_start/message_end/tool_*/result events. Non-JSON and
-// non-pi lines are passed through unchanged (claude/custom logs are unaffected
-// since this is only called for effectiveTool === "pi").
-const PI_VERBOSE_EVENTS = new Set(["message_update"]);
-function filterVerbosePiEvents(logPath: string): void {
-  if (!existsSync(logPath)) return;
-  let raw: string;
-  try {
-    raw = readFileSync(logPath, "utf-8");
-  } catch {
-    return;
-  }
-  const kept: string[] = [];
-  let dropped = 0;
-  for (const line of raw.split("\n")) {
-    if (line.length === 0) { kept.push(line); continue; }
-    let kind: string | undefined;
-    try {
-      const e = JSON.parse(line) as { type?: string };
-      kind = e.type;
-    } catch {
-      kind = undefined;
-    }
-    if (kind && PI_VERBOSE_EVENTS.has(kind)) { dropped++; continue; }
-    kept.push(line);
-  }
-  if (dropped === 0) return;
-  try {
-    writeFileSync(logPath, kept.join("\n"), "utf-8");
-  } catch {
-    /* best-effort; leave original log intact */
-  }
-}
-
 function extractPiUsage(logPath: string, phase: string): TokenUsage | null {
   if (!existsSync(logPath)) return null;
   const lines = readFileSync(logPath, "utf-8").split("\n").filter(Boolean).reverse();
@@ -328,19 +304,11 @@ export async function invokeAgentWithLog(
   const startedAt = new Date();
   const started = performance.now();
   try {
-    await spawnTee(command, workingDirectory, timeout, logPath);
+    await spawnTee(command, workingDirectory, timeout, logPath, effectiveTool === "pi");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     appendFileSync(logPath, `ERROR: ${msg}\n`, "utf-8");
     throw err;
-  }
-
-  // pi --mode json emits a message_update event per token stream chunk; these
-  // are useless for diagnostics (97% of log lines in a typical run) and bloat
-  // logs to 100MB+. Drop them after the run completes. Token usage extraction
-  // only needs agent_end, which is preserved.
-  if (effectiveTool === "pi") {
-    filterVerbosePiEvents(logPath);
   }
 
   const finishedAt = new Date();
