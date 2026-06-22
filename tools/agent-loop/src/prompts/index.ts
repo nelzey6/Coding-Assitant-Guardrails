@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, unlinkSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { execFileSync } from "child_process";
 import { homedir } from "os";
@@ -368,9 +368,12 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "Allowed task kinds: discovery, investigation, implementation, architecture, maintenance, handoff.",
     "Each task must have: id, title, kind, workflow, status, priority, acceptanceCriteria, validation, dependsOn, failureHistory, artifacts, scope, complexity, complexityReasons.",
     "Use one workflow per task. Use dependencies for workflow sequences. Use only canonical workflows from the policy.",
-    "Keep tasks small and independently verifiable. Split broad goals into dependent tasks.",
+    "Plan around verification seams, not file boundaries. Every task incurs task-grill, decision-grill, executor, verifier, and post-task review cost, so each task must buy meaningful independent proof.",
+    "Split a task only when at least one is true: it has a different risk profile, a different acceptance proof, different scope/ownership, independent rollback value, or creates a dependency required by later work.",
+    "Do not create one task per helper, file move, module extraction, or similarly mechanical edit when those edits share one risk profile and one validation command. Group them into the smallest coherent verification slice.",
+    "Keep tasks independently verifiable, but reject orchestration-heavy plans where repeated validation is identical and task boundaries add no new proof.",
     "Always set `scope` to the forward-slash glob list of files the task may change. Keep scope tight (5 globs or fewer), but include every file implied by acceptance criteria, including new focused test files when direct helper-level proof requires them.",
-    "Set complexity to low, medium, or high and give concrete complexityReasons. Architecture, broad cross-module, assumption-heavy, or costly-to-reverse work should be high. Split high-complexity work into small, independently verifiable dependent tasks rather than defining intra-task milestones.",
+    "Set complexity to low, medium, or high and give concrete complexityReasons. Architecture, broad cross-module, assumption-heavy, or costly-to-reverse work should be high. Split high-complexity work only at genuine verification seams; do not multiply model calls merely to reduce changed-file count.",
     "Task-size budget (enforced by the harness): at most 7 acceptanceCriteria, at most 5 scope globs, implementation/architecture tasks must have at least one acceptanceCriterion.",
     "",
     "For every genuine design/product/architecture decision the plan forces, run a grill-with-docs self-interview: weigh 2-4 real options with concrete repo/docs evidence, mark one recommended, answer it yourself. Set escalate:true only when evidence genuinely cannot settle it.",
@@ -571,6 +574,7 @@ export interface TaskGrillPromptOptions {
   policy: WorkflowPolicy;
   /** Path to failure-analysis.json from the most recent failed attempt, if any. */
   priorFailureAnalysisFile?: string;
+  suppressEvent?: boolean;
 }
 
 export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOptions): void {
@@ -678,7 +682,10 @@ export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOp
     taskJson,
   ].join("\n");
 
-  writePromptWithEvent(promptFile, content, "task_grill", repoRoot, runsRoot, stateFile, budget, {
+  if (opts.suppressEvent) {
+    mkdirSync(dirname(promptFile), { recursive: true });
+    writeFileSync(promptFile, content, "utf-8");
+  } else writePromptWithEvent(promptFile, content, "task_grill", repoRoot, runsRoot, stateFile, budget, {
     task: task.id,
     resultFile,
     codegraph: codeGraphFile,
@@ -698,6 +705,7 @@ export interface VerifierPromptOptions {
   eventLogPath: string;
   policy: WorkflowPolicy;
   adversarial?: boolean;
+  suppressEvent?: boolean;
 }
 
 export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOptions): void {
@@ -764,7 +772,10 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
     diff,
   ].join("\n");
 
-  writePromptWithEvent(promptFile, content, "verifier", repoRoot, runsRoot, stateFile, budget, {
+  if (opts.suppressEvent) {
+    mkdirSync(dirname(promptFile), { recursive: true });
+    writeFileSync(promptFile, content, "utf-8");
+  } else writePromptWithEvent(promptFile, content, "verifier", repoRoot, runsRoot, stateFile, budget, {
     task: task.id,
     diffBytes: rawDiffBytes,
     diffInlined,
@@ -967,6 +978,73 @@ export function writeDecisionGrillPrompt(promptFile: string, opts: DecisionGrill
 
   mkdirSync(dirname(promptFile), { recursive: true });
   writeFileSync(promptFile, content, "utf-8");
+}
+
+export interface PreflightPromptOptions extends TaskGrillPromptOptions {
+  decisionResultFile: string;
+}
+
+function writeTaskContextCapsule(file: string, opts: {
+  repoRoot: string; runsRoot: string; budget: PromptBudget; state?: AgenticState;
+  task: Task; codeGraphFile?: string; eventLogPath: string;
+}): void {
+  const limits = getPromptBudgetLimits(opts.budget);
+  const content = [
+    "# Task Context Capsule",
+    `CodeGraph context: ${opts.codeGraphFile ?? ""}`,
+    `Event log source: ${opts.eventLogPath}`,
+    "",
+    ...getOperatorContextBlock(opts.state),
+    "Current assumptions:",
+    opts.state?.assumptions?.length ? opts.state.assumptions.join("\n") : "(none)",
+    "",
+    "Current decisions:",
+    opts.state?.decisions?.length ? opts.state.decisions.join("\n") : "(none)",
+    "",
+    "Recent harness delta:",
+    getRecentHistoryText(opts.repoRoot, opts.runsRoot, phaseEventLimit(limits.eventLimit, "task_grill"), opts.budget),
+    "",
+    "Task JSON:",
+    JSON.stringify(opts.task, null, 2),
+  ].join("\n");
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, content, "utf-8");
+}
+
+/**
+ * Bundle readiness and decision discovery into one fresh-agent evidence pass.
+ * Separate legacy result files preserve each logical phase's contract and
+ * allow older/custom agents to fall back to the missing phase only.
+ */
+export function writePreflightPrompt(promptFile: string, opts: PreflightPromptOptions): void {
+  const taskDraft = join(opts.runDir, ".task-grill-section.md");
+  const contextCapsule = join(opts.runDir, "context-capsule.md");
+  writeTaskContextCapsule(contextCapsule, opts);
+  writeTaskGrillPrompt(taskDraft, { ...opts, suppressEvent: true });
+  const taskContract = readFileSync(taskDraft, "utf-8");
+  unlinkSync(taskDraft);
+  const content = [
+    "BUNDLED PREFLIGHT — perform both logical reviews in one evidence pass.",
+    "Do not edit repository files. Read shared evidence once, then write BOTH separate result files.",
+    "Task-grill controls whether downstream decisions are accepted; still write both outputs so the run is auditable.",
+    `Canonical shared evidence: ${contextCapsule}`,
+    "",
+    "=== TASK-GRILL CONTRACT ===",
+    taskContract,
+    "",
+    "=== DECISION-GRILL CONTRACT ===",
+    "Using the same evidence capsule, surface every genuine design/product/architecture decision forced by this task.",
+    `Write decision JSON only to: ${opts.decisionResultFile}`,
+    "Each decision needs 2-4 evidenced options, exactly one recommended option, chosen, whyItMatters, selfAnswer, confidence high|medium|low, and escalate boolean.",
+    "If no genuine decision exists, write {\"decisions\":[]}.",
+  ].join("\n");
+  writePromptWithEvent(promptFile, content, "preflight", opts.repoRoot, opts.runsRoot, opts.stateFile, opts.budget, {
+    task: opts.task.id,
+    resultFile: opts.resultFile,
+    decisionResultFile: opts.decisionResultFile,
+    contextCapsule,
+    codegraph: opts.codeGraphFile,
+  });
 }
 
 export interface GoalReviewPromptOptions {
@@ -1178,6 +1256,51 @@ export function writePostTaskReviewPrompt(promptFile: string, opts: PostTaskRevi
   writePromptWithEvent(promptFile, content, "post_task_review", repoRoot, runsRoot, stateFile, budget, {
     task: taskId,
     resultFile,
+  });
+}
+
+export interface BundledReviewPromptOptions extends VerifierPromptOptions {
+  postTaskResultFile: string;
+  taskRunDir: string;
+  handoverFile: string;
+  loopBaseRef: string;
+  state: AgenticState;
+}
+
+/** Bundle implementation verification and remaining-plan review into one fresh review pass. */
+export function writeBundledReviewPrompt(promptFile: string, opts: BundledReviewPromptOptions): void {
+  const verifierDraft = join(opts.taskRunDir, ".verifier-section.md");
+  const contextCapsule = join(opts.taskRunDir, "context-capsule.md");
+  writeTaskContextCapsule(contextCapsule, {
+    repoRoot: opts.repoRoot, runsRoot: opts.runsRoot, budget: opts.budget,
+    state: opts.state, task: opts.task, codeGraphFile: "", eventLogPath: opts.eventLogPath,
+  });
+  writeVerifierPrompt(verifierDraft, { ...opts, suppressEvent: true });
+  const verifierContract = readFileSync(verifierDraft, "utf-8");
+  unlinkSync(verifierDraft);
+  const content = [
+    "BUNDLED REVIEW — perform both logical reviews in one fresh evidence pass.",
+    "Read the diff, checks, task, and remaining plan once. Write BOTH separate result files.",
+    "Verification is authoritative first. The harness ignores plan-review output unless verification passes.",
+    "Do not edit repository files.",
+    `Canonical shared evidence: ${contextCapsule}`,
+    "",
+    "=== VERIFICATION CONTRACT ===",
+    verifierContract,
+    "",
+    "=== REMAINING-PLAN CONTRACT ===",
+    "Using the same evidence capsule, reassess whether remaining tasks are still correctly sliced, scoped, ordered, and validated after this task.",
+    `Verifier result will be written to: ${opts.resultFile}`,
+    `Handover: ${opts.handoverFile}`,
+    `Write post-task review JSON only to: ${opts.postTaskResultFile}`,
+    "Allowed verdicts: continue, adjust_remaining_tasks, replan, needs_human.",
+    "Schema: {\"verdict\":\"continue|adjust_remaining_tasks|replan|needs_human\",\"assessment\":\"...\",\"remainingPlanStillValid\":true,\"suggestedChanges\":[]}",
+  ].join("\n");
+  writePromptWithEvent(promptFile, content, "bundled_review", opts.repoRoot, opts.runsRoot, opts.stateFile, opts.budget, {
+    task: opts.task.id,
+    resultFile: opts.resultFile,
+    postTaskResultFile: opts.postTaskResultFile,
+    contextCapsule,
   });
 }
 

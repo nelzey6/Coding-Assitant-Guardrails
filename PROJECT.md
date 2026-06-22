@@ -84,6 +84,9 @@ Important per-task artifacts:
 | `verifier-result.json` | Verifier verdict JSON. |
 | `handover.md` | Executor-authored or harness-generated continuation note. |
 | `state-before.json` / `state-after.json` | Snapshots around each task turn. |
+| `context-capsule.md` | Canonical task/state/history evidence shared by bundled preflight and review prompts; refreshed after execution so phase-specific contracts do not repeat the full payload. |
+
+Every completed agent invocation emits `agent_invocation_finished` with phase, tool, start/end timestamps, duration, and explicit telemetry availability. Native Pi/Claude JSON adapters additionally emit `token_usage`; plain custom commands report token telemetry as unavailable instead of silently omitting observability.
 
 ## Autonomous Run Flow
 
@@ -94,8 +97,8 @@ The current TS run loop is:
 3. Create one shared run worktree at `.worktrees/run-<timestamp>` on branch `agentic/run-<timestamp>`; all tasks in the run commit onto this branch.
 4. Pick next runnable task: `pending` or `needs_retry` with passed dependencies.
 5. Run configured worktree bootstrap commands, if any, and mark configured bootstrap artifacts ignored for scope/diff/commit.
-6. Run task-grill before executor edits.
-6. If task-grill returns `ready`, inject its result into executor prompt and run executor.
+6. Run one bundled preflight invocation for task-grill readiness plus decision-grill decisions. Each logical phase keeps its separate result artifact and validation contract; legacy/custom agents that write only task-grill output fall back to a decision-only invocation.
+6. If task-grill returns `ready`, inject its result and accepted decisions into executor prompt and run executor.
 7. Resolve task complexity. Before high-complexity execution, run two to three clean-worktree `reflect-on-approach` stance rounds and inject the approved stance into the executor prompt.
 7. If task-grill returns `needs_replan`, mark stale task `blocked`, record `task_replan_requested`, enforce replan budget, check for plan convergence, run planner again, and continue to replacement tasks.
 8. If task-grill returns `needs_human` or `blocked`, stop before executor edits.
@@ -103,7 +106,7 @@ The current TS run loop is:
 10. Emit `scope_missing_warning` event and warn if task declares no scope (loop proceeds but diff-scope rail is inactive).
 11. Enforce declared task `scope` by diffing changed files before verifier review.
 12. If `--rebase-before-verify` is set, rebase worktree on loop-start HEAD and re-run checks before the verifier.
-13. Run verifier unless `--fast-verifier` is requested and allowed for a low-risk scoped task.
+13. Run one bundled review invocation for verifier correctness plus remaining-plan review unless `--fast-verifier` is allowed. Separate result artifacts and verdict ordering remain; legacy/custom agents fall back to whichever review output is missing.
 14. For high-risk tasks, run adversarial verifier votes unless overridden.
 15. On pass, commit to the shared run branch (not to main).
 16. Write handover/progress artifacts.
@@ -111,6 +114,8 @@ The current TS run loop is:
 18. On post-task review `adjust_remaining_tasks`, record the advice as an advisory event and continue to the next runnable task; task-grill remains the just-in-time gate for deciding whether that specific task needs replan. On post-task review `replan`, block stale pending/retry tasks, enforce the replan budget/convergence guard, run planner again, and continue to replacement tasks.
 19. Every three passed tasks by default, run architect checkpoint over cumulative diff and remaining plan; `replan` calls planner, `needs_human` halts.
 20. When no runnable tasks remain, treat `passed` and `blocked` as terminal statuses. If all unfinished work is terminal, apply run branch to main tree as unstaged changes (default) or merge (`--merge`), clean up run worktree, and complete.
+
+Planner slicing rule: tasks represent independent verification slices. Split only for distinct risk, proof, ownership/scope, rollback value, or dependency; do not create one task per helper/file move when validation is shared.
 
 ## Task-Grill Contract
 
@@ -154,6 +159,9 @@ Current TS rails:
 - `run` enforces the policy clean-main-worktree gate when `autonomousLoop.requireCleanMainWorktree` is true. Use `--allow-dirty` only when intentionally running with uncommitted main-worktree changes.
 - Harness owns task status, verifier result handling, commit, merge, and cleanup.
 - Task-grill must pass before executor runs.
+- Task-grill and decision-grill share one preflight invocation when the agent supports the bundled contract. Their verdict ordering and legacy artifacts remain independent.
+- Verifier and post-task review share one bundled review invocation when supported. Verification is processed first; plan advice is ignored on verification failure, preserving executor/reviewer independence and retry semantics.
+- Bundled phases reference one `context-capsule.md` per task turn. Contract-only decision and plan-review sections reuse that evidence instead of embedding a second copy of task JSON, assumptions, decisions, and event history.
 - Tasks with no declared `scope` emit `scope_missing_warning`; the diff-scope rail is inactive for them.
 - Scope rail blocks changed files outside declared task scope.
 - Fast verifier is denied unless task kind is low-risk and scope is declared.

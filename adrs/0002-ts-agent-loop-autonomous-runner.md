@@ -53,6 +53,14 @@ Tradeoffs:
 - `blocked` is treated as a terminal task status for completion purposes. This supports stale-task replacement, but blocked tasks must carry enough failure history to explain why they are terminal.
 - The setup scripts still install the PowerShell harness shim today, so repository docs must distinguish current TS architecture from legacy installed compatibility.
 
+Performance clarification:
+
+- A task is a verification slice, not a file-sized work item. Planner task splits must introduce a distinct risk profile, acceptance proof, ownership/scope seam, rollback value, or dependency. Mechanical edits sharing one proof should remain one task because every task pays the full grill, execution, verification, and plan-review cost.
+- Logical phase isolation is defined by separate contracts, validation, ordering, and artifacts. It does not require every logical phase to remain a separate model invocation when multiple judgments consume the same evidence. Executor and reviewer independence must remain intact.
+- Task-grill and decision-grill therefore run as one bundled preflight invocation by default. The harness validates task readiness first, accepts decisions only after a `ready` verdict, and falls back to a decision-only invocation when a legacy/custom agent writes only the task-grill artifact.
+- Verifier and post-task review run as one bundled review invocation by default for single-vote verification. The harness processes verification first and uses remaining-plan advice only after a pass. Missing legacy artifacts trigger only the missing review call; adversarial verifier votes stay independent.
+- Each task turn writes a canonical context capsule containing task JSON, operator context, assumptions, decisions, CodeGraph reference, and recent event delta. Bundled phase contracts reuse this artifact to keep shared evidence local and avoid repeating it across logical reviews.
+
 ## Known Follow-Ups
 
 - Enforce clean-main-worktree policy in the TS `run` command.

@@ -24,7 +24,7 @@ import {
 } from "../state/index.js";
 import { appendEvent } from "../events/index.js";
 import { safeSlug, createWorktree, worktreeExists, removeWorktree, git as gitTool, GitError } from "../tools/index.js";
-import { invokeAgent, invokeAgentWithLog, getTaskChecks, type AgentConfig, type TokenUsage } from "../agent/index.js";
+import { invokeAgent, invokeAgentWithLog, getTaskChecks, type AgentConfig, type AgentInvocationResult } from "../agent/index.js";
 import { invokeChecks, parseMetricLines } from "../checks/index.js";
 import { getTaskScope, getOutOfScopeFiles, testFastVerifierAllowed, testTaskIsHighRisk, isTaskUnscoped, resolveTaskComplexity } from "../scope/index.js";
 import {
@@ -40,7 +40,9 @@ import {
   writeGoalReviewPrompt,
   writeArchitectCheckpointPrompt,
   writeDecisionGrillPrompt,
+  writePreflightPrompt,
   writePostTaskReviewPrompt,
+  writeBundledReviewPrompt,
   writeStanceReflectionPrompt,
   validatePlannerResult,
   validateDecisions,
@@ -135,7 +137,17 @@ function git(args: string[], cwd?: string): string {
   }
 }
 
-function emitTokenUsage(cfg: Required<LoopConfig>, usage: TokenUsage | null, taskId?: string): void {
+function emitTokenUsage(cfg: Required<LoopConfig>, invocation: AgentInvocationResult, taskId?: string): void {
+  appendEvent(cfg.repoRoot, "agent_invocation_finished", {
+    ...(taskId ? { task: taskId } : {}),
+    phase: invocation.phase,
+    tool: invocation.tool,
+    telemetryStatus: invocation.telemetryStatus,
+    startedAt: invocation.startedAt,
+    finishedAt: invocation.finishedAt,
+    durationMs: invocation.durationMs,
+  }, cfg.runsRoot, cfg.stateFile);
+  const usage = invocation.usage;
   if (!usage) return;
   appendEvent(cfg.repoRoot, "token_usage", {
     ...(taskId ? { task: taskId } : {}),
@@ -156,6 +168,12 @@ function timestamp(): string {
 
 function pathspecExcludes(paths: string[]): string[] {
   return expandIgnoredPaths(paths).map((p) => `:(exclude)${p}`);
+}
+
+const HARNESS_OWNED_IGNORES = [".codegraph/**"];
+
+function harnessIgnoredPaths(configured: string[]): string[] {
+  return [...new Set([...configured, ...HARNESS_OWNED_IGNORES])];
 }
 
 function expandIgnoredPaths(paths: string[]): string[] {
@@ -583,16 +601,17 @@ async function runPostTaskReviewPhase(
   verifierResultFile: string,
   handoverFile: string
 ): Promise<void> {
+  const bundledResultFile = join(taskRunDir, "post-task-review-result.json");
   const ts = timestamp();
   const runDir = join(cfg.repoRoot, cfg.runsRoot, `agentic-${ts}-${safeSlug(taskId)}-post-task-review`);
   mkdirSync(runDir, { recursive: true });
 
   const promptFile = join(runDir, "post-task-review.md");
   const logFile    = join(runDir, "post-task-review.log");
-  const resultFile = join(runDir, "post-task-review-result.json");
+  const resultFile = existsSync(bundledResultFile) ? bundledResultFile : join(runDir, "post-task-review-result.json");
 
   const state = loadState(cfg.repoRoot, cfg.stateFile)!;
-  writePostTaskReviewPrompt(promptFile, {
+  if (!existsSync(resultFile)) writePostTaskReviewPrompt(promptFile, {
     repoRoot: cfg.repoRoot,
     runsRoot: cfg.runsRoot,
     stateFile: cfg.stateFile,
@@ -606,10 +625,14 @@ async function runPostTaskReviewPhase(
     resultFile,
   });
 
-  appendEvent(cfg.repoRoot, "post_task_review_started", { task: taskId, runDir, prompt: promptFile, resultFile }, cfg.runsRoot, cfg.stateFile);
-  console.log(`=== Agentic post-task review: ${taskId} ===`);
-  agentCallCounter.count++;
-  emitTokenUsage(cfg, await invokeAgentWithLog(promptFile, cfg.grillAgent, cfg.repoRoot, logFile, "post-task-review"), taskId);
+  appendEvent(cfg.repoRoot, "post_task_review_started", { task: taskId, runDir, prompt: promptFile, resultFile, bundled: resultFile === bundledResultFile }, cfg.runsRoot, cfg.stateFile);
+  if (resultFile === bundledResultFile) {
+    appendEvent(cfg.repoRoot, "post_task_review_reused_bundled_review", { task: taskId, resultFile }, cfg.runsRoot, cfg.stateFile);
+  } else {
+    console.log(`=== Agentic post-task review: ${taskId} ===`);
+    agentCallCounter.count++;
+    emitTokenUsage(cfg, await invokeAgentWithLog(promptFile, cfg.grillAgent, cfg.repoRoot, logFile, "post-task-review"), taskId);
+  }
 
   if (!existsSync(resultFile)) throw new LoopError(`Post-task review agent did not write ${resultFile}`);
   const result = JSON.parse(readFileSync(resultFile, "utf-8")) as PostTaskReviewResult;
@@ -751,7 +774,16 @@ async function runDecisionGrillPhase(
   };
 
   console.log(`=== Agentic decision grill: ${task.id} ===`);
-  let { decisions, errors } = await runOnce("");
+  let decisions: Record<string, unknown>[] = [];
+  let errors: string[] = [];
+  if (existsSync(resultFile)) {
+    const parsed = JSON.parse(readFileSync(resultFile, "utf-8")) as { decisions?: Record<string, unknown>[] };
+    decisions = parsed.decisions ?? [];
+    errors = validateDecisions(decisions);
+    appendEvent(cfg.repoRoot, "decision_grill_reused_preflight", { task: task.id, count: decisions.length }, cfg.runsRoot, cfg.stateFile);
+  } else {
+    ({ decisions, errors } = await runOnce(""));
+  }
   let reGrillReasons = needsReGrill(decisions, errors);
 
   if (reGrillReasons.length > 0) {
@@ -854,7 +886,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
   const runBranch     = `agentic/run-${runTs0}`;
   const runWorktreePath = join(cfg.repoRoot, cfg.worktreeRoot, `run-${runTs0}`);
   createWorktree(runBranch, runWorktreePath, "HEAD", cfg.repoRoot);
-  writeWorktreeExclude(runWorktreePath, cfg.worktreeBootstrapIgnore);
+  writeWorktreeExclude(runWorktreePath, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
   appendEvent(cfg.repoRoot, "run_worktree_created", { branch: runBranch, worktree: runWorktreePath }, cfg.runsRoot, cfg.stateFile);
 
   // ── Execution loop ────────────────────────────────────────────────────────
@@ -913,9 +945,11 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     const taskGrillPrompt = join(runDir, "task-grill.md");
     const taskGrillResult = join(runDir, "task-grill-result.json");
     const taskGrillLog    = join(runDir, "task-grill.log");
+    const decisionGrillResult = join(runDir, "decision-grill-result.json");
     const executorPrompt  = join(runDir, "executor.md");
     const verifierPrompt  = join(runDir, "verifier.md");
     const verifierResult  = join(runDir, "verifier-result.json");
+    const bundledPostTaskResult = join(runDir, "post-task-review-result.json");
     const codeGraphFile   = join(runDir, "codegraph.md");
     const executorLog     = join(runDir, "executor.log");
     const checksLog       = join(runDir, "checks.log");
@@ -934,7 +968,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     task = getTasks(loadState(cfg.repoRoot, cfg.stateFile)!).find((t) => t.id === taskId)!;
     setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "running");
 
-    writeWorktreeExclude(worktreePath, cfg.worktreeBootstrapIgnore);
+    writeWorktreeExclude(worktreePath, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
 
     try {
       if (cfg.worktreeBootstrap.length > 0) {
@@ -956,7 +990,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       // Task-grill: re-check understanding immediately before execution.
       syncCodeGraph(worktreePath);
       writeCodeGraphContext(codeGraphFile, worktreePath);
-      writeTaskGrillPrompt(taskGrillPrompt, {
+      const preflightOptions = {
         repoRoot: cfg.repoRoot,
         runsRoot: cfg.runsRoot,
         stateFile: cfg.stateFile,
@@ -970,13 +1004,22 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         codeGraphFile,
         policy,
         priorFailureAnalysisFile: getLastFailureAnalysisFile(task),
-      });
-      appendEvent(cfg.repoRoot, "task_grill_started", { task: taskId, prompt: taskGrillPrompt, resultFile: taskGrillResult, log: taskGrillLog }, cfg.runsRoot, cfg.stateFile);
+      };
+      if (cfg.decisionGrill) {
+        writePreflightPrompt(taskGrillPrompt, { ...preflightOptions, decisionResultFile: decisionGrillResult });
+        appendEvent(cfg.repoRoot, "preflight_started", { task: taskId, prompt: taskGrillPrompt, taskGrillResult, decisionGrillResult, log: taskGrillLog }, cfg.runsRoot, cfg.stateFile);
+      } else {
+        writeTaskGrillPrompt(taskGrillPrompt, preflightOptions);
+      }
+      appendEvent(cfg.repoRoot, "task_grill_started", { task: taskId, prompt: taskGrillPrompt, resultFile: taskGrillResult, log: taskGrillLog, bundled: cfg.decisionGrill }, cfg.runsRoot, cfg.stateFile);
       agentCallCounter.count++;
-      emitTokenUsage(cfg, await invokeAgentWithLog(taskGrillPrompt, cfg.grillAgent, worktreePath, taskGrillLog, "task-grill"), taskId);
+      emitTokenUsage(cfg, await invokeAgentWithLog(taskGrillPrompt, cfg.grillAgent, worktreePath, taskGrillLog, cfg.decisionGrill ? "preflight" : "task-grill"), taskId);
       if (!existsSync(taskGrillResult)) throw new LoopError(`Task grill did not write ${taskGrillResult}`);
       const taskGrillResultObj = JSON.parse(readFileSync(taskGrillResult, "utf-8")) as TaskGrillResult;
       appendEvent(cfg.repoRoot, "task_grill_finished", { task: taskId, verdict: taskGrillResultObj.verdict, resultFile: taskGrillResult, understanding: taskGrillResultObj.understanding }, cfg.runsRoot, cfg.stateFile);
+      if (cfg.decisionGrill && existsSync(decisionGrillResult)) {
+        appendEvent(cfg.repoRoot, "preflight_finished", { task: taskId, taskGrillVerdict: taskGrillResultObj.verdict, decisionResultFile: decisionGrillResult }, cfg.runsRoot, cfg.stateFile);
+      }
 
       if (taskGrillResultObj.verdict !== "ready") {
         if (taskGrillResultObj.verdict === "needs_replan") {
@@ -1091,7 +1134,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         appendEvent(cfg.repoRoot, "executor_failed", { task: taskId, reason: msg, log: executorLog }, cfg.runsRoot, cfg.stateFile);
         setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "executor", reason: msg, resultFile: verifierResult });
         writeChecksLog(checksLog, "Checks not run because executor failed.");
-        writeDiffArtifacts(worktreePath, runDir, cfg.worktreeBootstrapIgnore);
+        writeDiffArtifacts(worktreePath, runDir, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         throw new LoopError(`Executor failed for ${taskId}. Worktree retained at ${worktreePath}. ${msg}`);
       }
@@ -1116,18 +1159,18 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         appendEvent(cfg.repoRoot, "checks_failed", { task: taskId, status: failureStatus, reason: checkOutput, log: checksLog, metrics }, cfg.runsRoot, cfg.stateFile);
         writeFailureAnalysis({ taskId, phase: "checks", attempt: task.attempts ?? 1, rawOutput: checkOutput, worktreePath, outputFile: failureAnalysisFile });
         setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, failureStatus, { at: new Date().toISOString(), phase: "checks", reason: checkOutput, resultFile: verifierResult, failureAnalysisFile });
-        writeDiffArtifacts(worktreePath, runDir, cfg.worktreeBootstrapIgnore);
+        writeDiffArtifacts(worktreePath, runDir, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
         if (failureStatus === "needs_retry") { console.warn(`Checks failed for ${taskId}; marked ${failureStatus}.`); continue; }
         throw new LoopError(`Checks failed for ${taskId}; marked ${failureStatus}. Worktree retained at ${worktreePath}.\n${checkOutput}`);
       }
 
-      writeDiffArtifacts(worktreePath, runDir, cfg.worktreeBootstrapIgnore);
+      writeDiffArtifacts(worktreePath, runDir, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
 
       // Scope rail
       const taskScope = getTaskScope(task as any);
       if (taskScope.length > 0) {
-        const outOfScope = getOutOfScopeFiles(worktreePath, taskScope, cfg.worktreeBootstrapIgnore);
+        const outOfScope = getOutOfScopeFiles(worktreePath, taskScope, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
         if (outOfScope.length > 0) {
           const scopeReason = `Out-of-scope changes for ${taskId} (declared scope: ${taskScope.join(", ")}): ${outOfScope.join(", ")}`;
           const failureStatus = getFailureStatusForTask(task, "checks", cfg.maxRetries);
@@ -1173,7 +1216,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
             appendEvent(cfg.repoRoot, "rebase_checks_failed", { task: taskId, status: rebaseCheckFailStatus, reason: checkOutput }, cfg.runsRoot, cfg.stateFile);
             writeFailureAnalysis({ taskId, phase: "rebase_checks", attempt: task.attempts ?? 1, rawOutput: checkOutput, worktreePath, outputFile: failureAnalysisFile });
             setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, rebaseCheckFailStatus, { at: new Date().toISOString(), phase: "rebase_checks", reason: checkOutput, resultFile: verifierResult, failureAnalysisFile });
-            writeDiffArtifacts(worktreePath, runDir, cfg.worktreeBootstrapIgnore);
+            writeDiffArtifacts(worktreePath, runDir, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
             copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
             if (rebaseCheckFailStatus === "needs_retry") { console.warn(`Post-rebase checks failed for ${taskId}; marked ${rebaseCheckFailStatus}.`); continue; }
             throw new LoopError(`Post-rebase checks failed for ${taskId}; marked ${rebaseCheckFailStatus}. Worktree retained at ${worktreePath}.\n${checkOutput}`);
@@ -1199,12 +1242,34 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         const adversarial = votes > 1;
 
         if (votes <= 1) {
-          writeVerifierPrompt(verifierPrompt, { repoRoot: cfg.repoRoot, runsRoot: cfg.runsRoot, stateFile: cfg.stateFile, budget: cfg.budget, task, worktreePath, checkOutput, resultFile: verifierResult, eventLogPath, policy, adversarial: false });
-          appendEvent(cfg.repoRoot, "verifier_started", { task: taskId, prompt: verifierPrompt, resultFile: verifierResult, log: verifierLog, votes: 1 }, cfg.runsRoot, cfg.stateFile);
+          const verifierOptions = { repoRoot: cfg.repoRoot, runsRoot: cfg.runsRoot, stateFile: cfg.stateFile, budget: cfg.budget, task, worktreePath, checkOutput, resultFile: verifierResult, eventLogPath, policy, adversarial: false };
+          if (cfg.postTaskReview) {
+            writeBundledReviewPrompt(verifierPrompt, {
+              ...verifierOptions,
+              postTaskResultFile: bundledPostTaskResult,
+              taskRunDir: runDir,
+              handoverFile,
+              loopBaseRef,
+              state: loadState(cfg.repoRoot, cfg.stateFile)!,
+            });
+            appendEvent(cfg.repoRoot, "bundled_review_started", { task: taskId, prompt: verifierPrompt, verifierResult, postTaskResult: bundledPostTaskResult }, cfg.runsRoot, cfg.stateFile);
+          } else {
+            writeVerifierPrompt(verifierPrompt, verifierOptions);
+          }
+          appendEvent(cfg.repoRoot, "verifier_started", { task: taskId, prompt: verifierPrompt, resultFile: verifierResult, log: verifierLog, votes: 1, bundled: cfg.postTaskReview }, cfg.runsRoot, cfg.stateFile);
           agentCallCounter.count++;
-          emitTokenUsage(cfg, await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, worktreePath, verifierLog, "verifier"), taskId);
+          emitTokenUsage(cfg, await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, worktreePath, verifierLog, cfg.postTaskReview ? "bundled-review" : "verifier"), taskId);
+          if (cfg.postTaskReview && !existsSync(verifierResult)) {
+            writeVerifierPrompt(verifierPrompt, verifierOptions);
+            appendEvent(cfg.repoRoot, "bundled_review_verifier_fallback", { task: taskId, prompt: verifierPrompt, resultFile: verifierResult }, cfg.runsRoot, cfg.stateFile);
+            agentCallCounter.count++;
+            emitTokenUsage(cfg, await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, worktreePath, verifierLog, "verifier-fallback"), taskId);
+          }
           if (!existsSync(verifierResult)) throw new LoopError(`Verifier did not write ${verifierResult}`);
           verifierResultObj = JSON.parse(readFileSync(verifierResult, "utf-8")) as VerifierResult;
+          if (cfg.postTaskReview && existsSync(bundledPostTaskResult)) {
+            appendEvent(cfg.repoRoot, "bundled_review_finished", { task: taskId, verifierVerdict: verifierResultObj.verdict, postTaskResult: bundledPostTaskResult }, cfg.runsRoot, cfg.stateFile);
+          }
         } else {
           appendEvent(cfg.repoRoot, "verifier_votes_started", { task: taskId, votes, adversarial: true }, cfg.runsRoot, cfg.stateFile);
           const voteSlots = Array.from({ length: votes }, (_, i) => i + 1).map((v) => ({
@@ -1255,10 +1320,10 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       // Handle verdict
       if (verifierResultObj.verdict === "pass") {
         if (cfg.commit) {
-          const excludes = pathspecExcludes(cfg.worktreeBootstrapIgnore);
+          const excludes = pathspecExcludes(harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
           if (excludes.length > 0) git(["add", "-A", "--", ".", ...excludes], worktreePath);
           else git(["add", "-A"], worktreePath);
-          const changed = (() => { try { return git(["status", "--porcelain"], worktreePath); } catch { return ""; } })();
+          const changed = (() => { try { git(["diff", "--cached", "--quiet"], worktreePath); return ""; } catch { return "staged"; } })();
           if (changed) git(["commit", "-m", `agentic: ${taskId}`], worktreePath);
           else console.log(`No changes to commit for ${taskId}.`);
         }
@@ -1321,7 +1386,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       const msg = err instanceof Error ? err.message : String(err);
       setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "harness", reason: msg, resultFile: verifierResult });
       if (!existsSync(checksLog)) writeChecksLog(checksLog, "Checks did not complete before harness failure.");
-      if (!existsSync(join(runDir, "diff.patch"))) writeDiffArtifacts(worktreePath, runDir, cfg.worktreeBootstrapIgnore);
+      if (!existsSync(join(runDir, "diff.patch"))) writeDiffArtifacts(worktreePath, runDir, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
       copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
       throw new LoopError(`Task ${taskId} failed in harness; marked needs_human. Worktree retained at ${worktreePath}. ${msg}`);
     }

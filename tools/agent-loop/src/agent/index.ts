@@ -177,6 +177,16 @@ export interface TokenUsage {
   costUsd: number | null;
 }
 
+export interface AgentInvocationResult {
+  usage: TokenUsage | null;
+  phase: string;
+  tool: AgentTool | "custom";
+  telemetryStatus: "complete" | "partial" | "unavailable";
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+}
+
 function extractClaudeUsage(logPath: string, phase: string): TokenUsage | null {
   if (!existsSync(logPath)) return null;
   const lines = readFileSync(logPath, "utf-8").split("\n").filter(Boolean).reverse();
@@ -245,7 +255,7 @@ export async function invokeAgentWithLog(
   workingDirectory: string,
   logPath: string,
   phase = "agent"
-): Promise<TokenUsage | null> {
+): Promise<AgentInvocationResult> {
   mkdirSync(dirname(logPath), { recursive: true });
 
   const timeout = config.timeoutSeconds ?? 0;
@@ -279,6 +289,8 @@ export async function invokeAgentWithLog(
     throw new AgentError(`--tool custom requires --command`);
   }
 
+  const startedAt = new Date();
+  const started = performance.now();
   try {
     await spawnTee(command, workingDirectory, timeout, logPath);
   } catch (err) {
@@ -287,7 +299,17 @@ export async function invokeAgentWithLog(
     throw err;
   }
 
-  return extractTokenUsage(logPath, effectiveTool, phase);
+  const finishedAt = new Date();
+  const usage = extractTokenUsage(logPath, effectiveTool, phase);
+  return {
+    usage,
+    phase,
+    tool: effectiveTool,
+    telemetryStatus: usage ? "complete" : "unavailable",
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: Math.round(performance.now() - started),
+  };
 }
 
 /**

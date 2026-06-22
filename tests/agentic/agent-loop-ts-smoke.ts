@@ -83,6 +83,30 @@ import { readFileSync as __readFileSync, writeFileSync as __writeFileSync, mkdir
 import { dirname as __dirname } from "path";
 const __promptFile = process.argv[2];
 const __promptContent = __readFileSync(__promptFile, "utf-8");
+if (__promptContent.includes("BUNDLED PREFLIGHT") && !__promptContent.includes('"title": "Stop before edit"') && !__promptContent.includes('"title": "Needs replan"')) {
+  const taskMatch = __promptContent.match(/Write task-grill JSON only to: (.+)/);
+  const decisionMatch = __promptContent.match(/Write decision JSON only to: (.+)/);
+  if (!taskMatch || !decisionMatch) throw new Error("bundled preflight missing result paths");
+  __mkdirSync(__dirname(taskMatch[1].trim()), { recursive: true });
+  __writeFileSync(taskMatch[1].trim(), JSON.stringify({
+    verdict: "ready", understanding: "Task understood for smoke execution.", evidence: ["task JSON"],
+    assumptionsStillValid: [], assumptionsChanged: [],
+    scopeDecision: { declaredScopeOk: true, requestedScopeChanges: [] },
+    acceptanceProof: ["configured checks and verifier"], risks: [],
+    executorInstructions: "Proceed with the task and respect declared scope."
+  }), "utf-8");
+  __writeFileSync(decisionMatch[1].trim(), JSON.stringify({ decisions: [] }), "utf-8");
+  process.exit(0);
+}
+if (__promptContent.includes("BUNDLED REVIEW") && __promptContent.includes('"title": "Happy bundled task"')) {
+  const verifierMatch = __promptContent.match(/Write JSON only to this path: (.+)/);
+  const planMatch = __promptContent.match(/Write post-task review JSON only to: (.+)/);
+  if (!verifierMatch || !planMatch) throw new Error("bundled review missing result paths");
+  __mkdirSync(__dirname(verifierMatch[1].trim()), { recursive: true });
+  __writeFileSync(verifierMatch[1].trim(), JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  __writeFileSync(planMatch[1].trim(), JSON.stringify({ verdict: "continue", assessment: "remaining plan valid", remainingPlanStillValid: true, suggestedChanges: [] }), "utf-8");
+  process.exit(0);
+}
 if (__promptContent.includes("Write task-grill JSON only to:")) {
   const m = __promptContent.match(/Write task-grill JSON only to: (.+)/);
   if (!m) throw new Error("no task-grill result path");
@@ -298,7 +322,7 @@ function runCase(name: string, fn: () => void): void {
 runCase("happy path: task passes end-to-end", () => {
   const dir = tmpRepo("happy");
   try {
-    writeState(dir, baseState());
+    writeState(dir, baseState({ title: "Happy bundled task" }));
 
     const agent = writeFakeAgent(dir, "fake-agent.mjs", `
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
@@ -330,6 +354,18 @@ writeFileSync("output.txt", "done", "utf-8");
     assert(hasEvent(events, "verifier_finished"), "missing verifier_finished event");
     assert(hasEvent(events, "task_passed"), "missing task_passed event");
     assert(hasEvent(events, "post_task_review_finished"), "missing post_task_review_finished event");
+    const invocationEvents = events.filter((e) => e.type === "agent_invocation_finished");
+    assert(invocationEvents.length >= 4, `expected invocation telemetry for every agent call, got ${invocationEvents.length}`);
+    assert(invocationEvents.every((e) => typeof e.durationMs === "number" && e.durationMs >= 0), "invocation telemetry missing durationMs");
+    assert(invocationEvents.every((e) => e.telemetryStatus === "unavailable"), "custom agent should report unavailable token telemetry explicitly");
+    assert(invocationEvents.filter((e) => e.phase === "preflight").length === 1, "happy path should bundle task and decision grills into one preflight invocation");
+    assert(hasEvent(events, "decision_grill_reused_preflight"), "decision grill should reuse bundled preflight output");
+    assert(invocationEvents.filter((e) => e.phase === "bundled-review").length === 1, "happy path should bundle verifier and post-task review into one invocation");
+    assert(hasEvent(events, "post_task_review_reused_bundled_review"), "post-task review should reuse bundled review output");
+    const taskRunDir = events.find((e) => e.type === "iteration_started").runDir;
+    assert(existsSync(join(taskRunDir, "context-capsule.md")), "bundled phases should share a canonical context capsule");
+    assert(!existsSync(join(taskRunDir, ".task-grill-section.md")), "temporary preflight section must be cleaned up");
+    assert(!existsSync(join(taskRunDir, ".verifier-section.md")), "temporary review section must be cleaned up");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }
@@ -1531,6 +1567,9 @@ writeFileSync("output.txt", "done", "utf-8");
     const events = readEvents(dir);
     assert(hasEvent(events, "planner_finished"), "expected planner_finished from initial planning");
     assert(hasEvent(events, "task_passed"), "expected task_passed after planning");
+    const plannerStarted = events.find((e) => e.type === "planner_started");
+    const plannerPrompt = readFileSync(plannerStarted.prompt, "utf-8");
+    assert(plannerPrompt.includes("Plan around verification seams, not file boundaries"), "planner prompt must optimize task splits around independent proof");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }
