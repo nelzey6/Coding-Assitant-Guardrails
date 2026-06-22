@@ -204,7 +204,13 @@
     "mergeMode": "ff-only",
     "stateFile": "agentic.json",
     "scratchRoot": ".agent-runs",
-    "worktreeRoot": ".worktrees"
+    "worktreeRoot": ".worktrees",
+    "worktreeBootstrap": [
+      "npm --prefix tools/agent-loop install --no-audit --no-fund"
+    ],
+    "worktreeBootstrapIgnore": [
+      "tools/agent-loop/node_modules"
+    ]
   },
   "verifierRules": [
     "Check git diff against the selected task and acceptance criteria.",

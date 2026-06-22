@@ -205,8 +205,12 @@
     "stateFile": "agentic.json",
     "scratchRoot": ".agent-runs",
     "worktreeRoot": ".worktrees",
-    "worktreeBootstrap": [],
-    "worktreeBootstrapIgnore": [],
+    "worktreeBootstrap": [
+      "npm --prefix tools/agent-loop install --no-audit --no-fund"
+    ],
+    "worktreeBootstrapIgnore": [
+      "tools/agent-loop/node_modules"
+    ],
     "checkEnvFile": ""
   },
   "verifierRules": [
