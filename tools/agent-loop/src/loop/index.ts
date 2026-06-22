@@ -840,7 +840,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     const state = loadState(cfg.repoRoot, cfg.stateFile);
     if (!state) throw new LoopError(`No ${cfg.stateFile} found in ${cfg.repoRoot}`);
     if (getTasks(state).length === 0) {
-      runPlannerPhase(cfg, policy, agentCallCounter);
+      await runPlannerPhase(cfg, policy, agentCallCounter);
       if (cfg.planOnly) { console.log("<promise>PLANNED</promise>"); return; }
     }
   }
