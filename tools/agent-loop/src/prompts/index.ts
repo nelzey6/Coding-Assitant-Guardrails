@@ -112,6 +112,69 @@ export function getRecentHistoryText(
   return recent.map(formatEventLine).join("\n");
 }
 
+// Item 1: project a Task to only the fields a given phase actually reads.
+// Strips bookkeeping (failureHistory, reviewBranch/Worktree, acceptedAt,
+// lastRunDir, attempts, status, approvedStanceFile) that agents never act on.
+export type TaskPhase = "executor" | "task_grill" | "decision_grill" | "stance" | "verifier";
+export function projectTaskForPhase(task: Task, phase: TaskPhase): Record<string, unknown> {
+  const base = {
+    id: task.id,
+    title: task.title,
+    kind: task.kind,
+    workflow: task.workflow,
+    priority: task.priority,
+    acceptanceCriteria: task.acceptanceCriteria,
+    validation: task.validation,
+    scope: task.scope,
+    dependsOn: task.dependsOn,
+    complexity: task.complexity,
+    complexityReasons: task.complexityReasons,
+  };
+  // task-grill / decision-grill reason about proof targets (artifacts).
+  if (phase === "task_grill" || phase === "decision_grill") {
+    return { ...base, artifacts: task.artifacts };
+  }
+  return base;
+}
+
+// Item 2: project WorkflowPolicy to only what a phase needs, instead of
+// stringifying the full policy object (which is invariant across tasks).
+export function projectPolicyForTask(policy: WorkflowPolicy, workflow: string | undefined): Record<string, unknown> {
+  const selected = workflow && policy.workflows?.[workflow]
+    ? { [workflow]: policy.workflows[workflow] }
+    : {};
+  return {
+    defaultDiscoveryWorkflow: policy.defaultDiscoveryWorkflow,
+    defaultExecutionWorkflow: policy.defaultExecutionWorkflow,
+    selectedWorkflow: selected,
+    humanGates: policy.humanGates ?? [],
+  };
+}
+
+// Item 3: distill the event log to what an agent actually needs to avoid
+// blind-retry loops — failures, verdicts, and assumption/decision changes —
+// instead of a raw JSONL tail full of lifecycle noise. Falls back to the
+// full recent tail only at budget "high".
+const DISTILL_EVENT_TYPES = /failed|failure|needs_human|task_status|verifier|task_grill_finished|stance_reflection_finished|assumption|decision/;
+export function getDistilledHistoryText(
+  repoRoot: string,
+  runsRoot: string,
+  phase: TaskPhase | "planner" | "review" | "default",
+  budget: PromptBudget
+): string {
+  const events = loadEvents(repoRoot, runsRoot);
+  if (events.length === 0) return "No prior event log entries.";
+  if (budget === "high") {
+    return getRecentEvents(events, 12).map((e) => JSON.stringify(e)).join("\n");
+  }
+  const distilled = events.filter((e) => DISTILL_EVENT_TYPES.test(e.type));
+  const tail = distilled.slice(-8);
+  if (tail.length === 0) {
+    return "No failures, verdicts, or assumption changes in the event log yet.";
+  }
+  return tail.map(formatEventLine).join("\n");
+}
+
 export function getOperatorContextBlock(state: AgenticState | undefined): string[] {
   const files = state?.contextFiles ?? [];
   if (files.length === 0) return [];
@@ -461,8 +524,8 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
   const limits = getPromptBudgetLimits(budget);
   const workflow = task.workflow ?? "tdd";
   const kind = task.kind ?? "implementation";
-  const taskJson = JSON.stringify(task, null, 2);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "executor"), budget);
+  const taskJson = JSON.stringify(projectTaskForPhase(task, "executor"), null, 2);
+  const recentHistory = getDistilledHistoryText(repoRoot, runsRoot, "executor", budget);
 
   const content = [
     "You are executing one task inside an agentic harness worktree.",
@@ -508,7 +571,7 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     ...getOperatorContextBlock(state),
     "Use CodeGraph context for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions by reading source files. If CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding.",
     "",
-    `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
+    `Recent harness history (verdicts, failures, assumption changes; source of truth is ${evLogPath}):`,
     recentHistory,
     "",
     getWorkflowBlock(workflow, policy, repoRoot),
@@ -552,7 +615,7 @@ export function writeStanceReflectionPrompt(promptFile: string, opts: StanceRefl
     `Write stance reflection JSON only to: ${opts.resultFile}`,
     'Schema: { "mode":"stance", "verdict":"reconfirm|readjust|reassess|needs_human", "summary":"...", "evidence":[], "assumptions_challenged":[], "perspectives_considered":[], "recommended_changes":[], "unresolved_risks":[], "next_action":"...", "selfChallengeRounds":[{"pass":"reassess|readjust|reconfirm","note":"..."}], "stance": { "owningModule":"...", "boundaries":[], "sequence":[], "expectedEdits":[], "validation":[], "assumptions":[], "rejectedAlternatives":[] } }',
     "A bare approval is invalid. The summary must explain what was challenged across all three passes and why the final stance survived, or how it changed.",
-    "Task:", JSON.stringify(opts.task, null, 2),
+    "Task:", JSON.stringify(projectTaskForPhase(opts.task, "stance"), null, 2),
     "Resolved decisions:", JSON.stringify(opts.decisionGrillDecisions ?? [], null, 2),
   ].join("\n");
   mkdirSync(dirname(promptFile), { recursive: true });
@@ -585,8 +648,8 @@ export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOp
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "task_grill"), budget);
-  const taskJson = JSON.stringify(task, null, 2);
+  const recentHistory = getDistilledHistoryText(repoRoot, runsRoot, "task_grill", budget);
+  const taskJson = JSON.stringify(projectTaskForPhase(task, "task_grill"), null, 2);
 
   const priorFailureBlock = (() => {
     if (!priorFailureAnalysisFile || !existsSync(priorFailureAnalysisFile)) return "";
@@ -669,14 +732,14 @@ export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOp
     priorFailureBlock,
     "",
     ...getOperatorContextBlock(opts.state),
-    `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
+    `Recent harness history (verdicts, failures, assumption changes; source of truth is ${evLogPath}):`,
     recentHistory,
     "",
     "Current planner assumptions (tag [valid]/[changed] from prior grill turns):",
     (opts.state?.assumptions?.length ? opts.state.assumptions.join("\n") : "(none recorded yet)"),
     "",
-    "Workflow policy:",
-    JSON.stringify(policy, null, 2),
+    "Workflow policy (projected to this task):",
+    JSON.stringify(projectPolicyForTask(policy, task.workflow), null, 2),
     "",
     "Task JSON:",
     taskJson,
@@ -715,7 +778,7 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
-  const taskJson = JSON.stringify(task, null, 2);
+  const taskJson = JSON.stringify(projectTaskForPhase(task, "verifier"), null, 2);
   const diffStat = git(["diff", "--stat", "HEAD"], worktreePath);
   const rawDiff  = git(["diff", "HEAD"], worktreePath);
   const rawDiffBytes = Buffer.byteLength(rawDiff, "utf-8");
@@ -727,7 +790,7 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
 
   const checkOutputForPrompt = limitTextForPrompt(checkOutput, limits.checkBytes, 80);
   const gates = JSON.stringify(policy.humanGates ?? [], null, 2);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "verifier"), budget);
+  const recentHistory = getDistilledHistoryText(repoRoot, runsRoot, "verifier", budget);
 
   const adversarialBlock = adversarial
     ? [
@@ -759,7 +822,7 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
     "Human gates:",
     gates,
     "",
-    `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
+    `Recent harness history (verdicts, failures, assumption changes; source of truth is ${evLogPath}):`,
     recentHistory,
     "",
     "Check output (capped; full output is in checks.log):",
@@ -909,8 +972,8 @@ export function writeDecisionGrillPrompt(promptFile: string, opts: DecisionGrill
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "task_grill"), budget);
-  const taskJson = JSON.stringify(task, null, 2);
+  const recentHistory = getDistilledHistoryText(repoRoot, runsRoot, "decision_grill", budget);
+  const taskJson = JSON.stringify(projectTaskForPhase(task, "decision_grill"), null, 2);
 
   const reGrillBlock = priorShallowFeedback
     ? [
@@ -966,7 +1029,7 @@ export function writeDecisionGrillPrompt(promptFile: string, opts: DecisionGrill
       ],
     }, null, 2),
     "",
-    `Recent harness history (JSONL tail; source of truth is ${evLogPath}):`,
+    `Recent harness history (verdicts, failures, assumption changes; source of truth is ${evLogPath}):`,
     recentHistory,
     "",
     "Decisions already recorded this run:",
@@ -1001,11 +1064,11 @@ function writeTaskContextCapsule(file: string, opts: {
     "Current decisions:",
     opts.state?.decisions?.length ? opts.state.decisions.join("\n") : "(none)",
     "",
-    "Recent harness delta:",
-    getRecentHistoryText(opts.repoRoot, opts.runsRoot, phaseEventLimit(limits.eventLimit, "task_grill"), opts.budget),
+    "Recent harness delta (verdicts, failures, assumption changes):",
+    getDistilledHistoryText(opts.repoRoot, opts.runsRoot, "task_grill", opts.budget),
     "",
     "Task JSON:",
-    JSON.stringify(opts.task, null, 2),
+    JSON.stringify(projectTaskForPhase(opts.task, "task_grill"), null, 2),
   ].join("\n");
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, content, "utf-8");
