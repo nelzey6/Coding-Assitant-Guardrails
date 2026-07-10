@@ -9,3 +9,4 @@ tools/agent-loop/dist/
 plan.md
 .codegraph/
 .mcp.json
+.codex/config.toml
