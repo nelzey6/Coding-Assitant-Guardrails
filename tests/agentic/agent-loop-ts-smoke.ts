@@ -353,15 +353,15 @@ writeFileSync("output.txt", "done", "utf-8");
     assert(hasEvent(events, "task_grill_finished"), "missing task_grill_finished event");
     assert(hasEvent(events, "verifier_finished"), "missing verifier_finished event");
     assert(hasEvent(events, "task_passed"), "missing task_passed event");
-    assert(hasEvent(events, "post_task_review_finished"), "missing post_task_review_finished event");
+    assert(hasEvent(events, "post_task_review_skipped"), "missing post_task_review_skipped event");
     const invocationEvents = events.filter((e) => e.type === "agent_invocation_finished");
-    assert(invocationEvents.length >= 4, `expected invocation telemetry for every agent call, got ${invocationEvents.length}`);
+    assert(invocationEvents.length >= 3, `expected invocation telemetry for every agent call, got ${invocationEvents.length}`);
     assert(invocationEvents.every((e) => typeof e.durationMs === "number" && e.durationMs >= 0), "invocation telemetry missing durationMs");
     assert(invocationEvents.every((e) => e.telemetryStatus === "unavailable"), "custom agent should report unavailable token telemetry explicitly");
     assert(invocationEvents.filter((e) => e.phase === "preflight").length === 1, "happy path should bundle task and decision grills into one preflight invocation");
     assert(hasEvent(events, "decision_grill_reused_preflight"), "decision grill should reuse bundled preflight output");
-    assert(invocationEvents.filter((e) => e.phase === "bundled-review").length === 1, "happy path should bundle verifier and post-task review into one invocation");
-    assert(hasEvent(events, "post_task_review_reused_bundled_review"), "post-task review should reuse bundled review output");
+    assert(invocationEvents.filter((e) => e.phase === "bundled-review").length === 0, "clear single-task path should not pay for bundled plan review");
+    assert(!hasEvent(events, "post_task_review_reused_bundled_review"), "clear single-task path should skip bundled plan review");
     const taskRunDir = events.find((e) => e.type === "iteration_started").runDir;
     assert(existsSync(join(taskRunDir, "context-capsule.md")), "bundled phases should share a canonical context capsule");
     assert(!existsSync(join(taskRunDir, ".task-grill-section.md")), "temporary preflight section must be cleaned up");
@@ -488,7 +488,7 @@ runCase("post-task review: replan verdict calls planner before continuing", () =
         maxIterations: 4,
         tasks: [
           baseTask({ id: "task-001", title: "Post review replan", scope: ["output.txt"], priority: 1 }),
-          baseTask({ id: "task-002", title: "Stale remaining task", scope: ["stale.txt"], priority: 2, dependsOn: ["task-001"] }),
+          baseTask({ id: "task-002", title: "Stale remaining task", scope: ["output.txt"], priority: 2, dependsOn: ["task-001"] }),
         ],
       }
     ));
@@ -532,6 +532,16 @@ if (content.includes("Write planner JSON only to:")) {
     mkdirSync(dirname(grillPath), { recursive: true });
     writeFileSync(grillPath, "# Autonomous Grill Transcript\\n\\nAdjusted after post-task review.", "utf-8");
   }
+  process.exit(0);
+}
+if (content.includes("BUNDLED REVIEW")) {
+  const verifierMatch = content.match(/Write JSON only to this path: (.+)/);
+  const reviewMatch = content.match(/Write post-task review JSON only to: (.+)/);
+  if (!verifierMatch || !reviewMatch) throw new Error("bundled review result paths missing");
+  mkdirSync(dirname(verifierMatch[1].trim()), { recursive: true });
+  writeFileSync(verifierMatch[1].trim(), JSON.stringify({ verdict: "pass", summary: "verified", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
+  mkdirSync(dirname(reviewMatch[1].trim()), { recursive: true });
+  writeFileSync(reviewMatch[1].trim(), JSON.stringify({ verdict: "replan", assessment: "remaining task is stale", suggestedChanges: ["replace task"] }), "utf-8");
   process.exit(0);
 }
 if (content.includes("Write JSON only to this path:")) {
@@ -1014,6 +1024,10 @@ if (content.includes('"attempts": 2') || content.includes('"attempts":2')) {
 runCase("replan budget: exhausted after maxReplans, task escalates to needs_human", () => {
   const dir = tmpRepo("replan-budget");
   try {
+    const policyPath = join(dir, "templates", "agent-policy", "workflow-policy.json");
+    const policy = JSON.parse(readFileSync(policyPath, "utf-8"));
+    policy.autonomousLoop.phaseAdmission.taskGrill = "always";
+    writeFileSync(policyPath, JSON.stringify(policy, null, 2), "utf-8");
     writeState(dir, baseState({ title: "Needs replan", scope: ["stale.txt"] }, { maxIterations: 5 }));
 
     // This fake agent handles task-grill (via writeFakeAgent "Needs replan" title),

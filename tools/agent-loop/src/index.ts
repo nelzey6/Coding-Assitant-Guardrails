@@ -562,10 +562,10 @@ program
         : { tool: defaultTool ?? "pi", timeoutSeconds: timeout };
 
     const agentConfig:    AgentConfig = makeAgent(opts.command);
-    const plannerConfig:  AgentConfig = makeAgent(opts.plannerCommand);
-    const grillConfig:    AgentConfig = makeAgent(opts.grillCommand);
-    const executorConfig: AgentConfig = makeAgent(opts.executorCommand);
-    const verifierConfig: AgentConfig = makeAgent(opts.verifierCommand);
+    const plannerConfig:  AgentConfig = makeAgent(opts.plannerCommand ?? opts.command);
+    const grillConfig:    AgentConfig = makeAgent(opts.grillCommand ?? opts.command);
+    const executorConfig: AgentConfig = makeAgent(opts.executorCommand ?? opts.command);
+    const verifierConfig: AgentConfig = makeAgent(opts.verifierCommand ?? opts.command);
 
     const mergeModeRaw = opts.mergeMode ?? "ff-only";
     if (!["ff-only", "no-ff", "cherry-pick"].includes(mergeModeRaw)) {

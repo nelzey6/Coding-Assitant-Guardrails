@@ -210,13 +210,24 @@
     ],
     "worktreeBootstrapIgnore": [
       "tools/agent-loop/node_modules"
-    ]
+    ],
+    "phaseAdmission": {
+      "taskGrill": "plan-aware",
+      "verifier": "auto",
+      "postTaskReview": "on-drift",
+      "finalizeDocs": "on-change",
+      "retryTaskGrill": "on-drift"
+    }
   },
   "verifierRules": [
     "Check git diff against the selected task and acceptance criteria.",
     "Check that the selected canonical skill was used or explicitly ruled out with evidence.",
     "Check that configured validation commands passed or failures are explained as blockers.",
     "Check that no unrelated files changed.",
-    "Check whether any human gate was crossed before allowing merge or completion."
+    "Check whether any human gate was crossed before allowing merge or completion.",
+    "Prefer the smallest deterministic validation command that proves the changed seam and acceptance criteria.",
+    "Do not run a complete smoke suite for a small change unless shared-contract, broad-impact, release, or diagnostic evidence justifies it.",
+    "When broad validation is selected, record the impact reason and distinguish target-code failures from harness, environment, dependency, or fixture failures.",
+    "Do not claim full confidence when a broad suite is incomplete; report the focused evidence and remaining coverage gap."
   ]
 }

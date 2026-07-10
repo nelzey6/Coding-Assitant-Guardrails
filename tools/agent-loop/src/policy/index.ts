@@ -32,6 +32,20 @@ export interface AutonomousLoopConfig {
   worktreeBootstrap?: string[];
   worktreeBootstrapIgnore?: string[];
   checkEnvFile?: string;
+  phaseAdmission?: PhaseAdmissionConfig;
+}
+
+export interface PhaseAdmissionConfig {
+  /** Re-run task-grill for every task, or trust a fresh planner revision until drift appears. */
+  taskGrill?: "always" | "plan-aware";
+  /** Run the per-task verifier for every task, or skip it for low-risk scoped work after checks. */
+  verifier?: "always" | "auto";
+  /** Review the remaining plan after every task, or only when deterministic drift evidence exists. */
+  postTaskReview?: "always" | "on-drift";
+  /** Run finalize-docs always, or only when durable documentation changed. */
+  finalizeDocs?: "always" | "on-change";
+  /** Re-run task-grill after every retry, or only when the failure may indicate stale understanding. */
+  retryTaskGrill?: "always" | "on-drift";
 }
 
 const FALLBACK_POLICY_RELATIVE = "templates/agent-policy/workflow-policy.json";

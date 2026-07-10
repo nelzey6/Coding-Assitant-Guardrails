@@ -39,6 +39,7 @@ export interface Task {
   complexity?: "low" | "medium" | "high";
   complexityReasons?: string[];
   approvedStanceFile?: string;
+  plannedRevision?: number;
 }
 
 export interface AgenticState {
@@ -57,6 +58,7 @@ export interface AgenticState {
   promptPolicy?: { lessons?: string[] };
   replanCount?: number;
   lastReplanTaskIds?: string[];
+  planRevision?: number;
 }
 
 export interface PlannerResult {
@@ -331,7 +333,9 @@ export function mergePlannerResult(
   if (result.blockers?.length) state.blockers = [...(state.blockers ?? []), ...result.blockers];
   if (result.verdict === "planned") {
     const newTasks = result.tasks ?? [];
-    state.tasks = [...(state.tasks ?? []), ...newTasks];
+    const planRevision = (state.planRevision ?? 0) + 1;
+    state.planRevision = planRevision;
+    state.tasks = [...(state.tasks ?? []), ...newTasks.map((task) => ({ ...task, plannedRevision: planRevision }))];
     state.phase = "execution";
     state.lastReplanTaskIds = newTasks.map((t) => t.id);
   } else if (result.verdict === "needs_human") {

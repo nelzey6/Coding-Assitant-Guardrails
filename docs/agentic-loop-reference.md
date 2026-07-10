@@ -13,12 +13,12 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 2. Runs grill-with-docs-style discovery during planning and writes `.agent-runs/<planner-run>/grill-transcript.md` with the question/evidence/answer/proposal trail.
 3. Creates one shared git worktree under `.worktrees/run-<timestamp>` on branch `agentic/run-<timestamp>` — all tasks in the run commit onto this branch.
 4. Picks the next `pending` or `needs_retry` task (by priority, then dependency order).
-5. Runs a **task-grill** agent to confirm the task is still understood and safe before any edits.
-6. Runs a **decision-grill** agent to resolve design forks with evidenced options; accepted decisions become binding rules in the executor prompt.
+5. Admits each phase from current evidence. Fresh planner tasks inherit planner readiness; stale/manual tasks run a **task-grill** agent, and decision-grill is bundled only on that slower path.
+6. Resolves design forks with evidenced options when decision-grill is admitted; accepted decisions become binding rules in the executor prompt.
 7. Runs an **executor** agent in the shared run worktree.
 8. Runs configured **checks** (global `--checks` + task `validation` commands).
-9. Runs a **verifier** agent (multi-vote for high-risk tasks); requires `verifier-result.json` with verdict `pass`, `fail`, or `needs_human`.
-10. Runs a **post-task plan review** after every passed task to decide whether the remaining plan is still valid.
+9. Runs a **verifier** agent (multi-vote for high-risk tasks); low-risk scoped maintenance/discovery/investigation tasks can use passed checks as the verifier fast path.
+10. Runs a **post-task plan review** only when assumption, verifier, complexity, or scope evidence indicates drift; deterministic skips remain in the event log.
 11. Optionally runs a legacy **architect checkpoint** when `--architect-checkpoint-interval` is configured; it defaults off.
 12. On failure: records `failureHistory`, marks `needs_retry` or `needs_human` based on retry budget.
 13. Repeats until all tasks pass or the iteration budget is exhausted.
@@ -58,14 +58,14 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 --cleanup-passed             Remove worktree after a task passes
 --plan-only                  Run planner only, write agentic.json, then stop
 --retry <task-id>            Force-retry a specific needs_retry/failed task
---fast-verifier              Skip verifier agent for low-risk tasks that pass checks
+--fast-verifier              Request the verifier fast path (still denied for non-low-risk tasks)
 --rebase-before-verify       Rebase worktree on loop-start HEAD before verifier; re-runs checks
 --allow-dirty                Allow starting run with uncommitted changes in main worktree
 --goal-review                Run goal-review agent after all tasks pass
---no-post-task-review        Skip the default plan-validity review after each passed task
+--no-post-task-review        Disable plan review even when drift evidence would admit it
 --architect-checkpoint-interval <n>  Run legacy architect checkpoint every N passed tasks (0 = off, default: 0)
 --no-decision-grill          Skip the per-task design decision self-interview
---no-finalize-docs           Skip final PROJECT.md refresh after all tasks pass
+--no-finalize-docs           Disable finalize-docs even when documentation changed
 ```
 
 `validate` also supports `--allow-empty` for intentionally empty skill repos. Without it, validating a repo with zero discovered skills exits non-zero to catch wrong working-directory usage.
@@ -153,6 +153,8 @@ agentic-loop run
 
 **Fast-verifier guard** — `--fast-verifier` is only honored for low-risk tasks (`maintenance`/`discovery`/`investigation` kind with a declared scope). High-risk tasks force the full verifier and log `verifier_skip_denied`.
 
+**Phase admission** — defaults are `taskGrill: plan-aware`, `verifier: auto`, `postTaskReview: on-drift`, `finalizeDocs: on-change`, and `retryTaskGrill: on-drift`. The harness emits `phase_admitted` or `phase_skipped` for each gated phase. Planner ambiguity emits `goal_intake_needs_human`; check failures retry directly, while non-check failures re-grill before retry.
+
 ---
 
 ## Event log and metrics
@@ -172,8 +174,23 @@ The harness parses these, records them in the event log, and includes them in th
 
 ## Smoke tests
 
+Use the smallest smoke matching the changed seam. Filter the TypeScript suite
+by case name when possible; do not run every smoke as the default response to a
+small change.
+
+```bash
+AGENTIC_SMOKE_FILTER="planner from empty state" \
+  ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/agent-loop-ts-smoke.ts
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/phase-admission-smoke.ts
+```
+
+Run the complete suites only for shared state/CLI contracts, broad
+orchestration/process changes, unknown impact, release-critical changes, or
+focused-check failures that need wider diagnosis. Record the reason and any
+incomplete coverage. Broad suite command:
+
 ```powershell
-pwsh -File tests/agentic/all-smoke.ps1   # run all at once
+pwsh -File tests/agentic/all-smoke.ps1   # exceptional broad validation
 
 # individually:
 pwsh -File tests/agentic/smoke.ps1

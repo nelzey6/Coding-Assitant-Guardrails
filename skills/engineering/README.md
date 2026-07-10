@@ -3,6 +3,7 @@
 Skills I use daily for code work.
 
 - **[agentic-loop](./agentic-loop/SKILL.md)** — Prepare or run an autonomous coding loop that reuses the shared workflow policy, routes tasks to canonical skills, executes in worktrees, verifies, reflects, and stops at human gates.
+- **[git-commit-push](./git-commit-push/SKILL.md)** — Commit and push intentional Git changes with targeted validation and detailed context-rich commit messages.
 - **[diagnose](./diagnose/SKILL.md)** — Disciplined diagnosis loop for hard bugs and performance regressions: reproduce → minimise → hypothesise → instrument → fix → regression-test.
 - **[grill-with-docs](./grill-with-docs/SKILL.md)** — Grilling session that challenges your plan against the existing domain model, sharpens terminology, and updates `CONTEXT.md` and ADRs inline.
 - **[triage](./triage/SKILL.md)** — Triage issues through a state machine of triage roles.

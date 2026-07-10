@@ -113,8 +113,10 @@ export function getRecentHistoryText(
 }
 
 // Item 1: project a Task to only the fields a given phase actually reads.
-// Strips bookkeeping (failureHistory, reviewBranch/Worktree, acceptedAt,
-// lastRunDir, attempts, status, approvedStanceFile) that agents never act on.
+// Strips most harness bookkeeping (failureHistory, reviewBranch/Worktree,
+// acceptedAt, lastRunDir, status, approvedStanceFile). Attempt count remains
+// visible to executors so retry-aware work can make progress without another
+// discovery session.
 export type TaskPhase = "executor" | "task_grill" | "decision_grill" | "stance" | "verifier";
 export function projectTaskForPhase(task: Task, phase: TaskPhase): Record<string, unknown> {
   const base = {
@@ -129,6 +131,7 @@ export function projectTaskForPhase(task: Task, phase: TaskPhase): Record<string
     dependsOn: task.dependsOn,
     complexity: task.complexity,
     complexityReasons: task.complexityReasons,
+    ...(phase === "executor" && typeof task.attempts === "number" ? { attempts: task.attempts } : {}),
   };
   // task-grill / decision-grill reason about proof targets (artifacts).
   if (phase === "task_grill" || phase === "decision_grill") {

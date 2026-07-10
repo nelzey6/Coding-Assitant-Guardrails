@@ -26,7 +26,7 @@ import { appendEvent } from "../events/index.js";
 import { safeSlug, createWorktree, worktreeExists, removeWorktree, git as gitTool, GitError } from "../tools/index.js";
 import { invokeAgent, invokeAgentWithLog, getTaskChecks, type AgentConfig, type AgentInvocationResult } from "../agent/index.js";
 import { invokeChecks, parseMetricLines } from "../checks/index.js";
-import { getTaskScope, getOutOfScopeFiles, testFastVerifierAllowed, testTaskIsHighRisk, isTaskUnscoped, resolveTaskComplexity } from "../scope/index.js";
+import { getTaskScope, getOutOfScopeFiles, testTaskIsHighRisk, isTaskUnscoped, resolveTaskComplexity } from "../scope/index.js";
 import {
   syncCodeGraph,
   writeCodeGraphContext,
@@ -52,6 +52,12 @@ import {
 } from "../prompts/index.js";
 import { loadPolicy, type WorkflowPolicy } from "../policy/index.js";
 import { runShellScript } from "../tools/shell.js";
+import {
+  shouldRunFinalizeDocs,
+  shouldRunPostTaskReview,
+  shouldRunTaskGrill,
+  shouldRunVerifier,
+} from "../admission/index.js";
 
 export interface LoopConfig {
   repoRoot: string;
@@ -230,6 +236,32 @@ function writeChecksLog(logPath: string, content: string): void {
   writeFileSync(logPath, content, "utf-8");
 }
 
+function appendPhaseAdmission(
+  cfg: Required<LoopConfig>,
+  phase: string,
+  decision: { run: boolean; reason: string },
+  taskId?: string
+): void {
+  appendEvent(cfg.repoRoot, decision.run ? "phase_admitted" : "phase_skipped", {
+    ...(taskId ? { task: taskId } : {}),
+    phase,
+    reason: decision.reason,
+  }, cfg.runsRoot, cfg.stateFile);
+}
+
+function changedPathsSince(worktreePath: string, baseRef: string): string[] {
+  const names = new Set<string>();
+  const collect = (args: string[]): void => {
+    try {
+      const output = git(args, worktreePath);
+      output.split(/\r?\n/).map((path) => path.trim()).filter(Boolean).forEach((path) => names.add(path));
+    } catch { /* best effort; finalize gate remains conservative when no diff is available */ }
+  };
+  if (baseRef) collect(["diff", "--name-only", `${baseRef}..HEAD`]);
+  collect(baseRef ? ["diff", "--name-only", baseRef] : ["diff", "--name-only", "HEAD"]);
+  return [...names].sort();
+}
+
 // After all tasks pass: apply run worktree changes to main tree.
 // With cfg.apply (default): copy changed files as unstaged changes in the main tree, delete the run branch + worktree.
 // With cfg.merge: merge the run branch into main instead.
@@ -363,6 +395,17 @@ async function runPlannerPhase(
 
   appendEvent(cfg.repoRoot, "planner_finished", { runDir: plannerRunDir, verdict: plannerResult["verdict"], resultFile, grillTranscript: grillFile }, cfg.runsRoot, cfg.stateFile);
   const stateAfterPlan = mergePlannerResult(cfg.repoRoot, cfg.stateFile, plannerResult as unknown as PlannerResult);
+  if (plannerResult["verdict"] !== "planned") {
+    const verdict = String(plannerResult["verdict"] ?? "blocked");
+    const reason = [
+      `planner verdict=${verdict}`,
+      ...(Array.isArray(plannerResult["openQuestions"]) ? plannerResult["openQuestions"] as string[] : []),
+      ...(Array.isArray(plannerResult["blockers"]) ? plannerResult["blockers"] as string[] : []),
+      typeof plannerResult["summary"] === "string" ? plannerResult["summary"] : "",
+    ].filter(Boolean).join("; ");
+    appendEvent(cfg.repoRoot, "goal_intake_needs_human", { runDir: plannerRunDir, verdict, reason, resultFile }, cfg.runsRoot, cfg.stateFile);
+    throw new LoopError(`Goal intake stopped before execution: ${reason}`);
+  }
   return stateAfterPlan.lastReplanTaskIds ?? [];
 }
 
@@ -430,6 +473,23 @@ async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter:
   if (verifierVerdict === "fail") {
     console.warn("finalize-docs verifier returned fail — PROJECT.md may not have been updated. Check:", verifierResult);
   }
+}
+
+async function runFinalizeDocsIfNeeded(
+  cfg: Required<LoopConfig>,
+  policy: WorkflowPolicy,
+  agentCallCounter: { count: number },
+  runWorktreePath: string,
+  loopBaseRef: string
+): Promise<void> {
+  const changedPaths = changedPathsSince(runWorktreePath, loopBaseRef);
+  const decision = shouldRunFinalizeDocs(changedPaths, policy, cfg.finalizeDocs);
+  appendPhaseAdmission(cfg, "finalize-docs", decision);
+  if (!decision.run) {
+    console.log(`Skipping finalize-docs: ${decision.reason}`);
+    return;
+  }
+  await runFinalizeDocsPhase(cfg, agentCallCounter, runWorktreePath);
 }
 
 interface GoalReviewResult {
@@ -878,7 +938,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         throw new LoopError(`No runnable task available. Blocked by dependencies:\n${getBlockedDependencySummary(state)}`);
       }
       if (cfg.goalReview) await runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
-      if (cfg.finalizeDocs) await runFinalizeDocsPhase(cfg, agentCallCounter, runWorktreePath);
+      await runFinalizeDocsIfNeeded(cfg, policy, agentCallCounter, runWorktreePath, loopBaseRef);
       applyRunWorktree(cfg, runBranch, runWorktreePath);
       console.log("<promise>COMPLETE</promise>");
       return;
@@ -936,38 +996,60 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           throw new LoopError(`Worktree bootstrap failed for ${taskId}. Worktree retained at ${worktreePath}.\n${msg}`);
         }
       }
-      // Task-grill: re-check understanding immediately before execution.
-      syncCodeGraph(worktreePath);
-      writeCodeGraphContext(codeGraphFile, worktreePath);
-      const preflightOptions = {
-        repoRoot: cfg.repoRoot,
-        runsRoot: cfg.runsRoot,
-        stateFile: cfg.stateFile,
-        budget: cfg.budget,
-        state: loadState(cfg.repoRoot, cfg.stateFile) ?? undefined,
-        task,
-        iteration,
-        runDir,
-        resultFile: taskGrillResult,
-        eventLogPath,
-        codeGraphFile,
-        policy,
-        priorFailureAnalysisFile: getLastFailureAnalysisFile(task),
-      };
-      if (cfg.decisionGrill) {
-        writePreflightPrompt(taskGrillPrompt, { ...preflightOptions, decisionResultFile: decisionGrillResult });
-        appendEvent(cfg.repoRoot, "preflight_started", { task: taskId, prompt: taskGrillPrompt, taskGrillResult, decisionGrillResult, log: taskGrillLog }, cfg.runsRoot, cfg.stateFile);
+      // Goal intake already performed discovery, planning, and decision capture for
+      // fresh planner revisions. Re-run task-grill only when the task is stale,
+      // manually supplied, retried after a non-check failure, or explicitly forced.
+      const taskState = loadState(cfg.repoRoot, cfg.stateFile)!;
+      const taskGrillDecision = shouldRunTaskGrill(task, taskState, policy);
+      appendPhaseAdmission(cfg, "task-grill", taskGrillDecision, taskId);
+      let taskGrillResultObj: TaskGrillResult;
+      let acceptedDecisions: Record<string, unknown>[] = [];
+
+      if (taskGrillDecision.run) {
+        syncCodeGraph(worktreePath);
+        writeCodeGraphContext(codeGraphFile, worktreePath);
+        const preflightOptions = {
+          repoRoot: cfg.repoRoot,
+          runsRoot: cfg.runsRoot,
+          stateFile: cfg.stateFile,
+          budget: cfg.budget,
+          state: taskState,
+          task,
+          iteration,
+          runDir,
+          resultFile: taskGrillResult,
+          eventLogPath,
+          codeGraphFile,
+          policy,
+          priorFailureAnalysisFile: getLastFailureAnalysisFile(task),
+        };
+        if (cfg.decisionGrill) {
+          writePreflightPrompt(taskGrillPrompt, { ...preflightOptions, decisionResultFile: decisionGrillResult });
+          appendEvent(cfg.repoRoot, "preflight_started", { task: taskId, prompt: taskGrillPrompt, taskGrillResult, decisionGrillResult, log: taskGrillLog }, cfg.runsRoot, cfg.stateFile);
+        } else {
+          writeTaskGrillPrompt(taskGrillPrompt, preflightOptions);
+        }
+        appendEvent(cfg.repoRoot, "task_grill_started", { task: taskId, prompt: taskGrillPrompt, resultFile: taskGrillResult, log: taskGrillLog, bundled: cfg.decisionGrill }, cfg.runsRoot, cfg.stateFile);
+        agentCallCounter.count++;
+        emitTokenUsage(cfg, await invokeAgentWithLog(taskGrillPrompt, cfg.grillAgent, worktreePath, taskGrillLog, cfg.decisionGrill ? "preflight" : "task-grill"), taskId);
+        if (!existsSync(taskGrillResult)) throw new LoopError(`Task grill did not write ${taskGrillResult}`);
+        taskGrillResultObj = JSON.parse(readFileSync(taskGrillResult, "utf-8")) as TaskGrillResult;
+        appendEvent(cfg.repoRoot, "task_grill_finished", { task: taskId, verdict: taskGrillResultObj.verdict, resultFile: taskGrillResult, understanding: taskGrillResultObj.understanding }, cfg.runsRoot, cfg.stateFile);
+        if (cfg.decisionGrill && existsSync(decisionGrillResult)) {
+          appendEvent(cfg.repoRoot, "preflight_finished", { task: taskId, taskGrillVerdict: taskGrillResultObj.verdict, decisionResultFile: decisionGrillResult }, cfg.runsRoot, cfg.stateFile);
+        }
       } else {
-        writeTaskGrillPrompt(taskGrillPrompt, preflightOptions);
-      }
-      appendEvent(cfg.repoRoot, "task_grill_started", { task: taskId, prompt: taskGrillPrompt, resultFile: taskGrillResult, log: taskGrillLog, bundled: cfg.decisionGrill }, cfg.runsRoot, cfg.stateFile);
-      agentCallCounter.count++;
-      emitTokenUsage(cfg, await invokeAgentWithLog(taskGrillPrompt, cfg.grillAgent, worktreePath, taskGrillLog, cfg.decisionGrill ? "preflight" : "task-grill"), taskId);
-      if (!existsSync(taskGrillResult)) throw new LoopError(`Task grill did not write ${taskGrillResult}`);
-      const taskGrillResultObj = JSON.parse(readFileSync(taskGrillResult, "utf-8")) as TaskGrillResult;
-      appendEvent(cfg.repoRoot, "task_grill_finished", { task: taskId, verdict: taskGrillResultObj.verdict, resultFile: taskGrillResult, understanding: taskGrillResultObj.understanding }, cfg.runsRoot, cfg.stateFile);
-      if (cfg.decisionGrill && existsSync(decisionGrillResult)) {
-        appendEvent(cfg.repoRoot, "preflight_finished", { task: taskId, taskGrillVerdict: taskGrillResultObj.verdict, decisionResultFile: decisionGrillResult }, cfg.runsRoot, cfg.stateFile);
+        taskGrillResultObj = {
+          verdict: "ready",
+          understanding: `Task readiness inherited from planner revision: ${taskGrillDecision.reason}`,
+          risks: [],
+          executorInstructions: "Use planner decisions and current task scope; stop if new material ambiguity appears.",
+          assumptionsStillValid: [],
+          assumptionsChanged: [],
+        };
+        writeFileSync(taskGrillResult, JSON.stringify(taskGrillResultObj, null, 2) + "\n", "utf-8");
+        writeFileSync(codeGraphFile, "# CodeGraph context\n\nSkipped during fast-path admission; planner context is authoritative for this unchanged task.\n", "utf-8");
+        if (cfg.decisionGrill) appendPhaseAdmission(cfg, "decision-grill", { run: false, reason: "goal intake decisions already belong to the fresh planner revision" }, taskId);
       }
 
       if (taskGrillResultObj.verdict !== "ready") {
@@ -1006,9 +1088,8 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         taskGrillResultObj.assumptionsChanged ?? []
       );
 
-      // Decision grill: self-interview genuine design forks before editing (opt-in).
-      let acceptedDecisions: Record<string, unknown>[] = [];
-      if (cfg.decisionGrill) {
+      // Decision grill remains bundled with task-grill for stale/manual tasks.
+      if (cfg.decisionGrill && taskGrillDecision.run) {
         const outcome = await runDecisionGrillPhase(
           cfg, agentCallCounter, task, iteration, runDir, codeGraphFile, worktreePath, eventLogPath
         );
@@ -1173,16 +1254,32 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         }
       }
 
-      // Fast-verifier gate
-      const fvDecision = cfg.fastVerifier ? testFastVerifierAllowed(task as any) : { allowed: false, reason: "fast-verifier not requested" };
-      if (cfg.fastVerifier && !fvDecision.allowed) {
-        appendEvent(cfg.repoRoot, "verifier_skip_denied", { task: taskId, reason: fvDecision.reason }, cfg.runsRoot, cfg.stateFile);
-        console.log(`fast-verifier denied for ${taskId}; running full verifier: ${fvDecision.reason}`);
+      // Fast-verifier gate: automatic for low-risk scoped work, explicit flag
+      // remains supported as a compatibility override.
+      const verifierDecision = shouldRunVerifier(task, policy, cfg.fastVerifier);
+      appendPhaseAdmission(cfg, "verifier", verifierDecision, taskId);
+      if (cfg.fastVerifier && verifierDecision.run) {
+        appendEvent(cfg.repoRoot, "verifier_skip_denied", { task: taskId, reason: verifierDecision.reason }, cfg.runsRoot, cfg.stateFile);
+        console.log(`fast-verifier denied for ${taskId}; running full verifier: ${verifierDecision.reason}`);
       }
 
+      // Only bundle plan review when deterministic drift evidence already says it
+      // is needed. Otherwise the verifier stays a single-purpose call; a verifier
+      // that reports new issues can still trigger a standalone review after pass.
+      const remainingBeforeVerify = (loadState(cfg.repoRoot, cfg.stateFile)!.tasks ?? []).filter(
+        (t) => t.id !== taskId && (t.status === "pending" || t.status === "needs_retry")
+      );
+      const reviewBeforeVerify = shouldRunPostTaskReview({
+        task,
+        remainingTasks: remainingBeforeVerify,
+        policy,
+        enabled: cfg.postTaskReview,
+        assumptionsChanged: taskGrillResultObj.assumptionsChanged,
+      });
+
       let verifierResultObj: VerifierResult;
-      if (cfg.fastVerifier && fvDecision.allowed) {
-        verifierResultObj = { verdict: "pass", summary: `fast-verifier: checks passed; separate verifier skipped (low-risk task: ${fvDecision.reason})`, issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] };
+      if (!verifierDecision.run) {
+        verifierResultObj = { verdict: "pass", summary: `fast-verifier: checks passed; separate verifier skipped (${verifierDecision.reason})`, issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] };
         writeFileSync(verifierResult, JSON.stringify(verifierResultObj, null, 2), "utf-8");
         writeFileSync(verifierLog, "fast-verifier: skipped separate verifier after checks passed.", "utf-8");
         appendEvent(cfg.repoRoot, "verifier_skipped", { task: taskId, resultFile: verifierResult, log: verifierLog, reason: "fast-verifier" }, cfg.runsRoot, cfg.stateFile);
@@ -1192,7 +1289,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
 
         if (votes <= 1) {
           const verifierOptions = { repoRoot: cfg.repoRoot, runsRoot: cfg.runsRoot, stateFile: cfg.stateFile, budget: cfg.budget, task, worktreePath, checkOutput, resultFile: verifierResult, eventLogPath, policy, adversarial: false };
-          if (cfg.postTaskReview) {
+          if (reviewBeforeVerify.run) {
             writeBundledReviewPrompt(verifierPrompt, {
               ...verifierOptions,
               postTaskResultFile: bundledPostTaskResult,
@@ -1205,10 +1302,10 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           } else {
             writeVerifierPrompt(verifierPrompt, verifierOptions);
           }
-          appendEvent(cfg.repoRoot, "verifier_started", { task: taskId, prompt: verifierPrompt, resultFile: verifierResult, log: verifierLog, votes: 1, bundled: cfg.postTaskReview }, cfg.runsRoot, cfg.stateFile);
+          appendEvent(cfg.repoRoot, "verifier_started", { task: taskId, prompt: verifierPrompt, resultFile: verifierResult, log: verifierLog, votes: 1, bundled: reviewBeforeVerify.run }, cfg.runsRoot, cfg.stateFile);
           agentCallCounter.count++;
-          emitTokenUsage(cfg, await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, worktreePath, verifierLog, cfg.postTaskReview ? "bundled-review" : "verifier"), taskId);
-          if (cfg.postTaskReview && !existsSync(verifierResult)) {
+          emitTokenUsage(cfg, await invokeAgentWithLog(verifierPrompt, cfg.verifierAgent, worktreePath, verifierLog, reviewBeforeVerify.run ? "bundled-review" : "verifier"), taskId);
+          if (reviewBeforeVerify.run && !existsSync(verifierResult)) {
             writeVerifierPrompt(verifierPrompt, verifierOptions);
             appendEvent(cfg.repoRoot, "bundled_review_verifier_fallback", { task: taskId, prompt: verifierPrompt, resultFile: verifierResult }, cfg.runsRoot, cfg.stateFile);
             agentCallCounter.count++;
@@ -1216,7 +1313,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           }
           if (!existsSync(verifierResult)) throw new LoopError(`Verifier did not write ${verifierResult}`);
           verifierResultObj = JSON.parse(readFileSync(verifierResult, "utf-8")) as VerifierResult;
-          if (cfg.postTaskReview && existsSync(bundledPostTaskResult)) {
+          if (reviewBeforeVerify.run && existsSync(bundledPostTaskResult)) {
             appendEvent(cfg.repoRoot, "bundled_review_finished", { task: taskId, verifierVerdict: verifierResultObj.verdict, postTaskResult: bundledPostTaskResult }, cfg.runsRoot, cfg.stateFile);
           }
         } else {
@@ -1306,10 +1403,19 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           const remainingRunnable = (loadState(cfg.repoRoot, cfg.stateFile)!.tasks ?? []).filter(
             (t) => t.id !== taskId && (t.status === "pending" || t.status === "needs_retry")
           );
-          if (remainingRunnable.length > 0) {
+          const reviewDecision = shouldRunPostTaskReview({
+            task,
+            remainingTasks: remainingRunnable,
+            policy,
+            enabled: cfg.postTaskReview,
+            assumptionsChanged: taskGrillResultObj.assumptionsChanged,
+            verifierResult: verifierResultObj,
+          });
+          appendPhaseAdmission(cfg, "post-task-review", reviewDecision, taskId);
+          if (reviewDecision.run) {
             await runPostTaskReviewPhase(cfg, policy, agentCallCounter, loopBaseRef, sessionReplanCountRef, taskId, runDir, verifierResult, handoverFile);
           } else {
-            appendEvent(cfg.repoRoot, "post_task_review_skipped", { task: taskId, reason: "plan complete — no remaining runnable tasks" }, cfg.runsRoot, cfg.stateFile);
+            appendEvent(cfg.repoRoot, "post_task_review_skipped", { task: taskId, reason: reviewDecision.reason }, cfg.runsRoot, cfg.stateFile);
           }
         }
 
@@ -1355,7 +1461,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       throw new LoopError(`Reached max iterations or no runnable task. Blocked by dependencies:\n${getBlockedDependencySummary(finalState)}`);
     }
     if (cfg.goalReview) await runGoalReviewPhase(cfg, agentCallCounter, loopBaseRef);
-    if (cfg.finalizeDocs) await runFinalizeDocsPhase(cfg, agentCallCounter, runWorktreePath);
+    await runFinalizeDocsIfNeeded(cfg, policy, agentCallCounter, runWorktreePath, loopBaseRef);
     applyRunWorktree(cfg, runBranch, runWorktreePath);
     console.log("<promise>COMPLETE</promise>");
     return;

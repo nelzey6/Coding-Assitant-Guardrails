@@ -15,9 +15,15 @@ Run from repository root unless noted.
 cd tools/agent-loop
 npm exec -- tsc --noEmit
 
-# Run TS harness smoke suite
+# Run the focused phase-admission smoke
 cd ..\..
-npx tsx tests\agentic\agent-loop-ts-smoke.ts
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/phase-admission-smoke.ts
+
+# Run one applicable TS end-to-end smoke (filter by case name)
+AGENTIC_SMOKE_FILTER="planner from empty state" ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/agent-loop-ts-smoke.ts
+
+# Full TS smoke suite — exceptional, not default verification
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/agent-loop-ts-smoke.ts
 
 # Run all legacy PowerShell agentic smokes
 pwsh -File tests\agentic\all-smoke.ps1
@@ -47,6 +53,24 @@ npm run agent -- run \
 
 Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA_CERTS` pointing at a missing Zscaler PEM. The warning does not fail the TS typecheck or smoke suite.
 
+## Verification Strategy
+
+Use [verification-policy.md](docs/verification-policy.md) for validation
+selection. Start from changed files, acceptance criteria, owning module, and
+affected callers. Run the smallest deterministic proof first:
+
+- docs/policy-only change → diff check, JSON/link validation, or relevant validator;
+- helper/admission change → focused smoke plus typecheck;
+- one loop phase → filtered end-to-end smoke plus typecheck;
+- CLI/transport/worktree change → filtered end-to-end smoke plus targeted integration check;
+- cross-module/public contract change → broaden only with explicit impact evidence.
+
+Do not automatically run `all-smoke.ps1` or the complete TypeScript smoke suite
+for a small change. Full suites are reserved for shared contracts, broad
+orchestration/process changes, unknown impact, release-critical changes, or a
+focused-check failure that needs wider diagnosis. Record the reason and any
+incomplete coverage in the handoff.
+
 ## Architecture
 
 ### Main Surfaces
@@ -63,6 +87,7 @@ Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA
 | `tools/agent-loop/src/events/index.ts` | `.agent-runs/events.jsonl` append/load/format helpers. |
 | `tools/agent-loop/src/reporting/index.ts` | Human/JSON output for status, summary, last-failure, why-stuck, doctor, reset, and accept. |
 | `tools/agent-loop/src/policy/index.ts` | Loads workflow policy from `.agent-policy/workflow-policy.json` or `templates/agent-policy/workflow-policy.json`. |
+| `docs/verification-policy.md` | Validation selection policy: focused proof first, explicit evidence before broad suites. |
 | `tools/agent-loop/src/validators/index.ts` | Skills repo consistency validator for README/plugin/bucket invariants. |
 | `tests/agentic/agent-loop-ts-smoke.ts` | End-to-end smoke for the TS runner using throwaway git repos and fake agents. |
 
@@ -97,23 +122,23 @@ The current TS run loop is:
 3. Create one shared run worktree at `.worktrees/run-<timestamp>` on branch `agentic/run-<timestamp>`; all tasks in the run commit onto this branch.
 4. Pick next runnable task: `pending` or `needs_retry` with passed dependencies.
 5. Run configured worktree bootstrap commands, if any, and mark configured bootstrap artifacts ignored for scope/diff/commit.
-6. Run one bundled preflight invocation for task-grill readiness plus decision-grill decisions. Each logical phase keeps its separate result artifact and validation contract; legacy/custom agents that write only task-grill output fall back to a decision-only invocation.
-6. If task-grill returns `ready`, inject its result and accepted decisions into executor prompt and run executor.
-7. Resolve task complexity. Before high-complexity execution, run two to three clean-worktree `reflect-on-approach` stance rounds and inject the approved stance into the executor prompt.
-7. If task-grill returns `needs_replan`, mark stale task `blocked`, record `task_replan_requested`, enforce replan budget, check for plan convergence, run planner again, and continue to replacement tasks.
-8. If task-grill returns `needs_human` or `blocked`, stop before executor edits.
-9. Run configured checks from state-level `checks`, task `validation`, and CLI `--checks`. Checks can load a configured env file. Artifact-only discovery/investigation/zoom-out tasks skip task validation unless extra CLI checks are explicitly provided.
-10. Emit `scope_missing_warning` event and warn if task declares no scope (loop proceeds but diff-scope rail is inactive).
-11. Enforce declared task `scope` by diffing changed files before verifier review.
-12. If `--rebase-before-verify` is set, rebase worktree on loop-start HEAD and re-run checks before the verifier.
-13. Run one bundled review invocation for verifier correctness plus remaining-plan review unless `--fast-verifier` is allowed. Separate result artifacts and verdict ordering remain; legacy/custom agents fall back to whichever review output is missing.
-14. For high-risk tasks, run adversarial verifier votes unless overridden.
-15. On pass, commit to the shared run branch (not to main).
-16. Write handover/progress artifacts.
-17. Run post-task plan review by default. This fresh review asks whether the remaining plan is still correctly sliced, scoped, ordered, and validated after the completed task. Verdicts: `continue`, `adjust_remaining_tasks`, `replan`, `needs_human`.
-18. On post-task review `adjust_remaining_tasks`, record the advice as an advisory event and continue to the next runnable task; task-grill remains the just-in-time gate for deciding whether that specific task needs replan. On post-task review `replan`, block stale pending/retry tasks, enforce the replan budget/convergence guard, run planner again, and continue to replacement tasks.
-19. Every three passed tasks by default, run architect checkpoint over cumulative diff and remaining plan; `replan` calls planner, `needs_human` halts.
-20. When no runnable tasks remain, treat `passed` and `blocked` as terminal statuses. If all unfinished work is terminal, apply run branch to main tree as unstaged changes (default) or merge (`--merge`), clean up run worktree, and complete.
+6. Admit task-grill from the planner revision: fresh planned tasks with no open questions or blockers inherit planner readiness and write a synthetic result; stale/manual tasks and non-check retries run the bundled task-grill/decision-grill preflight. Every admission or skip is recorded as `phase_admitted`/`phase_skipped`.
+7. If task-grill returns `ready`, inject its result and accepted decisions into executor prompt and run executor.
+8. Resolve task complexity. Before high-complexity execution, run two to three clean-worktree `reflect-on-approach` stance rounds and inject the approved stance into the executor prompt.
+9. If task-grill returns `needs_replan`, mark stale task `blocked`, record `task_replan_requested`, enforce replan budget, check for plan convergence, run planner again, and continue to replacement tasks.
+10. If task-grill returns `needs_human` or `blocked`, stop before executor edits. A planner `needs_human`/`blocked` verdict likewise emits `goal_intake_needs_human` and stops before execution.
+11. Run configured checks from state-level `checks`, task `validation`, and CLI `--checks`. Checks can load a configured env file. Artifact-only discovery/investigation/zoom-out tasks skip task validation unless extra CLI checks are explicitly provided.
+12. Emit `scope_missing_warning` event and warn if task declares no scope (loop proceeds but diff-scope rail is inactive).
+13. Enforce declared task `scope` by diffing changed files before verifier review.
+14. If `--rebase-before-verify` is set, rebase worktree on loop-start HEAD and re-run checks before the verifier.
+15. Automatically skip the separate verifier for low-risk, scoped maintenance/discovery/investigation tasks after checks. High-risk tasks retain adversarial verifier votes; explicit `--fast-verifier` remains compatibility-gated.
+16. Bundle verifier with post-task review only when deterministic drift evidence already requires review; otherwise the verifier is a single-purpose invocation. Verifier issues can still trigger a standalone review after a pass.
+17. On pass, commit to the shared run branch (not to main).
+18. Write handover/progress artifacts.
+19. Run post-task plan review only when assumptions changed, verifier issues exist, complexity/scope overlap makes drift plausible, or policy requires it. Verdicts: `continue`, `adjust_remaining_tasks`, `replan`, `needs_human`.
+20. On post-task review `adjust_remaining_tasks`, record the advice as an advisory event and continue to the next runnable task. On `replan`, block stale pending/retry tasks, enforce the replan budget/convergence guard, run planner again, and continue to replacement tasks.
+21. Every three passed tasks by default, run architect checkpoint over cumulative diff and remaining plan; `replan` calls planner, `needs_human` halts.
+22. When no runnable tasks remain, run finalize-docs only if durable documentation changed (unless policy or operator enables it unconditionally), then treat `passed` and `blocked` as terminal statuses. If all unfinished work is terminal, apply run branch to main tree as unstaged changes (default) or merge (`--merge`), clean up run worktree, and complete.
 
 Planner slicing rule: tasks represent independent verification slices. Split only for distinct risk, proof, ownership/scope, rollback value, or dependency; do not create one task per helper/file move when validation is shared.
 
@@ -158,13 +183,13 @@ Current TS rails:
 - `run` refuses to start implicitly when `agentic.json` contains a task still marked `running`; it prints the last event/run directory and asks the operator to choose `reset-task <id> --apply`, `run --continue`, or `run --new-run` explicitly. This prevents accidental new run branches when the operator expected to resume an interrupted loop.
 - `run` enforces the policy clean-main-worktree gate when `autonomousLoop.requireCleanMainWorktree` is true. Use `--allow-dirty` only when intentionally running with uncommitted main-worktree changes.
 - Harness owns task status, verifier result handling, commit, merge, and cleanup.
-- Task-grill must pass before executor runs.
+- Fresh planner revisions can authorize the executor without another task-grill; stale/manual tasks and non-check retries must pass task-grill first.
 - Task-grill and decision-grill share one preflight invocation when the agent supports the bundled contract. Their verdict ordering and legacy artifacts remain independent.
-- Verifier and post-task review share one bundled review invocation when supported. Verification is processed first; plan advice is ignored on verification failure, preserving executor/reviewer independence and retry semantics.
+- Verifier and post-task review share one bundled review invocation only when admission detects drift. Verification is processed first; plan advice is ignored on verification failure, preserving executor/reviewer independence and retry semantics.
 - Bundled phases reference one `context-capsule.md` per task turn. Contract-only decision and plan-review sections reuse that evidence instead of embedding a second copy of task JSON, assumptions, decisions, and event history.
 - Tasks with no declared `scope` emit `scope_missing_warning`; the diff-scope rail is inactive for them.
 - Scope rail blocks changed files outside declared task scope.
-- Fast verifier is denied unless task kind is low-risk and scope is declared.
+- Automatic fast verification is admitted only for low-risk (`maintenance`/`discovery`/`investigation`) tasks with declared scope. `--fast-verifier` remains denied for other kinds.
 - High-risk tasks can receive multiple adversarial verifier votes.
 - Check/verifier failures retry until budget, then escalate to `needs_human`.
 - Artifact-only discovery/investigation/zoom-out tasks are allowed to prove completion through artifacts/evidence instead of implementation validation commands.
@@ -175,7 +200,9 @@ Current TS rails:
 - `--rebase-before-verify`: optional gate that rebases the worktree on loop-start HEAD and re-runs checks before the verifier, catching post-merge integration failures early.
 - After each `ready` task-grill verdict, `assumptionsStillValid` and `assumptionsChanged` fields from the result are persisted back into `state.assumptions` (tagged `[valid]`/`[changed]`) and emitted as an `assumptions_updated` event. The current assumption list is forwarded into every subsequent task-grill prompt so drift is visible across turns.
 - `--goal-review` (opt-in): after all tasks pass, a goal-review agent judges the cumulative diff against `state.goal` and emits `goal_review_finished`. A `needs_human` verdict halts the loop before finalize-docs.
-- Post-task plan review is default-on after every passed task. It reviews assumption drift, remaining task slicing/scope/order, and validation design. `adjust_remaining_tasks` records advisory feedback and continues so task-grill can make the next just-in-time replan decision; `replan` blocks stale pending/retry tasks before planner appends replacements; `needs_human` halts.
+- Post-task plan review is default-on but admission-gated. It runs for assumption drift, verifier issues, high complexity, unscoped/overlapping work, or an always-review policy; otherwise `phase_skipped`/`post_task_review_skipped` preserves the trace without a model call. `adjust_remaining_tasks` records advisory feedback and continues; `replan` blocks stale pending tasks before planner appends replacements; `needs_human` halts.
+- `autonomousLoop.phaseAdmission` controls the adaptive defaults: `taskGrill: plan-aware`, `verifier: auto`, `postTaskReview: on-drift`, `finalizeDocs: on-change`, and `retryTaskGrill: on-drift`.
+- Finalize-docs is admission-gated on durable `.md`, `docs/`, `adrs/`, or `templates/` changes. A `phase_skipped` event records code-only completions without paying for a documentation agent.
 - `--architect-checkpoint-interval <n>` (default 0): optional legacy cumulative checkpoint. It is disabled by default because post-task plan reflection owns remaining-plan drift.
 - High-complexity tasks run iterative `reflect-on-approach` stance review before executor edits. The harness rejects stance agents that dirty the worktree and records the approved stance as a run artifact.
 - `--decision-grill` (opt-in): before each executor turn, a grill-with-docs self-interview surfaces genuine design/product decisions and answers them itself with evidence. The harness enforces a decision contract via `validateDecisions` (each decision needs 2-4 evidenced options, exactly one marked recommended, plus `whyItMatters`/`selfAnswer`/`confidence`/`escalate`). Shallow or low-confidence-without-escalate results trigger exactly one re-grill (`decision_grill_regrill`); if still inadequate, or any decision sets `escalate:true`/stays low-confidence, the task escalates to `needs_human`. Answered decisions are flattened into `state.decisions` and emitted as `decisions_recorded`. The planner result's `decisions` are validated by the same contract and normalized to strings on merge.
@@ -206,7 +233,7 @@ Known gaps before calling the TS runner production-default:
 - replan convergence detection (`replan_convergence_failure`) when plan produces identical task IDs
 - assumption ledger: task-grill `assumptionsStillValid`/`assumptionsChanged` persisted to `state.assumptions` with `[valid]`/`[changed]` tags and emitted as `assumptions_updated` event
 - goal review: `--goal-review` pass verdict allows completion, `needs_human` halts before finalize-docs
-- post-task review: default `continue` verdict runs after passed tasks
+- post-task review: drift admission runs it only when assumptions, verifier issues, complexity, or scope overlap justify review
 - post-task review: `replan` verdict blocks stale remaining tasks, calls planner, and continues with replacement task
 - post-task review: `adjust_remaining_tasks` records an advisory event and continues to the next runnable task without calling planner
 - post-task review: `needs_human` verdict halts loop before any dependent task runs
@@ -228,7 +255,8 @@ Missing TS smoke coverage:
 - real `claude` / `pi` commands beyond the default adapter path
 - `--rebase-before-verify` gate (requires real multi-commit git scenario)
 - CodeGraph context invocation (requires `codegraph` on PATH)
-- finalize-docs behavior
+- finalize-docs behavior (the phase-admission helper is covered; end-to-end docs-change coverage remains open)
+- phase admission helper: planner freshness, retry, verifier, plan-review, and finalize-docs decisions
 - accept/apply/review-branch flows
 - doctor/reset commands
 - runtime budget exhaustion (`--max-runtime-seconds`)

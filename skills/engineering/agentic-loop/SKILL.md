@@ -153,7 +153,39 @@ agentic-loop run --plan-only
 
 ### Check commands
 
-Read `PROJECT.md` Commands section for project-specific test/lint/build commands to pass as `--checks`. Use the smallest targeted check that proves the change. Common examples: `npm test`, `npm run typecheck`, `npm run lint`.
+Read `PROJECT.md` Commands and Verification Strategy sections for project-specific commands. Use the smallest targeted check that proves the changed behavior. Do not default to a package-wide or full smoke suite merely because it exists.
+
+### Verification selection (mandatory)
+
+Before choosing `--checks`, map:
+
+```text
+changed files → owning module/seam → affected callers → acceptance criterion → proof command
+```
+
+Use this escalation order:
+
+1. docs/policy-only change: diff check, JSON/link validation, or relevant validator;
+2. helper/admission change: focused unit/smoke assertion plus typecheck;
+3. one loop phase: filtered end-to-end smoke plus typecheck;
+4. CLI/transport/worktree change: filtered end-to-end smoke plus targeted integration check;
+5. shared public contract, unknown impact, or release-critical change: broader suite.
+
+Never run `all-smoke` or a complete smoke file automatically for a small
+change. Run broad validation only when impact evidence justifies it, and state
+the reason in the handoff. If broad validation is slow, flaky, or blocked by
+the harness/environment, preserve the focused result and report the remaining
+coverage gap instead of repeatedly rerunning the same broad command.
+
+Validation handoff format:
+
+```text
+changed seam → command → result → remaining risk
+```
+
+Separate target-code failures from harness, environment, dependency, and
+fixture failures. A broad suite that did not complete is not a full-confidence
+result.
 
 ### After the run
 

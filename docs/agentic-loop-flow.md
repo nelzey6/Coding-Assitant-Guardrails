@@ -26,13 +26,14 @@ Output:
 State: planning → execution
   │
   ▼
-[3. TASK READINESS]
-Phase: task-grill
-Question: Is the next task still valid, scoped, and safe?
-Verdicts: ready | needs_replan | needs_human | blocked
+[3. ADAPTIVE ADMISSION]
+Phase: phase admission
+Question: Which critical-thinking phase has evidence to justify its cost?
+Default fast path: fresh planner task → synthetic readiness → executor
+Escalate: ambiguity → human, stale task → task-grill, high complexity → stance
   │
   ▼
-[4. APPROACH REFLECTION] — high-complexity tasks only
+[4. TASK READINESS / APPROACH REFLECTION] — only when admitted
 Skill: reflect-on-approach, stance mode
 Question: Is this implementation approach actually good?
 Runs: 2–3 fresh-context refinement rounds in a clean worktree
@@ -50,21 +51,23 @@ Agent: verifier
 Question: Was the task implemented correctly?
 Uses: acceptance criteria, checks, diff/scope, human gates
 Verdicts: pass | fail | needs_human
+Fast path: low-risk scoped work can rely on passed deterministic checks
   │
   ▼
 [7. PLAN REFLECTION]
 Skill: reflect-on-approach, plan mode
-Current trigger: after every passed task unless disabled
+Current trigger: only when assumptions, verifier issues, complexity, or scope overlap indicate drift
 Question: Is the remaining plan still correct?
 Verdicts: continue | adjust_remaining_tasks | replan | needs_human
   │
   ├── adjust/replan → block stale pending tasks → planner creates replacements
   └── continue → select next task
   ▼
-[8. GOAL REVIEW]
+[8. GOAL REVIEW / FINALIZATION]
 Optional final cumulative review
 Question: Does completed work satisfy the original goal?
 State: complete | needs_human
+Finalize-docs trigger: durable documentation changed, unless policy forces it
 ```
 
 ## Responsibility boundaries
@@ -86,7 +89,7 @@ The planner proposes `complexity` and `complexityReasons`. The harness may escal
 
 Before a high-complexity executor runs, fresh stance agents challenge ownership, seams, assumptions, reversibility, sequence, expected edits, and validation. The harness requires evidence, rejects worktree edits, persists `approved-stance.json`, and injects it into the executor prompt.
 
-Post-task plan reflection runs after every passed task by default. `adjust_remaining_tasks` and `replan` block stale pending tasks and invoke the planner. Completed tasks remain historical facts.
+Phase admission is policy-driven and traceable. Skipped phases emit `phase_skipped` with a reason, so the loop stays auditable without paying for a model call. `adjust_remaining_tasks` and `replan` block stale pending tasks and invoke the planner. Completed tasks remain historical facts.
 
 ## Implemented versus planned
 
