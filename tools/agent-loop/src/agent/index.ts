@@ -1,5 +1,5 @@
 import { spawnSync, spawn } from "child_process";
-import { mkdirSync, readFileSync, appendFileSync, createWriteStream, writeFileSync, unlinkSync, existsSync } from "fs";
+import { mkdirSync, readFileSync, appendFileSync, createWriteStream, writeFileSync, unlinkSync, existsSync, statSync } from "fs";
 import { dirname, resolve, join } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
@@ -197,6 +197,30 @@ export interface AgentInvocationResult {
   startedAt: string;
   finishedAt: string;
   durationMs: number;
+  assistantTurns: number;
+  toolCalls: number;
+  logBytes: number;
+}
+
+function extractInvocationShape(logPath: string): { assistantTurns: number; toolCalls: number; logBytes: number } {
+  if (!existsSync(logPath)) return { assistantTurns: 0, toolCalls: 0, logBytes: 0 };
+  let assistantTurns = 0;
+  let toolCalls = 0;
+  try {
+    for (const line of readFileSync(logPath, "utf-8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line) as { type?: string; message?: { role?: string; content?: Array<{ type?: string }> } };
+        if (event.type === "message_end" && event.message?.role === "assistant") {
+          assistantTurns++;
+          toolCalls += (event.message.content ?? []).filter((item) => item.type === "toolCall").length;
+        }
+      } catch { /* non-JSON agent output */ }
+    }
+    return { assistantTurns, toolCalls, logBytes: statSync(logPath).size };
+  } catch {
+    return { assistantTurns, toolCalls, logBytes: 0 };
+  }
 }
 
 function extractClaudeUsage(logPath: string, phase: string): TokenUsage | null {
@@ -313,6 +337,7 @@ export async function invokeAgentWithLog(
 
   const finishedAt = new Date();
   const usage = extractTokenUsage(logPath, effectiveTool, phase);
+  const shape = extractInvocationShape(logPath);
   return {
     usage,
     phase,
@@ -321,6 +346,7 @@ export async function invokeAgentWithLog(
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     durationMs: Math.round(performance.now() - started),
+    ...shape,
   };
 }
 

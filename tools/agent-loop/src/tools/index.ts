@@ -1,5 +1,7 @@
 import { execFileSync } from "child_process";
-import { existsSync } from "fs";
+import { createHash } from "crypto";
+import { existsSync, lstatSync, readFileSync, readlinkSync } from "fs";
+import { join } from "path";
 
 // Convert a task id into the filesystem/branch-safe slug the PS1 harness uses
 // (`[^A-Za-z0-9._-]+` collapsed to `-`, trimmed). Branches and worktree paths
@@ -65,6 +67,81 @@ export function isWorkingTreeClean(cwd?: string): boolean {
 
 export function workingTreeStatusShort(cwd?: string): string {
   return git(["status", "--short"], cwd);
+}
+
+export interface CheckoutSnapshot {
+  fingerprint: string;
+  status: string;
+  untrackedPaths: string[];
+}
+
+function hashCheckoutPath(repoRoot: string, relativePath: string): string {
+  const absolutePath = join(repoRoot, relativePath);
+  const stat = lstatSync(absolutePath);
+  const hash = createHash("sha256");
+  hash.update(relativePath);
+  hash.update(String(stat.mode));
+  if (stat.isSymbolicLink()) hash.update(readlinkSync(absolutePath));
+  else if (stat.isFile()) hash.update(readFileSync(absolutePath));
+  else hash.update(stat.isDirectory() ? "directory" : "special");
+  return hash.digest("hex");
+}
+
+function pathIsIgnored(relativePath: string, ignoredPaths: string[]): boolean {
+  const normalized = relativePath.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  return ignoredPaths.some((ignored) => {
+    const prefix = ignored.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+    return prefix.length > 0 && (normalized === prefix || normalized.startsWith(`${prefix}/`));
+  });
+}
+
+export function captureCheckoutSnapshot(repoRoot: string, ignoredPaths: string[] = []): CheckoutSnapshot {
+  const trackedDiff = git(["diff", "--binary", "HEAD", "--"], repoRoot);
+  const untrackedPaths = git(["ls-files", "--others", "--exclude-standard", "-z"], repoRoot)
+    .split("\0")
+    .map((path) => path.trim())
+    .filter(Boolean)
+    .filter((path) => !pathIsIgnored(path, ignoredPaths))
+    .sort();
+  const untracked = untrackedPaths.map((path) => [path, hashCheckoutPath(repoRoot, path)] as const);
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify({ trackedDiff, untracked }))
+    .digest("hex");
+  return {
+    fingerprint,
+    status: git(["status", "--porcelain=v1", "--untracked-files=all"], repoRoot),
+    untrackedPaths,
+  };
+}
+
+export class CheckoutMutationError extends Error {
+  constructor(
+    public readonly before: CheckoutSnapshot,
+    public readonly after: CheckoutSnapshot,
+    public readonly actionError?: unknown,
+  ) {
+    super("Checkout content changed during guarded action");
+    this.name = "CheckoutMutationError";
+  }
+}
+
+export async function withUnchangedCheckout<T>(repoRoot: string, action: () => Promise<T>, ignoredPaths: string[] = []): Promise<T> {
+  const before = captureCheckoutSnapshot(repoRoot, ignoredPaths);
+  let result: T | undefined;
+  let actionError: unknown;
+  let actionFailed = false;
+  try {
+    result = await action();
+  } catch (err) {
+    actionFailed = true;
+    actionError = err;
+  }
+  const after = captureCheckoutSnapshot(repoRoot, ignoredPaths);
+  if (after.fingerprint !== before.fingerprint) {
+    throw new CheckoutMutationError(before, after, actionError);
+  }
+  if (actionFailed) throw actionError;
+  return result as T;
 }
 
 export function revParse(ref: string, cwd?: string): string {

@@ -20,6 +20,7 @@ export interface WorkflowDef {
 }
 
 export interface AutonomousLoopConfig {
+  plannerMode?: PlannerMode;
   requiredPhases?: string[];
   defaultWorktreeMode?: boolean;
   requireCleanMainWorktree?: boolean;
@@ -34,6 +35,8 @@ export interface AutonomousLoopConfig {
   checkEnvFile?: string;
   phaseAdmission?: PhaseAdmissionConfig;
 }
+
+export type PlannerMode = "auto" | "lite" | "full";
 
 export interface PhaseAdmissionConfig {
   /** Re-run task-grill for every task, or trust a fresh planner revision until drift appears. */
@@ -67,4 +70,34 @@ export function loadPolicy(repoRoot: string): WorkflowPolicy {
 
 export function allowedWorkflowNames(policy: WorkflowPolicy): string[] {
   return Object.keys(policy.workflows);
+}
+
+export function resolvePlannerMode(policy: WorkflowPolicy, explicitMode?: PlannerMode): PlannerMode {
+  return explicitMode ?? policy.autonomousLoop.plannerMode ?? "auto";
+}
+
+const GENERIC_HUMAN_GATE_WORDS = new Set([
+  "a", "an", "and", "change", "edit", "file", "logic", "of", "or", "task", "the", "to",
+]);
+
+function normalizedWords(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.replace(/(?:changes|changed|changing)$/i, "change").replace(/(?:ed|ing|s)$/i, ""))
+    .filter((word) => word.length > 0 && !GENERIC_HUMAN_GATE_WORDS.has(word));
+}
+
+export function matchPolicyHumanGates(policy: WorkflowPolicy, taskEvidence: string[]): string[] {
+  const evidenceWords = new Set(normalizedWords(taskEvidence.join(" ")));
+  return (policy.humanGates ?? []).filter((gate) => {
+    const alternatives = gate.split(/\s+or\s+/i);
+    return alternatives.some((alternative) => {
+      const required = normalizedWords(alternative);
+      return required.length > 0 && required.every((word) => evidenceWords.has(word));
+    });
+  });
 }

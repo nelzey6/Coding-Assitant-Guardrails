@@ -368,6 +368,7 @@ export interface PlannerPromptOptions {
   repoContextFile: string;
   grillTranscriptFile: string;
   codeGraphFile: string;
+  mode?: "full" | "lite";
   /** Path to failure-analysis.json from the task that triggered this replan, if any. */
   priorFailureAnalysisFile?: string;
 }
@@ -378,6 +379,8 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     plannerResultFile, repoContextFile, grillTranscriptFile, codeGraphFile,
     priorFailureAnalysisFile = "",
   } = opts;
+  const mode = opts.mode ?? "full";
+  const lite = mode === "lite";
 
   const priorFailureBlock = (() => {
     if (!priorFailureAnalysisFile || !existsSync(priorFailureAnalysisFile)) return "";
@@ -408,12 +411,21 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "",
     "Read and follow AGENTS.md / CLAUDE.md if present.",
     "",
-    "DISCOVERY PHASE — before planning, conduct a full grill-with-docs self-interview:",
-    grillSkill,
+    ...(lite ? [
+      "PLANNER-LITE MODE: This is a conservative low-risk planning pass.",
+      "Inspect only the goal, the directly named files, and the smallest relevant repository guidance.",
+      "Do not run a full grill-with-docs interview, CodeGraph exploration, ADR review, or broad repository search.",
+      "If the goal is ambiguous, risky, cross-module, or cannot be given a focused validation command, write needs_human rather than guessing.",
+    ] : [
+      "DISCOVERY PHASE — before planning, conduct a full grill-with-docs self-interview:",
+      grillSkill,
+    ]),
     "",
     `The harness provided a context packet at: ${repoContextFile}`,
-    `The harness also generated optional CodeGraph context at: ${codeGraphFile}`,
-    "Use CodeGraph context for orientation before broad manual search, then verify conclusions against source files. If the artifact says CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding.",
+    ...(lite ? [] : [
+      `The harness also generated optional CodeGraph context at: ${codeGraphFile}`,
+      "Use CodeGraph context for orientation before broad manual search, then verify conclusions against source files. If the artifact says CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding.",
+    ]),
     "Inspect deeper in the repository when needed.",
     "",
     "When planning validation, match proof to workflow. Discovery/investigation/zoom-out tasks may be proven by artifacts and evidence notes; do not attach implementation test commands to artifact-only discovery tasks. Implementation/architecture tasks need focused task.validation commands when behavior or code changes should be proven. If a task adds or changes a small smoke test/check that directly proves the change, include that command in task.validation so the harness runs it before verification. Prefer `pwsh -File path/to/smoke.ps1`; mention `powershell.exe` only as legacy fallback.",
@@ -421,13 +433,19 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     `Do not edit ${stateFile} directly. Write planner JSON only to: ${plannerResultFile}`,
     `Also write an autonomous grill transcript markdown file to: ${grillTranscriptFile}`,
     "",
-    "The grill transcript must make your discovery visible for human review. Use this structure:",
+    ...(lite ? [
+      "Write a concise planner-lite transcript with the goal, directly inspected evidence, task choice, scope, validation, and fallback reason if any.",
+    ] : [
+      "The grill transcript must make your discovery visible for human review. Use this structure:",
+    ]),
     "# Autonomous Grill Transcript",
     "## Goal Restatement",
     "## Questions, Evidence, Answers, Proposals",
-    "For each grill question include: question, repo/docs evidence inspected, autonomous answer, proposal/decision, and whether human input is needed.",
-    "## Final Plan Rationale",
-    "Explain why the task split, dependencies, validation commands, assumptions, and open questions are appropriate.",
+    ...(lite ? [] : [
+      "For each grill question include: question, repo/docs evidence inspected, autonomous answer, proposal/decision, and whether human input is needed.",
+      "## Final Plan Rationale",
+      "Explain why the task split, dependencies, validation commands, assumptions, and open questions are appropriate.",
+    ]),
     "",
     "Allowed verdicts: planned, needs_human, blocked.",
     "Allowed task statuses in planner output: pending, needs_human, blocked.",
@@ -442,7 +460,11 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "Set complexity to low, medium, or high and give concrete complexityReasons. Architecture, broad cross-module, assumption-heavy, or costly-to-reverse work should be high. Split high-complexity work only at genuine verification seams; do not multiply model calls merely to reduce changed-file count.",
     "Task-size budget (enforced by the harness): at most 7 acceptanceCriteria, at most 5 scope globs, implementation/architecture tasks must have at least one acceptanceCriterion.",
     "",
-    "For every genuine design/product/architecture decision the plan forces, run a grill-with-docs self-interview: weigh 2-4 real options with concrete repo/docs evidence, mark one recommended, answer it yourself. Set escalate:true only when evidence genuinely cannot settle it.",
+    ...(lite ? [
+      "Do not invent design decisions in planner-lite mode. Use an empty decisions array unless the goal is no longer low-risk; then escalate with needs_human.",
+    ] : [
+      "For every genuine design/product/architecture decision the plan forces, run a grill-with-docs self-interview: weigh 2-4 real options with concrete repo/docs evidence, mark one recommended, answer it yourself. Set escalate:true only when evidence genuinely cannot settle it.",
+    ]),
     "",
     "Planner result schema (write valid JSON only):",
     `{"verdict":"planned|needs_human|blocked","summary":"...","decisions":[{"question":"...","whyItMatters":"...","optionsConsidered":[{"label":"...","evidence":"repo path / command / doc inspected","recommended":true}],"chosen":"...","selfAnswer":"...","confidence":"high|medium|low","escalate":false}],"assumptions":[],"openQuestions":[],"blockers":[],"tasks":[],"artifacts":["${grillTranscriptFile}"]}`,
@@ -502,6 +524,8 @@ export function getWorkflowBlock(workflow: string, policy: WorkflowPolicy, repoR
 
 export interface ExecutorPromptOptions {
   repoRoot: string;
+  worktreePath: string;
+  compact?: boolean;
   runsRoot: string;
   stateFile: string;
   budget: PromptBudget;
@@ -519,7 +543,7 @@ export interface ExecutorPromptOptions {
 
 export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOptions): void {
   const {
-    repoRoot, runsRoot, stateFile, budget, state, task, iteration, runDir,
+    repoRoot, worktreePath, compact = false, runsRoot, stateFile, budget, state, task, iteration, runDir,
     eventLogPath: evLogPath, codeGraphFile = "", policy, taskGrillResult,
     decisionGrillDecisions = [], approvedStance,
   } = opts;
@@ -528,7 +552,9 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
   const workflow = task.workflow ?? "tdd";
   const kind = task.kind ?? "implementation";
   const taskJson = JSON.stringify(projectTaskForPhase(task, "executor"), null, 2);
-  const recentHistory = getDistilledHistoryText(repoRoot, runsRoot, "executor", budget);
+  const recentHistory = compact
+    ? "Compact low-risk task: no failure or drift history was admitted."
+    : getDistilledHistoryText(repoRoot, runsRoot, "executor", budget);
 
   const content = [
     "You are executing one task inside an agentic harness worktree.",
@@ -540,8 +566,14 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     "- The harness owns task status, verification, commits, and merges.",
     "- Do not mark the task passed yourself.",
     "- Do not edit upstream-derived files unless explicit permission is present.",
+    `- Your active repository worktree is ${worktreePath} (your process working directory).`,
+    "- For repository files, use paths relative to the active worktree and never edit the parent repo via an absolute path.",
+    "- Absolute paths under the parent repo may be used only for harness artifacts explicitly named below, such as the run directory.",
+    ...(compact ? [
+      "- Compact low-risk task: make the smallest scoped edit and do not spend time writing a handover; the harness will generate one from the diff and checks.",
+    ] : []),
     `- Keep task artifacts under this run directory when useful: ${runDir}`,
-    `- Before finishing, write a concise handover note to \`${runDir}/handover.md\` with: what changed, key files, validation run, gotchas, and next-task notes.`,
+    ...(!compact ? [`- Before finishing, write a concise handover note to \`${runDir}/handover.md\` with: what changed, key files, validation run, gotchas, and next-task notes.`] : []),
     "- For discovery/investigation tasks, useful artifact files may be the main output; code changes are not required unless the task asks for them.",
     "- For implementation/architecture/maintenance tasks, prefer tracked repo changes plus validation unless the task is explicitly artifact-only.",
     "- When you add a focused smoke test/check that proves this task, use or propose it as a task.validation command (for example `pwsh -File tests/path/focused-smoke.ps1`) so the harness runs it before verification.",
@@ -569,9 +601,10 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     `Selected workflow: ${workflow}`,
     `Task kind: ${kind}`,
     `Run directory: ${runDir}`,
+    `Execution worktree: ${worktreePath}`,
     `CodeGraph context: ${codeGraphFile}`,
     "",
-    ...getOperatorContextBlock(state),
+    ...(compact ? [] : getOperatorContextBlock(state)),
     "Use CodeGraph context for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions by reading source files. If CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding.",
     "",
     `Recent harness history (verdicts, failures, assumption changes; source of truth is ${evLogPath}):`,

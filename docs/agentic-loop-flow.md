@@ -29,8 +29,8 @@ State: planning → execution
 [3. ADAPTIVE ADMISSION]
 Phase: phase admission
 Question: Which critical-thinking phase has evidence to justify its cost?
-Default fast path: fresh planner task → synthetic readiness → executor
-Escalate: ambiguity → human, stale task → task-grill, high complexity → stance
+Default fast path: planner-lite for conservative low-risk goals → synthetic readiness → compact executor → targeted checks
+Escalate: ambiguity → human, stale task → task-grill, changed assumptions → immediate replan, high complexity → stance
   │
   ▼
 [4. TASK READINESS / APPROACH REFLECTION] — only when admitted
@@ -47,16 +47,18 @@ State: task running
   │
   ▼
 [6. VERIFICATION]
-Agent: verifier
+Owner: adaptive verification profile; verifier agent only when admitted
 Question: Was the task implemented correctly?
-Uses: acceptance criteria, checks, diff/scope, human gates
+Uses: acceptance criteria, checks, actual diff, declared scope, complexity, prior failures, human gates
 Verdicts: pass | fail | needs_human
-Fast path: low-risk scoped work can rely on passed deterministic checks
+Low: meaningfully bounded low-complexity docs diff → deterministic checks
+Medium: normal change → one verifier
+High: architecture/high-complexity/broad/human-gate change → three adversarial votes
   │
   ▼
 [7. PLAN REFLECTION]
 Skill: reflect-on-approach, plan mode
-Current trigger: only when assumptions, verifier issues, complexity, or scope overlap indicate drift
+Current trigger: only when verifier issues, complexity, or scope overlap indicate drift; changed assumptions already replan before implementation
 Question: Is the remaining plan still correct?
 Verdicts: continue | adjust_remaining_tasks | replan | needs_human
   │
@@ -89,7 +91,7 @@ The planner proposes `complexity` and `complexityReasons`. The harness may escal
 
 Before a high-complexity executor runs, fresh stance agents challenge ownership, seams, assumptions, reversibility, sequence, expected edits, and validation. The harness requires evidence, rejects worktree edits, persists `approved-stance.json`, and injects it into the executor prompt.
 
-Phase admission is policy-driven and traceable. Skipped phases emit `phase_skipped` with a reason, so the loop stays auditable without paying for a model call. `adjust_remaining_tasks` and `replan` block stale pending tasks and invoke the planner. Completed tasks remain historical facts.
+Phase admission is policy-driven and traceable. Planner mode follows explicit CLI override → repository policy → built-in auto. Verification admission owns one final risk/mode/vote decision from meaningful scope bounds, actual diff, semantic/path human gates, and overrides. Skipped phases emit `phase_skipped`; changed assumptions and explicit replan verdicts use one stale-plan transition before further execution.
 
 ## Implemented versus planned
 

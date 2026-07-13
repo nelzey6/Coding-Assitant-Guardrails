@@ -9,20 +9,21 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 
 ## How it works
 
-1. Loads `agentic.json`, or creates it via a planner agent when no tasks exist yet.
-2. Runs grill-with-docs-style discovery during planning and writes `.agent-runs/<planner-run>/grill-transcript.md` with the question/evidence/answer/proposal trail.
+1. Loads `agentic.json`, or selects planner-lite/full planning when no tasks exist yet. Auto mode uses planner-lite only for conservative, explicitly scoped documentation/maintenance goals.
+2. Full planning runs grill-with-docs-style discovery; planner-lite writes the same `.agent-runs/<planner-run>/grill-transcript.md` artifact with a concise evidence and fallback record.
 3. Creates one shared git worktree under `.worktrees/run-<timestamp>` on branch `agentic/run-<timestamp>` — all tasks in the run commit onto this branch.
 4. Picks the next `pending` or `needs_retry` task (by priority, then dependency order).
 5. Admits each phase from current evidence. Fresh planner tasks inherit planner readiness; stale/manual tasks run a **task-grill** agent, and decision-grill is bundled only on that slower path.
 6. Resolves design forks with evidenced options when decision-grill is admitted; accepted decisions become binding rules in the executor prompt.
-7. Runs an **executor** agent in the shared run worktree.
-8. Runs configured **checks** (global `--checks` + task `validation` commands).
-9. Runs a **verifier** agent (multi-vote for high-risk tasks); low-risk scoped maintenance/discovery/investigation tasks can use passed checks as the verifier fast path.
-10. Runs a **post-task plan review** only when assumption, verifier, complexity, or scope evidence indicates drift; deterministic skips remain in the event log.
-11. Optionally runs a legacy **architect checkpoint** when `--architect-checkpoint-interval` is configured; it defaults off.
-12. On failure: records `failureHistory`, marks `needs_retry` or `needs_human` based on retry budget.
-13. Repeats until all tasks pass or the iteration budget is exhausted.
-14. On completion: applies run branch to main tree as **unstaged changes** (default) or merges if `--merge` is set.
+7. A task-grill `ready` verdict with changed assumptions blocks the stale task and replans before executor execution.
+8. Runs an **executor** agent in the shared run worktree under parent-checkout isolation.
+9. Runs configured **checks** (global `--checks` + task `validation` commands).
+10. Resolves one final verification decision from complexity, meaningful scope bounds, actual changed paths, failures, architecture intent, semantic/path human gates, policy, and operator overrides. Bounded docs can use checks; normal changes use one verifier; high-risk changes use adversarial votes.
+11. Runs a **post-task plan review** only when verifier, complexity, or scope evidence indicates remaining-plan drift; deterministic skips remain in the event log.
+12. Optionally runs a legacy **architect checkpoint** when `--architect-checkpoint-interval` is configured; it defaults off.
+13. On failure: records `failureHistory`, marks `needs_retry` or `needs_human` based on retry budget.
+14. Repeats until all tasks pass or the iteration budget is exhausted.
+15. On completion: applies run branch to main tree as **unstaged changes** (default) or merges if `--merge` is set.
 
 ---
 
@@ -31,6 +32,7 @@ For the quick start see [scripts/agentic/README.md](../scripts/agentic/README.md
 ```
 --command <template>         Custom default agent command; {prompt} = prompt file path. Auto-detects claude/pi if omitted.
 --planner-command <tpl>      Planner/replan/checkpoint command (defaults to --command or auto-detected)
+--planner-mode <mode>        auto | lite | full (overrides repository policy; fallback: policy then auto)
 --grill-command <tpl>        Task-grill/decision-grill/post-task review command (defaults to --command or auto-detected)
 --executor-command <tpl>     Executor command (defaults to --command or auto-detected)
 --verifier-command <tpl>     Separate verifier command (defaults to --command or auto-detected)
@@ -149,9 +151,11 @@ agentic-loop run
 
 **Circuit breakers** — `--max-runtime-seconds` and `--max-agent-calls` stop the loop cleanly with a `budget_exhausted` event and `needs_human` handoff.
 
-**Adversarial verifier** — high-risk tasks (implementation/architecture kind with scope, or scope matching a human-gate path) get `--verifier-votes` independent refute-first votes; majority pass required.
+**Adaptive verification admission** — task kind, complexity, and verification risk are independent. After checks, one final decision drives both execution and `verification_profile_resolved`. Catch-all scopes are broad; semantic policy gates and path gates are high risk. Normal code uses one verifier; high-risk work uses three refute-first votes by default.
 
-**Fast-verifier guard** — `--fast-verifier` is only honored for low-risk tasks (`maintenance`/`discovery`/`investigation` kind with a declared scope). High-risk tasks force the full verifier and log `verifier_skip_denied`.
+**Fast-verifier guard** — meaningfully bounded low-complexity documentation-only actual diffs can skip the separate verifier after checks, including `implementation` tasks. `**`, root wildcard scopes, normal code, and high-risk changes cannot. Policy-forced verification and `--verifier-votes` are normalized before telemetry, so traced votes match executed votes.
+
+**Parent-checkout isolation** — executor calls are guarded by content fingerprints covering tracked diffs and non-ignored untracked files. Comparison runs after success and failure, detects changes to already-dirty files, stops before checks/integration, and never restores user content automatically.
 
 **Phase admission** — defaults are `taskGrill: plan-aware`, `verifier: auto`, `postTaskReview: on-drift`, `finalizeDocs: on-change`, and `retryTaskGrill: on-drift`. The harness emits `phase_admitted` or `phase_skipped` for each gated phase. Planner ambiguity emits `goal_intake_needs_human`; check failures retry directly, while non-check failures re-grill before retry.
 

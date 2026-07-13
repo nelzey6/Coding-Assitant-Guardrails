@@ -35,6 +35,10 @@ Task-grill is a required pre-execution phase. It writes `task-grill-result.json`
 - `needs_human`: stop before executor edits
 - `blocked`: mark blocked and stop before executor edits
 
+A `ready` result with non-empty `assumptionsChanged` is not executable readiness:
+the harness persists the evidence, blocks the stale task, and invokes the same
+budgeted/convergence-guarded replan path before any executor starts.
+
 Executor prompts include the task-grill result so the executor starts from current task understanding rather than only from the original planner output.
 
 ## Consequences

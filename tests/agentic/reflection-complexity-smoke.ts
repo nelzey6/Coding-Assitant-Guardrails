@@ -24,8 +24,10 @@ const implementation = resolveTaskComplexity({
   id: "implementation",
   kind: "implementation",
   workflow: "tdd",
+  complexity: "low",
+  scope: ["docs/verification-policy.md"],
 } as any, policy);
-assert(implementation.level === "medium", "ordinary implementation should escalate to medium");
+assert(implementation.level === "low", "implementation kind alone must not raise task complexity");
 
 const dir = mkdtempSync(join(tmpdir(), "agentic-reflection-smoke-"));
 try {

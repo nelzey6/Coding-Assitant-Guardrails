@@ -338,6 +338,9 @@ if (content.includes("Write JSON only to this path:")) {
   process.exit(0);
 }
 if (!content.includes("Task-grill result for this turn:")) throw new Error("executor prompt missing task-grill result");
+const worktree = content.match(/Execution worktree: (.+)/)?.[1]?.trim();
+if (!worktree) throw new Error("executor prompt missing active worktree");
+if (worktree !== process.cwd()) throw new Error("executor cwd mismatch: prompt=" + worktree + " cwd=" + process.cwd());
 writeFileSync("output.txt", "done", "utf-8");
 `);
 
@@ -357,6 +360,9 @@ writeFileSync("output.txt", "done", "utf-8");
     const invocationEvents = events.filter((e) => e.type === "agent_invocation_finished");
     assert(invocationEvents.length >= 3, `expected invocation telemetry for every agent call, got ${invocationEvents.length}`);
     assert(invocationEvents.every((e) => typeof e.durationMs === "number" && e.durationMs >= 0), "invocation telemetry missing durationMs");
+    assert(invocationEvents.every((e) => typeof e.assistantTurns === "number"), "invocation telemetry missing assistantTurns");
+    assert(invocationEvents.every((e) => typeof e.toolCalls === "number"), "invocation telemetry missing toolCalls");
+    assert(invocationEvents.every((e) => typeof e.logBytes === "number" && e.logBytes >= 0), "invocation telemetry missing logBytes");
     assert(invocationEvents.every((e) => e.telemetryStatus === "unavailable"), "custom agent should report unavailable token telemetry explicitly");
     assert(invocationEvents.filter((e) => e.phase === "preflight").length === 1, "happy path should bundle task and decision grills into one preflight invocation");
     assert(hasEvent(events, "decision_grill_reused_preflight"), "decision grill should reuse bundled preflight output");
@@ -366,6 +372,125 @@ writeFileSync("output.txt", "done", "utf-8");
     assert(existsSync(join(taskRunDir, "context-capsule.md")), "bundled phases should share a canonical context capsule");
     assert(!existsSync(join(taskRunDir, ".task-grill-section.md")), "temporary preflight section must be cleaned up");
     assert(!existsSync(join(taskRunDir, ".verifier-section.md")), "temporary review section must be cleaned up");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 1c: executor parent-checkout mutation is a hard isolation failure ───
+
+runCase("executor isolation: parent checkout mutation stops before checks", () => {
+  const dir = tmpRepo("parent-mutation");
+  try {
+    writeState(dir, baseState({
+      id: "task-001",
+      title: "Parent mutation",
+      kind: "maintenance",
+      scope: ["output.txt"],
+      plannedRevision: 1,
+    }, { planRevision: 1 }));
+
+    const agentPath = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (!content.includes("Execution worktree:")) throw new Error("executor prompt missing worktree");
+const worktree = content.match(/Execution worktree: (.+)/)[1].trim();
+const parent = dirname(dirname(worktree));
+writeFileSync(join(parent, "README.md"), "parent mutated\\n", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--no-decision-grill", "--no-post-task-review", "--no-finalize-docs"]);
+    assert(r.status !== 0, "expected parent mutation to stop the run");
+    const events = readEvents(dir);
+    assert(hasEvent(events, "parent_worktree_mutated"), "missing parent_worktree_mutated event");
+    assert(!hasEvent(events, "checks_started"), "checks must not run after parent mutation");
+    assert(readState(dir).tasks[0].status === "needs_human", "parent mutation should require human intervention");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+runCase("executor isolation: untracked parent file stops before checks", () => {
+  const dir = tmpRepo("parent-untracked-mutation");
+  try {
+    writeState(dir, baseState({
+      id: "task-001",
+      title: "Parent untracked mutation",
+      kind: "maintenance",
+      scope: ["output.txt"],
+      plannedRevision: 1,
+    }, { planRevision: 1 }));
+
+    const agentPath = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+const worktree = content.match(/Execution worktree: (.+)/)[1].trim();
+const parent = dirname(dirname(worktree));
+writeFileSync(join(parent, "executor-leak.txt"), "untracked parent mutation\\n", "utf-8");
+`);
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--no-decision-grill", "--no-post-task-review", "--no-finalize-docs"]);
+    assert(r.status !== 0, "expected untracked parent mutation to stop the run");
+    const events = readEvents(dir);
+    assert(hasEvent(events, "parent_worktree_mutated"), "missing parent_worktree_mutated event for untracked file");
+    assert(!hasEvent(events, "checks_started"), "checks must not run after untracked parent mutation");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+runCase("executor isolation: already-dirty parent content change is detected", () => {
+  const dir = tmpRepo("parent-dirty-content-mutation");
+  try {
+    writeState(dir, baseState({ id: "task-001", title: "Parent dirty mutation", scope: ["output.txt"], plannedRevision: 1 }, { planRevision: 1 }));
+    const agentPath = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+const worktree = content.match(/Execution worktree: (.+)/)[1].trim();
+writeFileSync(join(dirname(dirname(worktree)), "README.md"), "executor changed already-dirty content\\n", "utf-8");
+`);
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+    writeFileSync(join(dir, "README.md"), "user dirty content\n", "utf-8");
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--allow-dirty", "--max-iterations", "1", "--no-apply", "--no-decision-grill", "--no-post-task-review", "--no-finalize-docs"]);
+    assert(r.status !== 0, "expected already-dirty parent content mutation to stop the run");
+    assert(hasEvent(readEvents(dir), "parent_worktree_mutated"), "missing parent_worktree_mutated event for already-dirty content");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+runCase("executor isolation: mutation is detected when executor also fails", () => {
+  const dir = tmpRepo("parent-mutation-error-exit");
+  try {
+    writeState(dir, baseState({ id: "task-001", title: "Parent mutation and failure", scope: ["output.txt"], plannedRevision: 1 }, { planRevision: 1 }));
+    const agentPath = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+const worktree = content.match(/Execution worktree: (.+)/)[1].trim();
+writeFileSync(join(dirname(dirname(worktree)), "README.md"), "mutated before failure\\n", "utf-8");
+throw new Error("executor failed after mutation");
+`);
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--no-decision-grill", "--no-post-task-review", "--no-finalize-docs"]);
+    assert(r.status !== 0, "expected mutation plus executor failure to stop the run");
+    const mutationEvent = readEvents(dir).find((event) => event.type === "parent_worktree_mutated");
+    assert(mutationEvent?.executorFailed === true, "isolation event should preserve that executor also failed");
+    const runDir = readEvents(dir).find((event) => event.type === "iteration_started")?.runDir;
+    assert(readFileSync(join(runDir, "parent-worktree-mutation.txt"), "utf-8").includes("Executor also failed:"), "isolation diagnostic should preserve executor failure context");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }
@@ -805,9 +930,9 @@ if (handoverMatch) {
   }
 });
 
-// ── case 4: fast-verifier denied for high-risk task ──────────────────────────
+// ── case 4: fast-verifier denied for normal code implementation ──────────────
 
-runCase("fast-verifier denied: high-risk task runs full verifier", () => {
+runCase("fast-verifier denied: code implementation runs one verifier", () => {
   const dir = tmpRepo("fvguard");
   try {
     writeState(dir, baseState({ kind: "implementation", scope: ["out.txt"] }));
@@ -833,9 +958,11 @@ writeFileSync("out.txt", "ok", "utf-8");
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const events = readEvents(dir);
-    assert(hasEvent(events, "verifier_skip_denied"), "expected verifier_skip_denied for high-risk task");
-    assert(!hasEvent(events, "verifier_skipped"), "verifier must NOT be skipped for a high-risk task");
+    assert(hasEvent(events, "verifier_skip_denied"), "expected verifier_skip_denied for code implementation");
+    assert(!hasEvent(events, "verifier_skipped"), "verifier must NOT be skipped for code implementation");
     assert(hasEvent(events, "verifier_finished"), "expected verifier_finished (full verifier ran)");
+    const profile = events.find((e) => e.type === "verification_profile_resolved");
+    assert(profile?.risk === "medium" && profile?.verifierMode === "single" && profile?.votes === 1, "code implementation should resolve one verifier vote");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }
@@ -846,13 +973,14 @@ writeFileSync("out.txt", "ok", "utf-8");
 runCase("fast-verifier allowed: low-risk task skips verifier agent", () => {
   const dir = tmpRepo("fvallow");
   try {
-    writeState(dir, baseState({ kind: "maintenance", scope: ["out.txt"] }));
+    writeState(dir, baseState({ kind: "maintenance", scope: ["docs/out.md"], complexity: "low" }));
 
     const agent = writeFakeAgent(dir, "fake-agent.mjs", `
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
 const content = readFileSync(process.argv[2], "utf-8");
 if (content.includes("Write JSON only to this path:")) throw new Error("verifier agent must not be called for fast-verifier task");
-writeFileSync("out.txt", "ok", "utf-8");
+mkdirSync("docs", { recursive: true });
+writeFileSync("docs/out.md", "ok", "utf-8");
 `);
 
     git(["add", "-A"], dir);
@@ -1156,11 +1284,9 @@ throw new Error("executor/verifier must not run when convergence detected");
   }
 });
 
-// ── case 10: assumption ledger — grill results persisted to state.assumptions ──
-// Task-grill writes assumptionsStillValid and assumptionsChanged.
-// After the loop, state.assumptions must contain both tagged entries.
+// ── case 10: changed assumptions persist and invalidate the current plan ──────
 
-runCase("assumption ledger: grill assumptionsStillValid/Changed persisted to state", () => {
+runCase("assumption drift: changed assumptions replan before stale executor", () => {
   const dir = tmpRepo("assumptions");
   try {
     writeState(dir, baseState());
@@ -1189,6 +1315,18 @@ if (content.includes("Write task-grill JSON only to:")) {
   }), "utf-8");
   process.exit(0);
 }
+if (content.includes("Write planner JSON only to:")) {
+  const result = content.match(/Write planner JSON only to: (.+)/)[1].trim();
+  const transcript = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/)[1].trim();
+  mkdirSync(dirname(result), { recursive: true });
+  writeFileSync(result, JSON.stringify({
+    verdict: "planned", summary: "replanned around changed output assumption", decisions: [], assumptions: [], openQuestions: [], blockers: [], artifacts: [transcript],
+    tasks: [{ id: "task-002", title: "Write corrected output", kind: "implementation", workflow: "tdd", status: "pending", priority: 1,
+      acceptanceCriteria: ["build/output.txt exists"], validation: [], dependsOn: [], failureHistory: [], artifacts: [], scope: ["build/output.txt"], complexity: "low", complexityReasons: ["bounded file"] }]
+  }), "utf-8");
+  writeFileSync(transcript, "# Replan transcript\\nChanged output assumption accepted.\\n", "utf-8");
+  process.exit(0);
+}
 if (content.includes("Write JSON only to this path:")) {
   const m = content.match(/Write JSON only to this path: (.+)/);
   const p = m[1].trim();
@@ -1196,17 +1334,20 @@ if (content.includes("Write JSON only to this path:")) {
   writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
   process.exit(0);
 }
-writeFileSync("output.txt", "done", "utf-8");
+if (content.includes('"id": "task-001"')) throw new Error("stale executor must not run after assumptions changed");
+mkdirSync("build", { recursive: true });
+writeFileSync("build/output.txt", "done", "utf-8");
 `, "utf-8");
 
     git(["add", "-A"], dir);
     git(["commit", "-m", "initial"], dir);
 
-    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--no-decision-grill", "--no-post-task-review"]);
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "3", "--no-apply", "--no-decision-grill", "--no-post-task-review", "--no-finalize-docs"]);
     assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
 
     const state = readState(dir);
-    assert(state.tasks[0].status === "passed", `expected passed, got ${state.tasks[0].status}`);
+    assert(state.tasks.find((task: any) => task.id === "task-001")?.status === "blocked", "stale task should be blocked before execution");
+    assert(state.tasks.find((task: any) => task.id === "task-002")?.status === "passed", "replacement task should pass");
     const assumptions: string[] = state.assumptions ?? [];
     assert(
       assumptions.some((a: string) => a.startsWith("[valid]") && a.includes("npm workspaces")),
@@ -1218,6 +1359,9 @@ writeFileSync("output.txt", "done", "utf-8");
     );
     const events = readEvents(dir);
     assert(hasEvent(events, "assumptions_updated"), "expected assumptions_updated event");
+    assert(hasEvent(events, "task_replan_requested"), "changed assumptions should request replan immediately");
+    assert(hasEvent(events, "planner_finished"), "changed assumptions should invoke planner");
+    assert(!events.some((event) => event.type === "executor_started" && event.task === "task-001"), "stale executor must never start");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }
@@ -1359,7 +1503,6 @@ runCase("architect checkpoint: fires after N tasks, continue verdict proceeds", 
       decisions: [], assumptions: [], openQuestions: [], blockers: [],
       promptPolicy: { lessons: [] },
     });
-
     const agentPath = join(dir, "fake-agent.mjs");
     writeFileSync(agentPath, `
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
@@ -1429,7 +1572,6 @@ runCase("architect checkpoint: replan verdict calls planner and continues", () =
       decisions: [], assumptions: [], openQuestions: [], blockers: [],
       promptPolicy: { lessons: [] },
     });
-
     const agentPath = join(dir, "fake-agent.mjs");
     writeFileSync(agentPath, `
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
@@ -1584,6 +1726,103 @@ writeFileSync("output.txt", "done", "utf-8");
     const plannerStarted = events.find((e) => e.type === "planner_started");
     const plannerPrompt = readFileSync(plannerStarted.prompt, "utf-8");
     assert(plannerPrompt.includes("Plan around verification seams, not file boundaries"), "planner prompt must optimize task splits around independent proof");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── case 15b: conservative planner-lite admission for explicit docs goals ────
+
+runCase("planner-lite: explicit low-risk docs goal uses compact planning", () => {
+  const dir = tmpRepo("planner-lite");
+  try {
+    writeState(dir, {
+      version: 1,
+      goal: "Add one concise sentence to docs/verification-policy.md explaining targeted verification first.",
+      maxIterations: 1,
+      checks: [],
+      defaultDiscoveryWorkflow: "grill-with-docs",
+      tasks: [],
+      decisions: [], assumptions: [], openQuestions: [], blockers: [],
+      promptPolicy: { lessons: [] },
+    });
+    mkdirSync(join(dir, "docs"), { recursive: true });
+    writeFileSync(join(dir, "docs", "verification-policy.md"), "# Verification Policy\\n", "utf-8");
+
+    const agentPath = join(dir, "fake-agent.mjs");
+    writeFileSync(agentPath, `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("Write planner JSON only to:")) {
+  if (!content.includes("PLANNER-LITE MODE")) throw new Error("expected planner-lite prompt");
+  if (content.includes("full grill-with-docs self-interview")) throw new Error("planner-lite must omit full grill instructions");
+  const result = content.match(/Write planner JSON only to: (.+)/)[1].trim();
+  const transcript = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/)[1].trim();
+  mkdirSync(dirname(result), { recursive: true });
+  writeFileSync(result, JSON.stringify({
+    verdict: "planned", summary: "planner-lite plan", decisions: [], assumptions: [],
+    openQuestions: [], blockers: [], artifacts: [transcript],
+    tasks: [{ id: "docs-task", title: "Update verification policy", kind: "implementation", workflow: "grill-with-docs", status: "pending", priority: 1,
+      acceptanceCriteria: ["targeted verification guidance exists"], validation: [], dependsOn: [], failureHistory: [], artifacts: [],
+      scope: ["docs/verification-policy.md"], complexity: "low", complexityReasons: ["single docs file"] }]
+  }), "utf-8");
+  writeFileSync(transcript, "# Planner-lite transcript\\n", "utf-8");
+  process.exit(0);
+}
+if (content.includes("Task-grill result for this turn:")) {
+  if (!content.includes("Compact low-risk task:")) throw new Error("docs implementation should use compact executor mode");
+  if (content.includes("Before finishing, write a concise handover note")) throw new Error("compact executor prompt must not require agent-authored handover");
+  writeFileSync("docs/verification-policy.md", "# Verification Policy\\n\\nTargeted verification first.\\n", "utf-8");
+}
+`, "utf-8");
+
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--max-iterations", "1", "--no-apply", "--no-decision-grill", "--no-post-task-review", "--no-finalize-docs"]);
+    assert(r.status === 0, `CLI exited ${r.status}\\nstdout: ${r.stdout}\\nstderr: ${r.stderr}`);
+    const events = readEvents(dir);
+    const mode = events.find((e) => e.type === "planner_mode_selected");
+    assert(mode?.mode === "lite", `expected planner mode lite, got ${mode?.mode}`);
+    const profile = events.find((e) => e.type === "verification_profile_resolved");
+    assert(profile?.risk === "low" && profile?.verifierMode === "skip" && profile?.votes === 0, "docs implementation should use adaptive low-risk verification");
+    assert(hasEvent(events, "verifier_skipped"), "docs implementation should skip separate verifier");
+    assert(readState(dir).tasks[0].status === "passed", "planner-lite task should pass");
+  } finally {
+    if (!keep) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+runCase("planner mode: repository policy applies when CLI option is omitted", () => {
+  const dir = tmpRepo("planner-policy-default");
+  try {
+    writeState(dir, {
+      version: 1, goal: "Add one sentence to docs/guide.md.", maxIterations: 1, checks: [],
+      defaultDiscoveryWorkflow: "grill-with-docs", tasks: [], decisions: [], assumptions: [], openQuestions: [], blockers: [], promptPolicy: { lessons: [] },
+    });
+    const policyPath = join(dir, "templates", "agent-policy", "workflow-policy.json");
+    const policy = JSON.parse(readFileSync(policyPath, "utf-8"));
+    policy.autonomousLoop.plannerMode = "full";
+    writeFileSync(policyPath, JSON.stringify(policy, null, 2), "utf-8");
+
+    const agentPath = writeFakeAgent(dir, "fake-agent.mjs", `
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+const content = readFileSync(process.argv[2], "utf-8");
+if (content.includes("PLANNER-LITE MODE")) throw new Error("policy full mode was masked by CLI default");
+const result = content.match(/Write planner JSON only to: (.+)/)[1].trim();
+const transcript = content.match(/Also write an autonomous grill transcript markdown file to: (.+)/)[1].trim();
+mkdirSync(dirname(result), { recursive: true });
+writeFileSync(result, JSON.stringify({ verdict: "planned", summary: "full policy plan", decisions: [], assumptions: [], openQuestions: [], blockers: [], artifacts: [transcript], tasks: [{ id: "docs-task", title: "Update guide", kind: "implementation", workflow: "grill-with-docs", status: "pending", priority: 1, acceptanceCriteria: ["guide updated"], validation: [], dependsOn: [], failureHistory: [], artifacts: [], scope: ["docs/guide.md"], complexity: "low", complexityReasons: ["one docs file"] }] }), "utf-8");
+writeFileSync(transcript, "# Full planner transcript\\n", "utf-8");
+`);
+    git(["add", "-A"], dir);
+    git(["commit", "-m", "initial"], dir);
+
+    const r = runCLI(dir, ["run", "--command", fakeCommand(agentPath), "--plan-only"]);
+    assert(r.status === 0, `CLI exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    assert(readEvents(dir).find((event) => event.type === "planner_mode_selected")?.mode === "full", "repository policy should select full planner when CLI omits mode");
   } finally {
     if (!keep) rmSync(dir, { recursive: true, force: true });
   }
@@ -1811,12 +2050,12 @@ runCase("post-task review: adjust_remaining_tasks records advisory and continues
   const dir = tmpRepo("post-task-adjust");
   try {
     writeState(dir, baseState(
-      { title: "First task", scope: ["output.txt"], priority: 1 },
+      { title: "First task", scope: ["artifacts/**"], priority: 1 },
       {
         maxIterations: 4,
         tasks: [
-          baseTask({ id: "task-001", title: "First task", scope: ["output.txt"], priority: 1 }),
-          baseTask({ id: "task-002", title: "Stale adjustment task", scope: ["stale.txt"], priority: 2, dependsOn: ["task-001"] }),
+          baseTask({ id: "task-001", title: "First task", scope: ["artifacts/**"], priority: 1 }),
+          baseTask({ id: "task-002", title: "Stale adjustment task", scope: ["artifacts/stale.txt"], priority: 2, dependsOn: ["task-001"] }),
         ],
       }
     ));
@@ -1878,8 +2117,9 @@ if (content.includes("Write JSON only to this path:")) {
   writeFileSync(p, JSON.stringify({ verdict: "pass", summary: "ok", issues: [], humanGates: [], recommendedStatus: "passed", artifacts: [] }), "utf-8");
   process.exit(0);
 }
-if (content.includes('"id": "task-002"')) { writeFileSync("stale.txt", "done", "utf-8"); process.exit(0); }
-writeFileSync("output.txt", "done", "utf-8");
+mkdirSync("artifacts", { recursive: true });
+if (content.includes('"id": "task-002"')) { writeFileSync("artifacts/stale.txt", "done", "utf-8"); process.exit(0); }
+writeFileSync("artifacts/output.txt", "done", "utf-8");
 `, "utf-8");
 
     git(["add", "-A"], dir);
@@ -1975,7 +2215,7 @@ else if (content.includes('"id": "task-002"')) writeFileSync("out2.txt", "done",
 });
 
 // ── case 21: agent-call budget exhaustion ─────────────────────────────────────
-// Two maintenance tasks with --fast-verifier (no verifier agent call).
+// Two low-risk docs tasks with --fast-verifier (no verifier agent call).
 // Task-1 uses grill(1) + executor(1) = 2 agent calls.
 // --max-agent-calls 2: iteration 2 starts with count=2 >= 2, fires
 // budget_exhausted before task-2's grill runs. Loop exits non-zero.
@@ -1987,8 +2227,8 @@ runCase("agent-call budget: exhausted after maxAgentCalls, loop halts", () => {
       version: 1, goal: "Budget smoke", maxIterations: 5, checks: [],
       defaultDiscoveryWorkflow: "grill-with-docs",
       tasks: [
-        baseTask({ id: "task-001", kind: "maintenance", title: "First task",  priority: 1, scope: ["out1.txt"] }),
-        baseTask({ id: "task-002", kind: "maintenance", title: "Second task", priority: 2, scope: ["out2.txt"] }),
+        baseTask({ id: "task-001", kind: "implementation", title: "First task",  priority: 1, scope: ["docs/out1.md"], complexity: "low" }),
+        baseTask({ id: "task-002", kind: "implementation", title: "Second task", priority: 2, scope: ["docs/out2.md"], complexity: "low" }),
       ],
       decisions: [], assumptions: [], openQuestions: [], blockers: [],
       promptPolicy: { lessons: [] },
@@ -2011,8 +2251,9 @@ if (content.includes("Write task-grill JSON only to:")) {
   }), "utf-8");
   process.exit(0);
 }
-if (content.includes('"id": "task-001"')) { writeFileSync("out1.txt", "done", "utf-8"); process.exit(0); }
-writeFileSync("out2.txt", "done", "utf-8");
+mkdirSync("docs", { recursive: true });
+if (content.includes('"id": "task-001"')) { writeFileSync("docs/out1.md", "done", "utf-8"); process.exit(0); }
+writeFileSync("docs/out2.md", "done", "utf-8");
 `, "utf-8");
 
     git(["add", "-A"], dir);
@@ -2038,12 +2279,12 @@ runCase("post-task review: needs_human verdict halts loop", () => {
   const dir = tmpRepo("post-task-nh");
   try {
     writeState(dir, baseState(
-      { title: "Smoke task", scope: ["output.txt"], priority: 1 },
+      { title: "Smoke task", scope: ["artifacts/**"], priority: 1 },
       {
         maxIterations: 3,
         tasks: [
-          baseTask({ id: "task-001", title: "Smoke task", scope: ["output.txt"], priority: 1 }),
-          baseTask({ id: "task-002", title: "Should not run", scope: ["other.txt"], priority: 2, dependsOn: ["task-001"] }),
+          baseTask({ id: "task-001", title: "Smoke task", scope: ["artifacts/**"], priority: 1 }),
+          baseTask({ id: "task-002", title: "Should not run", scope: ["artifacts/other.txt"], priority: 2, dependsOn: ["task-001"] }),
         ],
       }
     ));
@@ -2085,7 +2326,8 @@ if (content.includes("Write JSON only to this path:")) {
   process.exit(0);
 }
 if (content.includes('"id": "task-002"')) throw new Error("task-002 must not run after post-task review needs_human");
-writeFileSync("output.txt", "done", "utf-8");
+mkdirSync("artifacts", { recursive: true });
+writeFileSync("artifacts/output.txt", "done", "utf-8");
 `, "utf-8");
 
     git(["add", "-A"], dir);

@@ -492,6 +492,7 @@ program
   .option("--worktree-root <path>",          "Worktree root (default: .worktrees)")
   .option("--command <template>",            "Default agent command; {prompt} is replaced with the prompt file path")
   .option("--planner-command <template>",    "Command for planner, replan, architect checkpoint, goal review (defaults to --command)")
+  .option("--planner-mode <mode>",           "auto | lite | full (overrides workflow policy)")
   .option("--grill-command <template>",      "Command for task-grill, decision-grill, post-task review (defaults to --command)")
   .option("--executor-command <template>",   "Command for the executor agent (defaults to --command)")
   .option("--verifier-command <template>",   "Command for the verifier agent (defaults to --command)")
@@ -579,6 +580,12 @@ program
       process.exit(2);
     }
 
+    const plannerModeRaw = opts.plannerMode as string | undefined;
+    if (plannerModeRaw !== undefined && !["auto", "lite", "full"].includes(plannerModeRaw)) {
+      console.error(`Invalid --planner-mode '${plannerModeRaw}'. Expected: auto | lite | full`);
+      process.exit(2);
+    }
+
     const loopConfig: LoopConfig = {
       repoRoot,
       stateFile:           opts.state           ?? DEFAULT_STATE_FILE,
@@ -586,6 +593,7 @@ program
       worktreeRoot:        opts.worktreeRoot     ?? DEFAULT_WORKTREE_ROOT,
       agent:               agentConfig,
       plannerAgent:        plannerConfig,
+      plannerMode:         plannerModeRaw as "auto" | "lite" | "full" | undefined,
       grillAgent:          grillConfig,
       executorAgent:       executorConfig,
       verifierAgent:       verifierConfig,

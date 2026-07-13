@@ -190,6 +190,7 @@
     "changes outside declared task scope"
   ],
   "autonomousLoop": {
+    "plannerMode": "auto",
     "requiredPhases": [
       "discovery",
       "planning",

@@ -10,14 +10,6 @@ const DEFAULT_HUMAN_GATE_PATHS = [
   "**/*.sql",
 ];
 
-const LOW_RISK_KINDS = ["maintenance", "discovery", "investigation"] as const;
-const HIGH_RISK_KINDS = ["implementation", "architecture"] as const;
-
-export interface FastVerifierDecision {
-  allowed: boolean;
-  reason: string;
-}
-
 export type TaskComplexity = "low" | "medium" | "high";
 
 export interface ComplexityDecision {
@@ -35,14 +27,11 @@ export function resolveTaskComplexity(task: AgenticTask, policy: WorkflowPolicy)
     if (!reasons.includes(reason)) reasons.push(reason);
   };
 
-  if (task.kind === "implementation") raise("medium", "implementation task");
   if (task.kind === "architecture" || task.workflow === "improve-codebase-architecture") {
     raise("high", "architecture workflow or task kind");
   }
   if ((task.dependsOn ?? []).length >= 2) raise("high", "multiple task dependencies");
   if (getTaskScope(task).length >= 4) raise("high", "broad declared scope");
-  if (testTaskIsHighRisk(task, policy) && proposed === "medium") raise("high", "planner-proposed complexity plus high-risk scope");
-
   return { level, reasons };
 }
 
@@ -53,6 +42,16 @@ export function getTaskScope(task: AgenticTask): string[] {
 
 export function isTaskUnscoped(task: AgenticTask): boolean {
   return getTaskScope(task).length === 0;
+}
+
+export function isScopeMeaningfullyBounded(scopeGlobs: string[]): boolean {
+  if (scopeGlobs.length === 0) return false;
+  return scopeGlobs.every((glob) => {
+    const normalized = glob.replace(/\\/g, "/").replace(/^\.\//, "").trim();
+    const wildcardIndex = normalized.search(/[*?]/);
+    if (wildcardIndex < 0) return normalized.length > 0;
+    return normalized.slice(0, wildcardIndex).replace(/\/+$/, "").length > 0;
+  });
 }
 
 // Translate a forward-slash glob into an anchored regex string.
@@ -131,36 +130,24 @@ function getHumanGatePaths(policy: WorkflowPolicy): string[] {
   return DEFAULT_HUMAN_GATE_PATHS;
 }
 
-export function testFastVerifierAllowed(task: AgenticTask): FastVerifierDecision {
-  const kind = task.kind ?? "";
-  if (!(LOW_RISK_KINDS as readonly string[]).includes(kind)) {
-    return {
-      allowed: false,
-      reason: `kind '${kind}' is not low-risk (only maintenance/discovery/investigation may skip the verifier)`,
-    };
-  }
-  if (getTaskScope(task).length === 0) {
-    return {
-      allowed: false,
-      reason: "task declares no scope, so the diff-scope rail cannot bound the change",
-    };
-  }
-  return { allowed: true, reason: "low-risk kind with declared scope" };
+function pathIsDocumentation(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
+  return /\.(md|mdx|rst|adoc)$/i.test(normalized);
 }
 
-export function testTaskIsHighRisk(task: AgenticTask, policy: WorkflowPolicy): boolean {
-  const scope = getTaskScope(task);
-  if (scope.length === 0) return false;
-  if ((HIGH_RISK_KINDS as readonly string[]).includes(task.kind ?? "")) return true;
+export function testPathsAreDocumentation(paths: string[]): boolean {
+  return paths.length > 0 && paths.every(pathIsDocumentation);
+}
 
+export function testPathsTouchHumanGate(paths: string[], policy: WorkflowPolicy): boolean {
   const gateGlobs = getHumanGatePaths(policy);
-  for (const scopeGlob of scope) {
+  for (const scopeGlob of paths) {
     // Strip glob metacharacters to get the literal prefix for overlap detection
     const scopePrefix = scopeGlob.replace(/[*?].*$/, "");
     for (const gate of gateGlobs) {
       const gatePrefix = gate.replace(/[*?].*$/, "");
       if (testPathInScope(scopePrefix, gateGlobs)) return true;
-      if (testPathInScope(gatePrefix, scope)) return true;
+      if (testPathInScope(gatePrefix, paths)) return true;
     }
   }
   return false;

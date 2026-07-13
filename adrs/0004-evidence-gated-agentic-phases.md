@@ -18,11 +18,18 @@ Use policy-driven phase admission with these defaults:
 
 - `taskGrill: plan-aware`: a task stamped by the current planner revision skips
   task-grill when there are no open questions, blockers, or drift signals.
-- `verifier: auto`: low-risk, scoped maintenance/discovery/investigation tasks
-  can use passed checks as their verifier result; implementation and high-risk
-  work retain verifier review and adversarial votes where configured.
-- `postTaskReview: on-drift`: review the remaining plan only for changed
-  assumptions, verifier issues, high complexity, unscoped work, or overlapping
+- `verifier: auto`: after checks and scope enforcement, resolve one verification
+  decision from task complexity, meaningfully bounded declared scope, actual
+  changed paths, prior failures, architecture intent, human-gate paths, semantic
+  policy human gates, and operator overrides. Catch-all globs are not bounded. Bounded, low-complexity
+  documentation-only diffs can use passed checks as their verifier result,
+  regardless of task kind. Normal changes receive one verifier; high-risk work
+  receives adversarial verification.
+- Changed assumptions invalidate the current planner revision immediately and
+  trigger the shared budgeted/convergence-guarded replan transition before an
+  executor can start, including when no remaining tasks exist.
+- `postTaskReview: on-drift`: review the remaining plan only for verifier
+  issues, high complexity, unscoped work, or overlapping
   scopes. Bundle it with verifier only when deterministic evidence already
   admits it; otherwise keep verifier single-purpose.
 - `retryTaskGrill: on-drift`: check failures retry directly; failures from
@@ -32,6 +39,10 @@ Use policy-driven phase admission with these defaults:
 
 Every admission decision emits `phase_admitted` or `phase_skipped` with a
 reason. Planner ambiguity emits `goal_intake_needs_human` before execution.
+Task kind, complexity, and verification risk remain separate: `implementation`
+describes work nature and does not automatically raise complexity or risk.
+The final verification decision is the sole source for execution and telemetry,
+so policy-forced verification cannot report zero votes while running one.
 
 ## Consequences
 

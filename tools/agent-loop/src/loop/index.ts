@@ -23,10 +23,10 @@ import {
   type VerifierResult,
 } from "../state/index.js";
 import { appendEvent } from "../events/index.js";
-import { safeSlug, createWorktree, worktreeExists, removeWorktree, git as gitTool, GitError } from "../tools/index.js";
+import { safeSlug, createWorktree, worktreeExists, removeWorktree, git as gitTool, GitError, CheckoutMutationError, withUnchangedCheckout } from "../tools/index.js";
 import { invokeAgent, invokeAgentWithLog, getTaskChecks, type AgentConfig, type AgentInvocationResult } from "../agent/index.js";
 import { invokeChecks, parseMetricLines } from "../checks/index.js";
-import { getTaskScope, getOutOfScopeFiles, testTaskIsHighRisk, isTaskUnscoped, resolveTaskComplexity } from "../scope/index.js";
+import { getTaskScope, getOutOfScopeFiles, isTaskUnscoped, resolveTaskComplexity, testPathInScope, testPathsAreDocumentation } from "../scope/index.js";
 import {
   syncCodeGraph,
   writeCodeGraphContext,
@@ -50,7 +50,7 @@ import {
   writeFailureAnalysis,
   type PromptBudget,
 } from "../prompts/index.js";
-import { loadPolicy, type WorkflowPolicy } from "../policy/index.js";
+import { loadPolicy, resolvePlannerMode, type WorkflowPolicy } from "../policy/index.js";
 import { runShellScript } from "../tools/shell.js";
 import {
   shouldRunFinalizeDocs,
@@ -68,6 +68,8 @@ export interface LoopConfig {
   agent: AgentConfig;
   /** High-effort planning phases: initial planner, replan, architect checkpoint, goal review. Falls back to agent. */
   plannerAgent?: AgentConfig;
+  /** Planner admission: auto uses planner-lite only for conservative low-risk goals. */
+  plannerMode?: "auto" | "lite" | "full";
   /** Per-task critical-thinking phases: task-grill, decision-grill, post-task review. Falls back to agent. */
   grillAgent?: AgentConfig;
   /** Executor phase: the agent that edits files. Falls back to agent. */
@@ -152,6 +154,9 @@ export function emitTokenUsage(cfg: Required<LoopConfig>, invocation: AgentInvoc
     startedAt: invocation.startedAt,
     finishedAt: invocation.finishedAt,
     durationMs: invocation.durationMs,
+    assistantTurns: invocation.assistantTurns,
+    toolCalls: invocation.toolCalls,
+    logBytes: invocation.logBytes,
   }, cfg.runsRoot, cfg.stateFile);
   const usage = invocation.usage;
   if (!usage) return;
@@ -231,6 +236,26 @@ function isArtifactOnlyTask(task: Task): boolean {
   return workflow === "zoom-out" || kind === "discovery" || kind === "investigation";
 }
 
+function choosePlannerMode(
+  cfg: Required<LoopConfig>,
+  state: AgenticState,
+  priorFailureAnalysisFile: string
+): { mode: "full" | "lite"; reason: string } {
+  if (cfg.plannerMode === "full") return { mode: "full", reason: "configured full planner" };
+  if (cfg.plannerMode === "lite") return { mode: "lite", reason: "configured planner-lite" };
+  if (priorFailureAnalysisFile) return { mode: "full", reason: "replan after failure requires full planner context" };
+  if ((state.planRevision ?? 0) > 0) return { mode: "full", reason: "non-initial planning revision requires full planner context" };
+
+  const goal = (state.goal ?? "").trim();
+  const lowRiskGoal = goal.length <= 240
+    && /\b(add|update|change|edit|document|docs?|wording|sentence|readme|markdown)\b/i.test(goal)
+    && /(?:^|\s|[`"'(])(?:[\w./-]+\.md|docs?\/)[\w./-]*/i.test(goal)
+    && !/\b(api|architecture|auth|billing|database|delete|dependency|migration|package|permission|public|refactor|schema|security|service|transport|worktree)\b/i.test(goal);
+  return lowRiskGoal
+    ? { mode: "lite", reason: "short documentation/maintenance goal with no elevated-risk terms" }
+    : { mode: "full", reason: "goal does not meet conservative planner-lite admission" };
+}
+
 function writeChecksLog(logPath: string, content: string): void {
   mkdirSync(dirname(logPath), { recursive: true });
   writeFileSync(logPath, content, "utf-8");
@@ -249,7 +274,7 @@ function appendPhaseAdmission(
   }, cfg.runsRoot, cfg.stateFile);
 }
 
-function changedPathsSince(worktreePath: string, baseRef: string): string[] {
+function changedPathsSince(worktreePath: string, baseRef: string, ignoredPaths: string[] = []): string[] {
   const names = new Set<string>();
   const collect = (args: string[]): void => {
     try {
@@ -259,7 +284,8 @@ function changedPathsSince(worktreePath: string, baseRef: string): string[] {
   };
   if (baseRef) collect(["diff", "--name-only", `${baseRef}..HEAD`]);
   collect(baseRef ? ["diff", "--name-only", baseRef] : ["diff", "--name-only", "HEAD"]);
-  return [...names].sort();
+  const effectiveIgnores = expandIgnoredPaths(ignoredPaths);
+  return [...names].filter((path) => !testPathInScope(path, effectiveIgnores)).sort();
 }
 
 // After all tasks pass: apply run worktree changes to main tree.
@@ -305,9 +331,62 @@ function appendProgress(runsRoot: string, taskId: string, summary: string, hando
   appendFileSync(progressFile, `\n## ${new Date().toISOString()} ${taskId}\n- Verdict: pass\n- Summary: ${summary}\n- Handover: ${handoverFile}\n`, "utf-8");
 }
 
-function resolveVerifierVotes(task: Task, policy: WorkflowPolicy, forcedVotes = 0): number {
-  if (forcedVotes > 0) return forcedVotes;
-  return testTaskIsHighRisk(task as any, policy) ? 3 : 1;
+function handleMainWorktreeMutation(
+  cfg: Required<LoopConfig>,
+  taskId: string,
+  mutation: CheckoutMutationError,
+  runDir: string,
+  worktreePath: string,
+  attempt: number,
+  failureAnalysisFile: string,
+  stateAfter: string,
+  verifierResult: string
+): void {
+  const mutationFile = join(runDir, "parent-worktree-mutation.txt");
+  writeFileSync(mutationFile, [
+    "The parent checkout changed while the executor was running.",
+    "The harness stopped before checks, commit, apply, or merge.",
+    "",
+    "Status before executor:",
+    mutation.before.status || "clean",
+    "",
+    "Status after executor:",
+    mutation.after.status || "clean",
+    "",
+    `Fingerprint before: ${mutation.before.fingerprint}`,
+    `Fingerprint after: ${mutation.after.fingerprint}`,
+    `Untracked before: ${mutation.before.untrackedPaths.join(", ") || "none"}`,
+    `Untracked after: ${mutation.after.untrackedPaths.join(", ") || "none"}`,
+    ...(mutation.actionError ? ["", `Executor also failed: ${mutation.actionError instanceof Error ? mutation.actionError.message : String(mutation.actionError)}`] : []),
+  ].join("\n"), "utf-8");
+  appendEvent(cfg.repoRoot, "parent_worktree_mutated", {
+    task: taskId,
+    runDir,
+    worktree: worktreePath,
+    mutationFile,
+    before: mutation.before.status || "clean",
+    after: mutation.after.status || "clean",
+    executorFailed: mutation.actionError !== undefined,
+  }, cfg.runsRoot, cfg.stateFile);
+  writeFailureAnalysis({
+    taskId,
+    phase: "executor_isolation",
+    attempt,
+    rawOutput: `Parent checkout changed during executor phase. Inspect ${mutationFile}.`,
+    worktreePath,
+    outputFile: failureAnalysisFile,
+  });
+  setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", {
+    at: new Date().toISOString(),
+    phase: "executor_isolation",
+    reason: `Parent checkout changed during executor phase. Inspect ${mutationFile}.`,
+    resultFile: verifierResult,
+    failureAnalysisFile,
+  });
+  writeChecksLog(join(runDir, "checks.log"), "Checks not run because executor mutated the parent checkout.");
+  writeDiffArtifacts(worktreePath, runDir, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
+  copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+  throw new LoopError(`Executor isolation failed for ${taskId}: parent checkout changed. Worktree retained at ${worktreePath}.`, 1);
 }
 
 // Run the planner phase: build context, invoke planner agent, validate + merge result.
@@ -331,7 +410,13 @@ async function runPlannerPhase(
 
   const state = loadState(cfg.repoRoot, cfg.stateFile)!;
 
-  writeCodeGraphContext(codeGraphFile, cfg.repoRoot);
+  const plannerMode = choosePlannerMode(cfg, state, priorFailureAnalysisFile);
+  appendEvent(cfg.repoRoot, "planner_mode_selected", {
+    mode: plannerMode.mode,
+    reason: plannerMode.reason,
+  }, cfg.runsRoot, cfg.stateFile);
+
+  if (plannerMode.mode === "full") writeCodeGraphContext(codeGraphFile, cfg.repoRoot);
   writeRepoContext(repoContextFile, {
     repoRoot: cfg.repoRoot,
     stateGoal: state.goal ?? "",
@@ -349,6 +434,7 @@ async function runPlannerPhase(
     repoContextFile,
     grillTranscriptFile: grillFile,
     codeGraphFile,
+    mode: plannerMode.mode,
     priorFailureAnalysisFile,
   });
 
@@ -482,7 +568,7 @@ async function runFinalizeDocsIfNeeded(
   runWorktreePath: string,
   loopBaseRef: string
 ): Promise<void> {
-  const changedPaths = changedPathsSince(runWorktreePath, loopBaseRef);
+  const changedPaths = changedPathsSince(runWorktreePath, loopBaseRef, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
   const decision = shouldRunFinalizeDocs(changedPaths, policy, cfg.finalizeDocs);
   appendPhaseAdmission(cfg, "finalize-docs", decision);
   if (!decision.run) {
@@ -592,6 +678,47 @@ async function runPlannerWithConvergenceGuard(
   }
 }
 
+async function invalidatePlanAndReplan(args: {
+  cfg: Required<LoopConfig>;
+  policy: WorkflowPolicy;
+  agentCallCounter: { count: number };
+  sessionReplanCountRef: { count: number };
+  phase: string;
+  reason: string;
+  resultFile: string;
+  currentTaskId?: string;
+  blockRemaining?: boolean;
+  priorFailureAnalysisFile?: string;
+}): Promise<void> {
+  if (args.currentTaskId) {
+    setTaskStatus(args.cfg.repoRoot, args.cfg.stateFile, args.cfg.runsRoot, args.currentTaskId, "blocked", {
+      at: new Date().toISOString(),
+      phase: args.phase,
+      reason: args.reason,
+      resultFile: args.resultFile,
+    });
+    appendEvent(args.cfg.repoRoot, "task_replan_requested", {
+      task: args.currentTaskId,
+      phase: args.phase,
+      reason: args.reason,
+      resultFile: args.resultFile,
+      sessionReplanCount: args.sessionReplanCountRef.count,
+    }, args.cfg.runsRoot, args.cfg.stateFile);
+  }
+  if (args.blockRemaining) {
+    blockRemainingPlanForReplan(args.cfg, args.phase, args.reason, args.resultFile);
+  }
+  await runPlannerWithConvergenceGuard(
+    args.cfg,
+    args.policy,
+    args.agentCallCounter,
+    args.sessionReplanCountRef,
+    args.phase,
+    args.reason,
+    args.priorFailureAnalysisFile,
+  );
+}
+
 function blockRemainingPlanForReplan(
   cfg: Required<LoopConfig>,
   phase: string,
@@ -651,8 +778,13 @@ async function runArchitectCheckpointPhase(
   if (result.verdict === "replan") {
     console.log(`Architect checkpoint requested replan: ${result.assessment ?? ""}`);
     appendEvent(cfg.repoRoot, "architect_checkpoint_replan", { assessment: result.assessment, suggestedChanges: result.suggestedChanges }, cfg.runsRoot, cfg.stateFile);
-    blockRemainingPlanForReplan(cfg, "architect_checkpoint", result.assessment ?? "architect checkpoint requested replan", resultFile);
-    await runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, "architect_checkpoint", result.assessment ?? "architect checkpoint requested replan");
+    await invalidatePlanAndReplan({
+      cfg, policy, agentCallCounter, sessionReplanCountRef,
+      phase: "architect_checkpoint",
+      reason: result.assessment ?? "architect checkpoint requested replan",
+      resultFile,
+      blockRemaining: true,
+    });
     return;
   }
 
@@ -719,8 +851,13 @@ async function runPostTaskReviewPhase(
 
   if (result.verdict === "replan") {
     appendEvent(cfg.repoRoot, "post_task_review_replan", { task: taskId, verdict: result.verdict, assessment: result.assessment, suggestedChanges: result.suggestedChanges }, cfg.runsRoot, cfg.stateFile);
-    blockRemainingPlanForReplan(cfg, "post_task_review", result.assessment ?? "post-task review requested replan", resultFile);
-    await runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, "post_task_review", result.assessment ?? "post-task review requested replan");
+    await invalidatePlanAndReplan({
+      cfg, policy, agentCallCounter, sessionReplanCountRef,
+      phase: "post_task_review",
+      reason: result.assessment ?? "post-task review requested replan",
+      resultFile,
+      blockRemaining: true,
+    });
     return;
   }
 
@@ -861,6 +998,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     repoRoot:           config.repoRoot,
     agent:              config.agent,
     plannerAgent:       config.plannerAgent       ?? config.agent,
+    plannerMode:        resolvePlannerMode(policy, config.plannerMode),
     grillAgent:         config.grillAgent         ?? config.agent,
     executorAgent:      config.executorAgent      ?? config.agent,
     verifierAgent:      config.verifierAgent      ?? config.agent,
@@ -1060,11 +1198,15 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
             ...(taskGrillResultObj.risks ?? []),
           ].filter(Boolean).join("; ");
 
-          setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "blocked", { at: new Date().toISOString(), phase: "task_grill", reason, resultFile: taskGrillResult });
-          appendEvent(cfg.repoRoot, "task_replan_requested", { task: taskId, reason, resultFile: taskGrillResult, sessionReplanCount: sessionReplanCountRef.count }, cfg.runsRoot, cfg.stateFile);
-
           const replanTask = getTasks(loadState(cfg.repoRoot, cfg.stateFile)!).find((t) => t.id === taskId);
-          await runPlannerWithConvergenceGuard(cfg, policy, agentCallCounter, sessionReplanCountRef, "task_grill", reason, replanTask ? getLastFailureAnalysisFile(replanTask) : "");
+          await invalidatePlanAndReplan({
+            cfg, policy, agentCallCounter, sessionReplanCountRef,
+            phase: "task_grill",
+            reason,
+            resultFile: taskGrillResult,
+            currentTaskId: taskId,
+            priorFailureAnalysisFile: replanTask ? getLastFailureAnalysisFile(replanTask) : "",
+          });
 
           copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
           continue;
@@ -1087,6 +1229,20 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         taskGrillResultObj.assumptionsStillValid ?? [],
         taskGrillResultObj.assumptionsChanged ?? []
       );
+
+      if ((taskGrillResultObj.assumptionsChanged?.length ?? 0) > 0) {
+        const reason = `task-grill changed assumptions: ${taskGrillResultObj.assumptionsChanged!.join("; ")}`;
+        await invalidatePlanAndReplan({
+          cfg, policy, agentCallCounter, sessionReplanCountRef,
+          phase: "assumption_drift",
+          reason,
+          resultFile: taskGrillResult,
+          currentTaskId: taskId,
+          priorFailureAnalysisFile: getLastFailureAnalysisFile(task),
+        });
+        copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+        continue;
+      }
 
       // Decision grill remains bundled with task-grill for stale/manual tasks.
       if (cfg.decisionGrill && taskGrillDecision.run) {
@@ -1137,8 +1293,15 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       }
 
       // Executor
+      const declaredScope = getTaskScope(task as any);
+      const compactExecutor = complexity.level === "low"
+        && !isTaskUnscoped(task as any)
+        && (["maintenance", "discovery", "investigation"].includes(task.kind ?? "")
+          || testPathsAreDocumentation(declaredScope));
       writeExecutorPrompt(executorPrompt, {
         repoRoot: cfg.repoRoot,
+        worktreePath,
+        compact: compactExecutor,
         runsRoot: cfg.runsRoot,
         stateFile: cfg.stateFile,
         budget: cfg.budget,
@@ -1157,9 +1320,26 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       appendEvent(cfg.repoRoot, "executor_started", { task: taskId, prompt: executorPrompt, log: executorLog }, cfg.runsRoot, cfg.stateFile);
       try {
         agentCallCounter.count++;
-        emitTokenUsage(cfg, await invokeAgentWithLog(executorPrompt, cfg.executorAgent, worktreePath, executorLog, "executor"), taskId);
+        const invocation = await withUnchangedCheckout(cfg.repoRoot, () =>
+          invokeAgentWithLog(executorPrompt, cfg.executorAgent, worktreePath, executorLog, "executor")
+        , [cfg.stateFile, cfg.runsRoot, cfg.worktreeRoot]);
+        emitTokenUsage(cfg, invocation, taskId);
         appendEvent(cfg.repoRoot, "executor_passed", { task: taskId, log: executorLog }, cfg.runsRoot, cfg.stateFile);
       } catch (err) {
+        if (err instanceof CheckoutMutationError) {
+          handleMainWorktreeMutation(
+            cfg,
+            taskId,
+            err,
+            runDir,
+            worktreePath,
+            task.attempts ?? 1,
+            failureAnalysisFile,
+            stateAfter,
+            verifierResult,
+          );
+        }
+        if (err instanceof LoopError) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         appendEvent(cfg.repoRoot, "executor_failed", { task: taskId, reason: msg, log: executorLog }, cfg.runsRoot, cfg.stateFile);
         setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "executor", reason: msg, resultFile: verifierResult });
@@ -1254,10 +1434,19 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         }
       }
 
-      // Fast-verifier gate: automatic for low-risk scoped work, explicit flag
-      // remains supported as a compatibility override.
-      const verifierDecision = shouldRunVerifier(task, policy, cfg.fastVerifier);
+      // Resolve verification intensity from actual diff evidence after checks.
+      // Task kind describes the work; it does not determine risk by itself.
+      const changedPaths = changedPathsSince(worktreePath, "", harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
+      const verifierDecision = shouldRunVerifier(task, policy, cfg.fastVerifier, changedPaths, cfg.verifierVotes);
       appendPhaseAdmission(cfg, "verifier", verifierDecision, taskId);
+      appendEvent(cfg.repoRoot, "verification_profile_resolved", {
+        task: taskId,
+        risk: verifierDecision.risk,
+        verifierMode: verifierDecision.verifierMode,
+        votes: verifierDecision.votes,
+        reasons: verifierDecision.reasons,
+        evidence: verifierDecision.evidence,
+      }, cfg.runsRoot, cfg.stateFile);
       if (cfg.fastVerifier && verifierDecision.run) {
         appendEvent(cfg.repoRoot, "verifier_skip_denied", { task: taskId, reason: verifierDecision.reason }, cfg.runsRoot, cfg.stateFile);
         console.log(`fast-verifier denied for ${taskId}; running full verifier: ${verifierDecision.reason}`);
@@ -1274,7 +1463,6 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         remainingTasks: remainingBeforeVerify,
         policy,
         enabled: cfg.postTaskReview,
-        assumptionsChanged: taskGrillResultObj.assumptionsChanged,
       });
 
       let verifierResultObj: VerifierResult;
@@ -1284,7 +1472,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         writeFileSync(verifierLog, "fast-verifier: skipped separate verifier after checks passed.", "utf-8");
         appendEvent(cfg.repoRoot, "verifier_skipped", { task: taskId, resultFile: verifierResult, log: verifierLog, reason: "fast-verifier" }, cfg.runsRoot, cfg.stateFile);
       } else {
-        const votes = resolveVerifierVotes(task, policy, cfg.verifierVotes);
+        const votes = verifierDecision.votes;
         const adversarial = votes > 1;
 
         if (votes <= 1) {
@@ -1408,7 +1596,6 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
             remainingTasks: remainingRunnable,
             policy,
             enabled: cfg.postTaskReview,
-            assumptionsChanged: taskGrillResultObj.assumptionsChanged,
             verifierResult: verifierResultObj,
           });
           appendPhaseAdmission(cfg, "post-task-review", reviewDecision, taskId);
