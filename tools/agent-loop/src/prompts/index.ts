@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { execFileSync } from "child_process";
 import { homedir } from "os";
@@ -10,7 +10,7 @@ import { git as gitTool } from "../tools/index.js";
 // Resolve a skill's SKILL.md path from the installed skills directories.
 // Checks ~/.claude/skills, ~/.codex/skills, and the repo's own skills/ folder.
 // Returns the path if found, or a fallback stub string if not.
-export function resolveSkillFile(skillName: string, repoRoot: string): { path: string; found: boolean } {
+function resolveSkillFile(skillName: string, repoRoot: string): { path: string; found: boolean } {
   const candidates = [
     join(homedir(), ".claude", "skills", skillName, "SKILL.md"),
     join(homedir(), ".codex", "skills", skillName, "SKILL.md"),
@@ -26,15 +26,15 @@ export function resolveSkillFile(skillName: string, repoRoot: string): { path: s
 
 // Returns an instruction block pointing at the skill file, with a fallback
 // summary when the file is not installed.
-export function skillInstruction(skillName: string, repoRoot: string, fallbackSummary: string): string {
+function skillInstruction(skillName: string, repoRoot: string, fallbackSummary: string): string {
   const { path, found } = resolveSkillFile(skillName, repoRoot);
   if (found) return `Read and follow the canonical skill at: ${path}`;
   return `Skill file for '${skillName}' was not found. Follow this summary instead:\n${fallbackSummary}`;
 }
 
-export type PromptBudget = "low" | "medium" | "high";
+type PromptBudget = "low" | "medium" | "high";
 
-export interface BudgetLimits {
+interface BudgetLimits {
   checkBytes: number;
   diffBytes: number;
   eventLimit: number;
@@ -44,7 +44,7 @@ const BUDGET_LOW:    BudgetLimits = { checkBytes:  6_000, diffBytes:  12_000, ev
 const BUDGET_MEDIUM: BudgetLimits = { checkBytes: 12_000, diffBytes:  20_000, eventLimit: 12 };
 const BUDGET_HIGH:   BudgetLimits = { checkBytes: 50_000, diffBytes: 100_000, eventLimit: 20 };
 
-export function getPromptBudgetLimits(budget: PromptBudget): BudgetLimits {
+function getPromptBudgetLimits(budget: PromptBudget): BudgetLimits {
   switch (budget) {
     case "low":  return BUDGET_LOW;
     case "high": return BUDGET_HIGH;
@@ -52,7 +52,7 @@ export function getPromptBudgetLimits(budget: PromptBudget): BudgetLimits {
   }
 }
 
-export function limitTextForPrompt(text: string, maxBytes: number, tailLines = 80): string {
+function limitTextForPrompt(text: string, maxBytes: number, tailLines = 80): string {
   if (!text) return "";
   const bytes = Buffer.byteLength(text, "utf-8");
   if (bytes <= maxBytes) return text;
@@ -68,7 +68,7 @@ export function limitTextForPrompt(text: string, maxBytes: number, tailLines = 8
 // Extract only markdown heading lines (# / ## / ###) from a file to give the model
 // a compact outline of what a doc contains, without inlining the full body.
 // The model can `read` the file itself if it needs the detail.
-export function outlineHeadings(filePath: string, maxBytes = 600): string {
+function outlineHeadings(filePath: string, maxBytes = 600): string {
   let text: string;
   try {
     text = readFileSync(filePath, "utf-8");
@@ -86,20 +86,7 @@ export function outlineHeadings(filePath: string, maxBytes = 600): string {
   return out || "(no headings)";
 }
 
-// Phase-aware recent-history event counts. Live state is a time series; only the
-// tail matters, and different phases need different depth.
-export function phaseEventLimit(baseLimit: number, phase: "planner" | "executor" | "task_grill" | "verifier" | "review" | "default"): number {
-  switch (phase) {
-    case "planner":  return Math.min(baseLimit, 4);
-    case "verifier": return Math.min(baseLimit, 4);
-    case "review":   return Math.min(baseLimit, 6);
-    case "executor": return Math.min(baseLimit, 6);
-    case "task_grill": return Math.min(baseLimit, 6);
-    default:         return baseLimit;
-  }
-}
-
-export function getRecentHistoryText(
+function getRecentHistoryText(
   repoRoot: string,
   runsRoot: string,
   limit: number,
@@ -117,8 +104,8 @@ export function getRecentHistoryText(
 // acceptedAt, lastRunDir, status, approvedStanceFile). Attempt count remains
 // visible to executors so retry-aware work can make progress without another
 // discovery session.
-export type TaskPhase = "executor" | "task_grill" | "decision_grill" | "stance" | "verifier";
-export function projectTaskForPhase(task: Task, phase: TaskPhase): Record<string, unknown> {
+type TaskPhase = "executor" | "stance" | "verifier";
+function projectTaskForPhase(task: Task, phase: TaskPhase): Record<string, unknown> {
   const base = {
     id: task.id,
     title: task.title,
@@ -133,16 +120,12 @@ export function projectTaskForPhase(task: Task, phase: TaskPhase): Record<string
     complexityReasons: task.complexityReasons,
     ...(phase === "executor" && typeof task.attempts === "number" ? { attempts: task.attempts } : {}),
   };
-  // task-grill / decision-grill reason about proof targets (artifacts).
-  if (phase === "task_grill" || phase === "decision_grill") {
-    return { ...base, artifacts: task.artifacts };
-  }
   return base;
 }
 
 // Item 2: project WorkflowPolicy to only what a phase needs, instead of
 // stringifying the full policy object (which is invariant across tasks).
-export function projectPolicyForTask(policy: WorkflowPolicy, workflow: string | undefined): Record<string, unknown> {
+function projectPolicyForTask(policy: WorkflowPolicy, workflow: string | undefined): Record<string, unknown> {
   const selected = workflow && policy.workflows?.[workflow]
     ? { [workflow]: policy.workflows[workflow] }
     : {};
@@ -159,7 +142,7 @@ export function projectPolicyForTask(policy: WorkflowPolicy, workflow: string | 
 // instead of a raw JSONL tail full of lifecycle noise. Falls back to the
 // full recent tail only at budget "high".
 const DISTILL_EVENT_TYPES = /failed|failure|needs_human|task_status|verifier|task_grill_finished|stance_reflection_finished|assumption|decision/;
-export function getDistilledHistoryText(
+function getDistilledHistoryText(
   repoRoot: string,
   runsRoot: string,
   phase: TaskPhase | "planner" | "review" | "default",
@@ -178,7 +161,7 @@ export function getDistilledHistoryText(
   return tail.map(formatEventLine).join("\n");
 }
 
-export function getOperatorContextBlock(state: AgenticState | undefined): string[] {
+function getOperatorContextBlock(state: AgenticState | undefined): string[] {
   const files = state?.contextFiles ?? [];
   if (files.length === 0) return [];
   return [
@@ -190,7 +173,7 @@ export function getOperatorContextBlock(state: AgenticState | undefined): string
 }
 
 // Write a prompt file, creating parent dirs, and append a prompt_written event.
-export function writePromptWithEvent(
+function writePromptWithEvent(
   promptFile: string,
   content: string,
   kind: string,
@@ -286,7 +269,7 @@ export function writeCodeGraphContext(outputFile: string, workingDirectory = "."
   writeFileSync(outputFile, stub, "utf-8");
 }
 
-export interface RepoContextOptions {
+interface RepoContextOptions {
   repoRoot: string;
   stateGoal: string;
   checks: string[];
@@ -356,7 +339,7 @@ export function writeRepoContext(contextFile: string, opts: RepoContextOptions):
   writeFileSync(contextFile, content, "utf-8");
 }
 
-export interface PlannerPromptOptions {
+interface PlannerPromptOptions {
   repoRoot: string;
   runsRoot: string;
   stateFile: string;
@@ -452,7 +435,7 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "Allowed task kinds: discovery, investigation, implementation, architecture, maintenance, handoff.",
     "Each task must have: id, title, kind, workflow, status, priority, acceptanceCriteria, validation, dependsOn, failureHistory, artifacts, scope, complexity, complexityReasons.",
     "Use one workflow per task. Use dependencies for workflow sequences. Use only canonical workflows from the policy.",
-    "Plan around verification seams, not file boundaries. Every task incurs task-grill, decision-grill, executor, verifier, and post-task review cost, so each task must buy meaningful independent proof.",
+    "Plan around verification seams, not file boundaries. Every task incurs execution and deterministic-check cost, and may incur stance or independent-verifier cost, so each task must buy meaningful independent proof.",
     "Split a task only when at least one is true: it has a different risk profile, a different acceptance proof, different scope/ownership, independent rollback value, or creates a dependency required by later work.",
     "Do not create one task per helper, file move, module extraction, or similarly mechanical edit when those edits share one risk profile and one validation command. Group them into the smallest coherent verification slice.",
     "Keep tasks independently verifiable, but reject orchestration-heavy plans where repeated validation is identical and task boundaries add no new proof.",
@@ -500,7 +483,7 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
   });
 }
 
-export function getWorkflowBlock(workflow: string, policy: WorkflowPolicy, repoRoot?: string): string {
+function getWorkflowBlock(workflow: string, policy: WorkflowPolicy, repoRoot?: string): string {
   const skillRef = repoRoot
     ? skillInstruction(workflow, repoRoot, `Follow the ${workflow} workflow. Read and follow its canonical SKILL.md.`)
     : `Required workflow: use ${workflow}. Read and follow the canonical SKILL.md for this workflow.`;
@@ -522,7 +505,7 @@ export function getWorkflowBlock(workflow: string, policy: WorkflowPolicy, repoR
   return skillRef;
 }
 
-export interface ExecutorPromptOptions {
+interface ExecutorPromptOptions {
   repoRoot: string;
   worktreePath: string;
   compact?: boolean;
@@ -536,16 +519,13 @@ export interface ExecutorPromptOptions {
   eventLogPath: string;
   codeGraphFile?: string;
   policy: WorkflowPolicy;
-  taskGrillResult?: unknown;
-  decisionGrillDecisions?: Record<string, unknown>[];
   approvedStance?: unknown;
 }
 
 export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOptions): void {
   const {
     repoRoot, worktreePath, compact = false, runsRoot, stateFile, budget, state, task, iteration, runDir,
-    eventLogPath: evLogPath, codeGraphFile = "", policy, taskGrillResult,
-    decisionGrillDecisions = [], approvedStance,
+    eventLogPath: evLogPath, codeGraphFile = "", policy, approvedStance,
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
@@ -580,16 +560,6 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     "- Use `pwsh -File` in harness and smoke-test command examples. Mention `powershell.exe` only as a legacy Windows PowerShell compatibility fallback when explicitly needed.",
     "- If the task JSON has a non-empty `scope`, change only files matching those globs. The harness enforces this as a hard pre-verifier rail: files changed outside scope fail the task. If you must touch a file outside scope, stop and record it in the handover instead of editing it.",
     "",
-    ...(decisionGrillDecisions.length > 0 ? [
-      "Binding decisions — the decision grill resolved these before you run. Treat each as a hard rule:",
-      ...decisionGrillDecisions.map((d) => {
-        const chosen = String(d["chosen"] ?? "").trim();
-        const why = String(d["whyItMatters"] ?? "").trim();
-        const q = String(d["question"] ?? "").trim();
-        return `- ${q}: ${chosen}${why ? ` (${why})` : ""}`;
-      }),
-      "",
-    ] : []),
     ...(approvedStance ? [
       "Approved implementation stance — treat this as the current technical approach:",
       JSON.stringify(approvedStance, null, 2),
@@ -612,9 +582,6 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     "",
     getWorkflowBlock(workflow, policy, repoRoot),
     "",
-    "Task-grill result for this turn:",
-    taskGrillResult ? JSON.stringify(taskGrillResult, null, 2) : "No task-grill result was provided.",
-    "",
     "Task JSON:",
     taskJson,
   ].join("\n");
@@ -625,12 +592,11 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
   });
 }
 
-export interface StanceReflectionPromptOptions {
+interface StanceReflectionPromptOptions {
   repoRoot: string;
   task: Task;
   resultFile: string;
   codeGraphFile?: string;
-  decisionGrillDecisions?: Record<string, unknown>[];
 }
 
 export function writeStanceReflectionPrompt(promptFile: string, opts: StanceReflectionPromptOptions): void {
@@ -652,147 +618,12 @@ export function writeStanceReflectionPrompt(promptFile: string, opts: StanceRefl
     'Schema: { "mode":"stance", "verdict":"reconfirm|readjust|reassess|needs_human", "summary":"...", "evidence":[], "assumptions_challenged":[], "perspectives_considered":[], "recommended_changes":[], "unresolved_risks":[], "next_action":"...", "selfChallengeRounds":[{"pass":"reassess|readjust|reconfirm","note":"..."}], "stance": { "owningModule":"...", "boundaries":[], "sequence":[], "expectedEdits":[], "validation":[], "assumptions":[], "rejectedAlternatives":[] } }',
     "A bare approval is invalid. The summary must explain what was challenged across all three passes and why the final stance survived, or how it changed.",
     "Task:", JSON.stringify(projectTaskForPhase(opts.task, "stance"), null, 2),
-    "Resolved decisions:", JSON.stringify(opts.decisionGrillDecisions ?? [], null, 2),
   ].join("\n");
   mkdirSync(dirname(promptFile), { recursive: true });
   writeFileSync(promptFile, content, "utf-8");
 }
 
-export interface TaskGrillPromptOptions {
-  repoRoot: string;
-  runsRoot: string;
-  stateFile: string;
-  budget: PromptBudget;
-  state?: AgenticState;
-  task: Task;
-  iteration: number;
-  runDir: string;
-  resultFile: string;
-  eventLogPath: string;
-  codeGraphFile?: string;
-  policy: WorkflowPolicy;
-  /** Path to failure-analysis.json from the most recent failed attempt, if any. */
-  priorFailureAnalysisFile?: string;
-  suppressEvent?: boolean;
-}
-
-export function writeTaskGrillPrompt(promptFile: string, opts: TaskGrillPromptOptions): void {
-  const {
-    repoRoot, runsRoot, stateFile, budget, task, iteration, runDir,
-    resultFile, eventLogPath: evLogPath, codeGraphFile = "", policy,
-    priorFailureAnalysisFile = "",
-  } = opts;
-
-  const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getDistilledHistoryText(repoRoot, runsRoot, "task_grill", budget);
-  const taskJson = JSON.stringify(projectTaskForPhase(task, "task_grill"), null, 2);
-
-  const priorFailureBlock = (() => {
-    if (!priorFailureAnalysisFile || !existsSync(priorFailureAnalysisFile)) return "";
-    try {
-      const fa = JSON.parse(readFileSync(priorFailureAnalysisFile, "utf-8"));
-      return [
-        "",
-        "Prior attempt failure analysis (read carefully before deciding verdict):",
-        `- Phase that failed: ${fa.phase ?? "unknown"}`,
-        `- Attempt number: ${fa.attempt ?? "unknown"}`,
-        `- Failed at: ${fa.failedAt ?? "unknown"}`,
-        `- Diff stat at failure:\n${fa.diffStat || "(none)"}`,
-        `- Failure reason (truncated):\n${fa.reason || "(none)"}`,
-      ].join("\n");
-    } catch {
-      return "";
-    }
-  })();
-
-  const content = [
-    "You are the task-grill reviewer for one autonomous agentic loop turn.",
-    "",
-    "Your job is the same as grill-with-docs — but you play BOTH roles: ask the hard questions, then answer them yourself from repo evidence before the executor touches anything.",
-    "",
-    `Iteration: ${iteration}`,
-    `Run directory: ${runDir}`,
-    `CodeGraph context: ${codeGraphFile}`,
-    "",
-    "Read AGENTS.md / CLAUDE.md, PROJECT.md, CONTEXT.md, relevant source files, tests, and recent harness history. Do not edit files.",
-    "",
-    "Conduct a thorough self-interview. For each question below, inspect actual repo evidence before answering — do not assume or rubber-stamp:",
-    "",
-    "UNDERSTANDING",
-    "- What exactly does this task ask for? Restate it in your own words from the acceptance criteria.",
-    "- Which files, functions, or modules are directly involved? (inspect them)",
-    "- Are there callers, dependents, or integration points that the executor must not break?",
-    "",
-    "DOMAIN & PRODUCT",
-    "- Is the domain language in the task consistent with CONTEXT.md and existing code? Any terminology mismatch?",
-    "- Does the acceptance criteria match what the user actually wants, or could it be misread?",
-    "",
-    "DESIGN DECISIONS",
-    "- Does this task force any real design/architecture choice? If yes, what are the 2-4 genuine options and which does the evidence support?",
-    "- Is there an existing pattern in the codebase the executor should follow rather than invent?",
-    "",
-    "ASSUMPTIONS & RISKS",
-    "- Which planner assumptions are stale, unproven, or contradict what you see in the repo right now?",
-    "- What is the most likely way the executor will get this wrong? (scope creep, wrong abstraction, missed edge case)",
-    "- Are there any safety, security, or data-integrity concerns the executor must not ignore?",
-    "",
-    "SCOPE & VALIDATION",
-    "- Is the declared scope tight enough? Are there files missing from scope that will definitely change?",
-    "- What specific command or artifact will prove the task is done? For discovery/investigation/zoom-out tasks, artifact proof is acceptable; for implementation/architecture tasks, use focused validation commands when practical. Is the proof represented in task.validation or artifacts?",
-    "- Are there edge cases the acceptance criteria do not cover that could cause a verifier fail?",
-    "",
-    "VERDICT",
-    "- Should this task proceed as-is, or does it need replanning, human input, or is it blocked?",
-    "",
-    `Write task-grill JSON only to: ${resultFile}`,
-    "",
-    "Allowed verdicts: ready, needs_replan, needs_human, blocked.",
-    "Schema:",
-    JSON.stringify({
-      verdict: "ready|needs_replan|needs_human|blocked",
-      understanding: "...",
-      evidence: ["path or command inspected"],
-      assumptionsStillValid: [],
-      assumptionsChanged: [],
-      scopeDecision: {
-        declaredScopeOk: true,
-        requestedScopeChanges: [],
-      },
-      acceptanceProof: ["command or artifact expected"],
-      risks: [],
-      executorInstructions: "Concrete instructions for the executor on this turn.",
-    }, null, 2),
-    "",
-    "If verdict is not ready, explain why in risks or assumptionsChanged. The harness will stop before executor edits.",
-    "If a prior failure was environmental or scope-related, inspect current repo/worktree state before blocking. Do not treat a stale failure as active when current evidence shows bootstrap, env, or scope conditions have changed.",
-    priorFailureBlock,
-    "",
-    ...getOperatorContextBlock(opts.state),
-    `Recent harness history (verdicts, failures, assumption changes; source of truth is ${evLogPath}):`,
-    recentHistory,
-    "",
-    "Current planner assumptions (tag [valid]/[changed] from prior grill turns):",
-    (opts.state?.assumptions?.length ? opts.state.assumptions.join("\n") : "(none recorded yet)"),
-    "",
-    "Workflow policy (projected to this task):",
-    JSON.stringify(projectPolicyForTask(policy, task.workflow), null, 2),
-    "",
-    "Task JSON:",
-    taskJson,
-  ].join("\n");
-
-  if (opts.suppressEvent) {
-    mkdirSync(dirname(promptFile), { recursive: true });
-    writeFileSync(promptFile, content, "utf-8");
-  } else writePromptWithEvent(promptFile, content, "task_grill", repoRoot, runsRoot, stateFile, budget, {
-    task: task.id,
-    resultFile,
-    codegraph: codeGraphFile,
-    priorFailureAnalysis: priorFailureAnalysisFile || undefined,
-  });
-}
-
-export interface VerifierPromptOptions {
+interface VerifierPromptOptions {
   repoRoot: string;
   runsRoot: string;
   stateFile: string;
@@ -882,7 +713,7 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
   });
 }
 
-export interface FailureAnalysis {
+interface FailureAnalysis {
   taskId: string;
   phase: string;
   attempt: number;
@@ -891,7 +722,7 @@ export interface FailureAnalysis {
   diffStat: string;
 }
 
-export interface WriteFailureAnalysisOptions {
+interface WriteFailureAnalysisOptions {
   taskId: string;
   phase: string;
   attempt: number;
@@ -902,7 +733,7 @@ export interface WriteFailureAnalysisOptions {
 
 // Write a structured failure-analysis.json to the run dir at every failure point.
 // Harness-written (no agent call): captures phase, truncated output, diff stat, attempt.
-// Consumed by task-grill and planner prompts to break blind-retry loops.
+// Consumed by planner prompts to break blind-retry loops.
 export function writeFailureAnalysis(opts: WriteFailureAnalysisOptions): FailureAnalysis {
   const { taskId, phase, attempt, rawOutput, worktreePath, outputFile } = opts;
   const diffStat = git(["diff", "--stat", "HEAD"], worktreePath);
@@ -920,13 +751,13 @@ export function writeFailureAnalysis(opts: WriteFailureAnalysisOptions): Failure
   return analysis;
 }
 
-export interface DecisionOption {
+interface DecisionOption {
   label: string;
   evidence: string;
   recommended: boolean;
 }
 
-export interface DecisionRecord {
+interface DecisionRecord {
   question: string;
   whyItMatters: string;
   optionsConsidered: DecisionOption[];
@@ -980,453 +811,9 @@ export function validateDecisions(records: unknown): string[] {
   return errors;
 }
 
-// Render one validated decision record as the flat string stored in state.decisions,
-// mirroring the assumption-ledger tagging style so the ledger stays string[].
-export function formatDecisionRecord(d: DecisionRecord, taskId: string): string {
-  const opts = d.optionsConsidered
-    .map((o) => `${o.recommended ? "*" : "-"} ${o.label} (${o.evidence})`)
-    .join(" | ");
-  return `[${taskId}] Q: ${d.question} | why: ${d.whyItMatters} | options: ${opts} | chose: ${d.chosen} | self-answer: ${d.selfAnswer} | confidence: ${d.confidence}`;
-}
-
-export interface DecisionGrillPromptOptions {
+interface FinalizeDocsPromptOptions {
   repoRoot: string;
-  runsRoot: string;
-  stateFile: string;
-  budget: PromptBudget;
-  state: AgenticState;
-  task: Task;
-  iteration: number;
-  runDir: string;
-  resultFile: string;
-  eventLogPath: string;
-  codeGraphFile?: string;
-  /** When re-grilling after a shallow/low-confidence pass, the errors/reasons to fix. */
-  priorShallowFeedback?: string;
-}
-
-export function writeDecisionGrillPrompt(promptFile: string, opts: DecisionGrillPromptOptions): void {
-  const {
-    repoRoot, runsRoot, stateFile, budget, state, task, iteration, runDir,
-    resultFile, eventLogPath: evLogPath, codeGraphFile = "", priorShallowFeedback = "",
-  } = opts;
-
-  const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getDistilledHistoryText(repoRoot, runsRoot, "decision_grill", budget);
-  const taskJson = JSON.stringify(projectTaskForPhase(task, "decision_grill"), null, 2);
-
-  const reGrillBlock = priorShallowFeedback
-    ? [
-        "",
-        "RE-GRILL: your previous decision pass was rejected as too shallow or low-confidence.",
-        "Gather more concrete evidence from the repo before answering. Fix exactly these problems:",
-        priorShallowFeedback,
-        "If, after genuinely inspecting more evidence, you still cannot answer with at least medium confidence, set escalate=true for that decision.",
-        "",
-      ].join("\n")
-    : "";
-
-  const grillSkill = skillInstruction("grill-with-docs", repoRoot,
-    "Ask the hard question, then answer it yourself from repo evidence. Weigh 2-4 real alternatives with concrete evidence. Pick one and justify. Do not rubber-stamp. Only escalate when evidence genuinely cannot settle the question."
-  );
-
-  const content = [
-    "You are running a grill-with-docs self-interview for one autonomous loop turn.",
-    "",
-    "Before the executor edits, surface every genuine design/product/architecture decision this task forces. Play BOTH sides:",
-    grillSkill,
-    "",
-    "Read AGENTS.md / CLAUDE.md, PROJECT.md, relevant source, and recent history. Do not edit files.",
-    reGrillBlock,
-    `Iteration: ${iteration}`,
-    `Run directory: ${runDir}`,
-    `CodeGraph context: ${codeGraphFile}`,
-    "",
-    `Write decision JSON only to: ${resultFile}`,
-    "",
-    "Contract (the harness enforces this — shallow decisions are rejected):",
-    "- Each decision needs 2-4 real options, each with concrete evidence you actually inspected.",
-    "- Exactly one option must be marked recommended:true.",
-    "- whyItMatters must explain the stakes; selfAnswer must justify deciding without a human.",
-    "- confidence is high/medium/low. Set escalate:true only when evidence genuinely cannot settle it.",
-    "- If the task forces NO real decision, write an empty decisions array.",
-    "",
-    "Schema:",
-    JSON.stringify({
-      decisions: [
-        {
-          question: "...",
-          whyItMatters: "...",
-          optionsConsidered: [
-            { label: "...", evidence: "repo path / command / doc inspected", recommended: true },
-            { label: "...", evidence: "...", recommended: false },
-          ],
-          chosen: "...",
-          selfAnswer: "why I answered this myself without a human",
-          confidence: "high|medium|low",
-          escalate: false,
-        },
-      ],
-    }, null, 2),
-    "",
-    `Recent harness history (verdicts, failures, assumption changes; source of truth is ${evLogPath}):`,
-    recentHistory,
-    "",
-    "Decisions already recorded this run:",
-    (state.decisions?.length ? state.decisions.join("\n") : "(none yet)"),
-    "",
-    "Task JSON:",
-    taskJson,
-  ].join("\n");
-
-  mkdirSync(dirname(promptFile), { recursive: true });
-  writeFileSync(promptFile, content, "utf-8");
-}
-
-export interface PreflightPromptOptions extends TaskGrillPromptOptions {
-  decisionResultFile: string;
-}
-
-function writeTaskContextCapsule(file: string, opts: {
-  repoRoot: string; runsRoot: string; budget: PromptBudget; state?: AgenticState;
-  task: Task; codeGraphFile?: string; eventLogPath: string;
-}): void {
-  const limits = getPromptBudgetLimits(opts.budget);
-  const content = [
-    "# Task Context Capsule",
-    `CodeGraph context: ${opts.codeGraphFile ?? ""}`,
-    `Event log source: ${opts.eventLogPath}`,
-    "",
-    ...getOperatorContextBlock(opts.state),
-    "Current assumptions:",
-    opts.state?.assumptions?.length ? opts.state.assumptions.join("\n") : "(none)",
-    "",
-    "Current decisions:",
-    opts.state?.decisions?.length ? opts.state.decisions.join("\n") : "(none)",
-    "",
-    "Recent harness delta (verdicts, failures, assumption changes):",
-    getDistilledHistoryText(opts.repoRoot, opts.runsRoot, "task_grill", opts.budget),
-    "",
-    "Task JSON:",
-    JSON.stringify(projectTaskForPhase(opts.task, "task_grill"), null, 2),
-  ].join("\n");
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, content, "utf-8");
-}
-
-/**
- * Bundle readiness and decision discovery into one fresh-agent evidence pass.
- * Separate legacy result files preserve each logical phase's contract and
- * allow older/custom agents to fall back to the missing phase only.
- */
-export function writePreflightPrompt(promptFile: string, opts: PreflightPromptOptions): void {
-  const taskDraft = join(opts.runDir, ".task-grill-section.md");
-  const contextCapsule = join(opts.runDir, "context-capsule.md");
-  writeTaskContextCapsule(contextCapsule, opts);
-  writeTaskGrillPrompt(taskDraft, { ...opts, suppressEvent: true });
-  const taskContract = readFileSync(taskDraft, "utf-8");
-  unlinkSync(taskDraft);
-  const content = [
-    "BUNDLED PREFLIGHT — perform both logical reviews in one evidence pass.",
-    "Do not edit repository files. Read shared evidence once, then write BOTH separate result files.",
-    "Task-grill controls whether downstream decisions are accepted; still write both outputs so the run is auditable.",
-    `Canonical shared evidence: ${contextCapsule}`,
-    "",
-    "=== TASK-GRILL CONTRACT ===",
-    taskContract,
-    "",
-    "=== DECISION-GRILL CONTRACT ===",
-    "Using the same evidence capsule, surface every genuine design/product/architecture decision forced by this task.",
-    `Write decision JSON only to: ${opts.decisionResultFile}`,
-    "Each decision needs 2-4 evidenced options, exactly one recommended option, chosen, whyItMatters, selfAnswer, confidence high|medium|low, and escalate boolean.",
-    "If no genuine decision exists, write {\"decisions\":[]}.",
-    "",
-    "The harness validates the JSON against this exact schema; field names must match verbatim (in particular the options array is `optionsConsidered`, not `options`):",
-    JSON.stringify({
-      decisions: [
-        {
-          question: "...",
-          whyItMatters: "...",
-          optionsConsidered: [
-            { label: "...", evidence: "repo path / command / doc inspected", recommended: true },
-            { label: "...", evidence: "...", recommended: false },
-          ],
-          chosen: "...",
-          selfAnswer: "why I answered this myself without a human",
-          confidence: "high|medium|low",
-          escalate: false,
-        },
-      ],
-    }, null, 2),
-  ].join("\n");
-  writePromptWithEvent(promptFile, content, "preflight", opts.repoRoot, opts.runsRoot, opts.stateFile, opts.budget, {
-    task: opts.task.id,
-    resultFile: opts.resultFile,
-    decisionResultFile: opts.decisionResultFile,
-    contextCapsule,
-    codegraph: opts.codeGraphFile,
-  });
-}
-
-export interface GoalReviewPromptOptions {
-  repoRoot: string;
-  runsRoot: string;
-  stateFile: string;
-  budget: PromptBudget;
-  state: AgenticState;
-  loopBaseRef: string;
-  resultFile: string;
-}
-
-export function writeGoalReviewPrompt(promptFile: string, opts: GoalReviewPromptOptions): void {
-  const { repoRoot, runsRoot, stateFile, budget, state, loopBaseRef, resultFile } = opts;
-
-  const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "review"), budget);
-  const passedTasks = (state.tasks ?? []).filter((t) => t.status === "passed");
-  const passedSummary = passedTasks.length
-    ? passedTasks.map((t) => `- ${t.id}: ${t.title ?? "(no title)"}`).join("\n")
-    : "(none)";
-  const diffStat = loopBaseRef
-    ? git(["diff", "--stat", loopBaseRef, "HEAD"], repoRoot)
-    : git(["diff", "--stat", "HEAD"], repoRoot);
-
-  const content = [
-    "You are the goal reviewer for a completed agentic loop run.",
-    "",
-    "Your job: judge whether the work completed actually achieves the stated goal.",
-    "Be critical. Look for gaps, missing pieces, and wrong scope.",
-    "",
-    "Read AGENTS.md / CLAUDE.md and inspect repo state and diffs before deciding.",
-    "",
-    `Write your verdict JSON only to: ${resultFile}`,
-    "",
-    "Allowed verdicts: pass, needs_human.",
-    `Schema: { "verdict": "pass|needs_human", "summary": "...", "gaps": [] }`,
-    "",
-    "- pass: the cumulative work clearly satisfies the goal; no material gaps.",
-    "- needs_human: one or more significant gaps exist between the completed work and the goal.",
-    "",
-    `Goal: ${state.goal ?? "(no goal recorded)"}`,
-    "",
-    "Passed tasks:",
-    passedSummary,
-    "",
-    "Current assumptions:",
-    (state.assumptions?.length ? state.assumptions.join("\n") : "(none)"),
-    "",
-    "Cumulative diff stat since loop start:",
-    diffStat || "(no diff)",
-    "",
-    `Recent harness history:`,
-    recentHistory,
-  ].join("\n");
-
-  mkdirSync(dirname(promptFile), { recursive: true });
-  writeFileSync(promptFile, content, "utf-8");
-}
-
-export interface ArchitectCheckpointPromptOptions {
-  repoRoot: string;
-  runsRoot: string;
-  stateFile: string;
-  budget: PromptBudget;
-  state: AgenticState;
-  loopBaseRef: string;
-  passedCount: number;
-  resultFile: string;
-}
-
-export function writeArchitectCheckpointPrompt(promptFile: string, opts: ArchitectCheckpointPromptOptions): void {
-  const { repoRoot, runsRoot, stateFile, budget, state, loopBaseRef, passedCount, resultFile } = opts;
-
-  const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "review"), budget);
-  const tasks = state.tasks ?? [];
-  const passedTasks = tasks.filter((t) => t.status === "passed");
-  const remainingTasks = tasks.filter((t) => !["passed", "blocked"].includes(t.status ?? ""));
-  const diffStat = loopBaseRef
-    ? git(["diff", "--stat", loopBaseRef, "HEAD"], repoRoot)
-    : git(["diff", "--stat", "HEAD"], repoRoot);
-
-  const content = [
-    "You are the architect reviewer for an in-progress agentic loop.",
-    "",
-    `${passedCount} task(s) have passed since the last checkpoint. Review the plan and cumulative diff for drift.`,
-    "",
-    "Ask yourself:",
-    "- Is the remaining plan still correct given what has actually been built?",
-    "- Does the cumulative diff reveal that the plan is heading in the wrong direction?",
-    "- Are there missing tasks the plan failed to account for?",
-    "- Is the goal still achievable with the current plan, or does the plan need a rethink?",
-    "",
-    "Read AGENTS.md / CLAUDE.md and inspect repo state before deciding.",
-    "",
-    `Write your verdict JSON only to: ${resultFile}`,
-    "",
-    "Allowed verdicts: continue, replan, needs_human.",
-    `Schema: { "verdict": "continue|replan|needs_human", "assessment": "...", "suggestedChanges": [] }`,
-    "",
-    "- continue: plan is on track; proceed.",
-    "- replan: the remaining plan needs significant rethinking; the harness will call the planner.",
-    "- needs_human: drift is too severe or risky to resolve autonomously.",
-    "",
-    `Goal: ${state.goal ?? "(no goal recorded)"}`,
-    "",
-    "Passed tasks:",
-    passedTasks.length ? passedTasks.map((t) => `- ${t.id}: ${t.title ?? ""}`).join("\n") : "(none)",
-    "",
-    "Remaining tasks:",
-    remainingTasks.length ? remainingTasks.map((t) => `- [${t.status}] ${t.id}: ${t.title ?? ""}`).join("\n") : "(none — all done)",
-    "",
-    "Current assumptions:",
-    (state.assumptions?.length ? state.assumptions.join("\n") : "(none)"),
-    "",
-    "Cumulative diff stat since loop start:",
-    diffStat || "(no diff)",
-    "",
-    `Recent harness history:`,
-    recentHistory,
-  ].join("\n");
-
-  mkdirSync(dirname(promptFile), { recursive: true });
-  writeFileSync(promptFile, content, "utf-8");
-}
-
-export interface PostTaskReviewPromptOptions {
-  repoRoot: string;
-  runsRoot: string;
-  stateFile: string;
-  budget: PromptBudget;
-  state: AgenticState;
-  taskId: string;
-  taskRunDir: string;
-  verifierResultFile: string;
-  handoverFile: string;
-  loopBaseRef: string;
-  resultFile: string;
-}
-
-export function writePostTaskReviewPrompt(promptFile: string, opts: PostTaskReviewPromptOptions): void {
-  const {
-    repoRoot, runsRoot, stateFile, budget, state, taskId, taskRunDir,
-    verifierResultFile, handoverFile, loopBaseRef, resultFile,
-  } = opts;
-
-  const limits = getPromptBudgetLimits(budget);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, phaseEventLimit(limits.eventLimit, "review"), budget);
-  const tasks = state.tasks ?? [];
-  const completedTask = tasks.find((t) => t.id === taskId);
-  const remainingTasks = tasks.filter((t) => !["passed", "blocked"].includes(t.status ?? ""));
-  const diffStat = loopBaseRef
-    ? git(["diff", "--stat", loopBaseRef, "HEAD"], repoRoot)
-    : git(["diff", "--stat", "HEAD"], repoRoot);
-
-  const content = [
-    "You are the post-task plan reviewer for an autonomous agentic loop.",
-    skillInstruction("reflect-on-approach", repoRoot, "Use plan mode. Reassess pending work; do not verify the completed implementation or edit tasks directly."),
-    "",
-    "The verifier already judged whether the completed task passed. Your job is different: reassess whether the remaining plan is still valid after this completed slice.",
-    "Spend intelligence on assumptions, validation design, task slicing, and plan drift. Do not propose executor edits here.",
-    "",
-    `Completed task: ${taskId}`,
-    `Completed task run directory: ${taskRunDir}`,
-    `Verifier result: ${verifierResultFile}`,
-    `Handover: ${handoverFile}`,
-    "",
-    "Read AGENTS.md / CLAUDE.md, the verifier result, handover, state, and relevant repo files before deciding.",
-    "",
-    `Write post-task review JSON only to: ${resultFile}`,
-    "",
-    "Allowed verdicts: continue, adjust_remaining_tasks, replan, needs_human.",
-    `Schema: { "verdict": "continue|adjust_remaining_tasks|replan|needs_human", "assessment": "...", "remainingPlanStillValid": true, "suggestedChanges": [] }`,
-    "",
-    "- continue: the remaining pending tasks are still correctly sliced, scoped, ordered, and validated.",
-    "- adjust_remaining_tasks: remaining tasks may need focused updates; the harness will record your advice and continue to the next task so task-grill can decide just-in-time.",
-    "- replan: the remaining plan is materially stale or wrong and cannot safely continue without planner repair; the harness will call the planner.",
-    "- needs_human: a product/domain/safety decision is required before more autonomous work.",
-    "",
-    "Review questions:",
-    "- Did the completed task change assumptions that the remaining tasks depend on?",
-    "- Are remaining task scopes still tight and sufficient?",
-    "- Is validation still proving the right behavior, or did the last task reveal a better proof?",
-    "- Are any remaining tasks now redundant, missing, too broad, or in the wrong order?",
-    "- Is this a major checkpoint where the plan should be re-sliced before continuing?",
-    "",
-    `Goal: ${state.goal ?? "(no goal recorded)"}`,
-    "",
-    "Completed task JSON:",
-    completedTask ? JSON.stringify(completedTask, null, 2) : "(completed task not found in state)",
-    "",
-    "Remaining tasks:",
-    remainingTasks.length ? remainingTasks.map((t) => `- [${t.status}] ${t.id}: ${t.title ?? ""}`).join("\n") : "(none — all done)",
-    "",
-    "Current assumptions:",
-    (state.assumptions?.length ? state.assumptions.join("\n") : "(none)"),
-    "",
-    "Current decisions:",
-    (state.decisions?.length ? state.decisions.join("\n") : "(none)"),
-    "",
-    "Cumulative diff stat since loop start:",
-    diffStat || "(no diff)",
-    "",
-    "Recent harness history:",
-    recentHistory,
-  ].join("\n");
-
-  writePromptWithEvent(promptFile, content, "post_task_review", repoRoot, runsRoot, stateFile, budget, {
-    task: taskId,
-    resultFile,
-  });
-}
-
-export interface BundledReviewPromptOptions extends VerifierPromptOptions {
-  postTaskResultFile: string;
-  taskRunDir: string;
-  handoverFile: string;
-  loopBaseRef: string;
-  state: AgenticState;
-}
-
-/** Bundle implementation verification and remaining-plan review into one fresh review pass. */
-export function writeBundledReviewPrompt(promptFile: string, opts: BundledReviewPromptOptions): void {
-  const verifierDraft = join(opts.taskRunDir, ".verifier-section.md");
-  const contextCapsule = join(opts.taskRunDir, "context-capsule.md");
-  writeTaskContextCapsule(contextCapsule, {
-    repoRoot: opts.repoRoot, runsRoot: opts.runsRoot, budget: opts.budget,
-    state: opts.state, task: opts.task, codeGraphFile: "", eventLogPath: opts.eventLogPath,
-  });
-  writeVerifierPrompt(verifierDraft, { ...opts, suppressEvent: true });
-  const verifierContract = readFileSync(verifierDraft, "utf-8");
-  unlinkSync(verifierDraft);
-  const content = [
-    "BUNDLED REVIEW — perform both logical reviews in one fresh evidence pass.",
-    "Read the diff, checks, task, and remaining plan once. Write BOTH separate result files.",
-    "Verification is authoritative first. The harness ignores plan-review output unless verification passes.",
-    "Do not edit repository files.",
-    `Canonical shared evidence: ${contextCapsule}`,
-    "",
-    "=== VERIFICATION CONTRACT ===",
-    verifierContract,
-    "",
-    "=== REMAINING-PLAN CONTRACT ===",
-    "Using the same evidence capsule, reassess whether remaining tasks are still correctly sliced, scoped, ordered, and validated after this task.",
-    `Verifier result will be written to: ${opts.resultFile}`,
-    `Handover: ${opts.handoverFile}`,
-    `Write post-task review JSON only to: ${opts.postTaskResultFile}`,
-    "Allowed verdicts: continue, adjust_remaining_tasks, replan, needs_human.",
-    "Schema: {\"verdict\":\"continue|adjust_remaining_tasks|replan|needs_human\",\"assessment\":\"...\",\"remainingPlanStillValid\":true,\"suggestedChanges\":[]}",
-  ].join("\n");
-  writePromptWithEvent(promptFile, content, "bundled_review", opts.repoRoot, opts.runsRoot, opts.stateFile, opts.budget, {
-    task: opts.task.id,
-    resultFile: opts.resultFile,
-    postTaskResultFile: opts.postTaskResultFile,
-    contextCapsule,
-  });
-}
-
-export interface FinalizeDocsPromptOptions {
-  repoRoot: string;
+  worktreePath: string;
   runsRoot: string;
   stateFile: string;
   budget: PromptBudget;
@@ -1435,19 +822,19 @@ export interface FinalizeDocsPromptOptions {
 }
 
 export function writeFinalizeDocsPrompt(promptFile: string, opts: FinalizeDocsPromptOptions): void {
-  const { repoRoot, runsRoot, stateFile, budget, state, summaryFile } = opts;
+  const { repoRoot, worktreePath, runsRoot, stateFile, budget, state, summaryFile } = opts;
 
   const stateJson = JSON.stringify(state, null, 2);
   const recentHistory = getRecentHistoryText(repoRoot, runsRoot, 30, budget);
-  const diffStat = git(["diff", "--stat", "HEAD"], repoRoot);
-  const projectState = existsSync(join(repoRoot, "PROJECT.md")) ? "PROJECT.md exists" : "PROJECT.md missing";
-  const contextState = existsSync(join(repoRoot, "CONTEXT.md"))
+  const diffStat = git(["diff", "--stat", "HEAD"], worktreePath);
+  const projectState = existsSync(join(worktreePath, "PROJECT.md")) ? "PROJECT.md exists" : "PROJECT.md missing";
+  const contextState = existsSync(join(worktreePath, "CONTEXT.md"))
     ? "CONTEXT.md exists (planning-stage grill-with-docs ownership)"
     : "CONTEXT.md missing";
 
   const skillBlock = skillInstruction(
     "update-project-md",
-    repoRoot,
+    worktreePath,
     "Update PROJECT.md with durable technical facts: commands, architecture, module roles, validation, constraints. Keep edits concise and factual. Do not add transient run state."
   );
 
@@ -1476,53 +863,6 @@ export function writeFinalizeDocsPrompt(promptFile: string, opts: FinalizeDocsPr
     "",
     "Uncommitted diff stat (what the run changed):",
     diffStat,
-  ].join("\n");
-
-  mkdirSync(dirname(promptFile), { recursive: true });
-  writeFileSync(promptFile, content, "utf-8");
-}
-
-export interface FinalizeDocsVerifierPromptOptions {
-  repoRoot: string;
-  runWorktreePath: string;
-  summaryFile: string;
-  resultFile: string;
-}
-
-export function writeFinalizeDocsVerifierPrompt(promptFile: string, opts: FinalizeDocsVerifierPromptOptions): void {
-  const { repoRoot, runWorktreePath, summaryFile, resultFile } = opts;
-
-  // Run branch diff — shows what the tasks actually changed
-  const diffStat = (() => { try { return git(["diff", "--stat", "HEAD"], runWorktreePath); } catch { return ""; } })();
-  // PROJECT.md diff — shows what the finalizer just wrote in the main tree
-  const diff     = (() => { try { return git(["diff", "HEAD", "--", "PROJECT.md"], repoRoot); } catch { return ""; } })();
-  const projectMdContent = (() => {
-    const p = join(repoRoot, "PROJECT.md");
-    try { return existsSync(p) ? readFileSync(p, "utf-8").slice(0, 6000) : "(missing)"; } catch { return "(unreadable)"; }
-  })();
-
-  const content = [
-    "You are verifying the finalize-docs phase of a completed agentic run.",
-    "",
-    "The executor was asked to update PROJECT.md with durable technical facts from the run.",
-    "",
-    `Write a JSON verdict to: ${resultFile}`,
-    `Schema: { "verdict": "pass|fail|needs_human", "summary": "...", "issues": [] }`,
-    "",
-    "Pass if PROJECT.md was meaningfully updated to reflect the run's changes, OR if the run genuinely introduced no new durable facts worth recording.",
-    "Fail if PROJECT.md was not touched when it clearly should have been, or if the changes are trivially cosmetic.",
-    "needs_human if you cannot determine whether the update is correct.",
-    "",
-    "Git diff stat (all files this run changed):",
-    diffStat || "(no changes)",
-    "",
-    "PROJECT.md diff:",
-    diff || "(no changes to PROJECT.md)",
-    "",
-    "Current PROJECT.md (first 6000 chars):",
-    projectMdContent,
-    "",
-    `Executor summary: ${summaryFile}`,
   ].join("\n");
 
   mkdirSync(dirname(promptFile), { recursive: true });

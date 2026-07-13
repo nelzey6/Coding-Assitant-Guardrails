@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "fs";
 import { LoopError, git, emitTokenUsage, type LoopConfig } from "./index.js";
 import { writeStanceReflectionPrompt } from "../prompts/index.js";
 import { appendEvent } from "../events/index.js";
-import { invokeAgentWithLog } from "../agent/index.js";
+import { invokeAgentPhase } from "./agent-phase.js";
 import { loadState, getTasks, writeState, type Task } from "../state/index.js";
 
 export interface StanceReflectionResult {
@@ -21,8 +21,7 @@ export async function runStanceReflectionPhase(
   task: Task,
   runDir: string,
   worktreePath: string,
-  codeGraphFile: string,
-  decisions: Record<string, unknown>[]
+  codeGraphFile: string
 ): Promise<{ result: StanceReflectionResult; resultFile: string }> {
   const worktreeSnapshot = (): string => git(["status", "--porcelain", "--untracked-files=all"], worktreePath)
     .split(/\r?\n/)
@@ -36,11 +35,11 @@ export async function runStanceReflectionPhase(
   const logFile = join(runDir, "stance-reflection.log");
   writeStanceReflectionPrompt(promptFile, {
     repoRoot: cfg.repoRoot, task, resultFile,
-    codeGraphFile, decisionGrillDecisions: decisions,
+    codeGraphFile,
   });
   appendEvent(cfg.repoRoot, "stance_reflection_started", { task: task.id, prompt: promptFile, resultFile }, cfg.runsRoot, cfg.stateFile);
   agentCallCounter.count++;
-  emitTokenUsage(cfg, await invokeAgentWithLog(promptFile, cfg.grillAgent, worktreePath, logFile, "stance-reflection"), task.id);
+  emitTokenUsage(cfg, await invokeAgentPhase({ ...cfg, promptFile, workingDirectory: worktreePath, logFile, phase: "stance-reflection", taskId: task.id }), task.id);
   if (!existsSync(resultFile)) throw new LoopError(`Stance reflection did not write ${resultFile}`);
   const afterReflection = worktreeSnapshot();
   if (afterReflection !== baseline) {

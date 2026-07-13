@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process";
-import type { AgenticTask } from "../context/index.js";
+import type { Task as AgenticTask } from "../state/index.js";
 import type { WorkflowPolicy } from "../policy/index.js";
 
 const DEFAULT_HUMAN_GATE_PATHS = [
@@ -50,7 +50,12 @@ export function isScopeMeaningfullyBounded(scopeGlobs: string[]): boolean {
     const normalized = glob.replace(/\\/g, "/").replace(/^\.\//, "").trim();
     const wildcardIndex = normalized.search(/[*?]/);
     if (wildcardIndex < 0) return normalized.length > 0;
-    return normalized.slice(0, wildcardIndex).replace(/\/+$/, "").length > 0;
+    const literalSegments = normalized
+      .slice(0, wildcardIndex)
+      .replace(/\/+$/, "")
+      .split("/")
+      .filter(Boolean);
+    return literalSegments.length >= 2;
   });
 }
 

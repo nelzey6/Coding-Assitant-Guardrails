@@ -1,7 +1,7 @@
 {
   "name": "@coding-assistant-guardrails/agent-loop",
   "version": "0.1.0",
-  "description": "TypeScript agentic loop CLI: validate skills, scaffold plans, run task-grilled autonomous worktree loops, verify, retry, and replan.",
+  "description": "Adaptive TypeScript coding loop: plan, execute in an isolated worktree, check, verify by risk, retry, and replan.",
   "type": "module",
   "scripts": {
     "agent": "tsx src/index.ts"

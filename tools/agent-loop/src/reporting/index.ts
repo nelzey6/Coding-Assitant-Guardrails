@@ -1,5 +1,4 @@
 import type { ValidationResult, Violation } from "../validators/index.js";
-import type { PlanResult } from "../planner/index.js";
 import type { AgenticState, Task } from "../state/index.js";
 import {
   getTasks,
@@ -71,31 +70,6 @@ export function printValidateResult(result: ValidationResult, opts: ReportOption
   }
 }
 
-// ── Plan reporting ────────────────────────────────────────────────────────────
-
-export interface PlanFileResult {
-  outputPath: string;
-  taskCount: number;
-  warnings: string[];
-}
-
-export function printPlanResult(result: PlanFileResult, opts: ReportOptions): void {
-  if (opts.json) {
-    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-    return;
-  }
-
-  console.log(`\nPlan written to: ${result.outputPath}`);
-  console.log(`Tasks scaffolded: ${result.taskCount}`);
-  if (result.warnings.length > 0) {
-    console.log("\nWarnings:");
-    result.warnings.forEach((w) => console.log(`  • ${w}`));
-  }
-  console.log(
-    "\nReview plan.md, adjust workflows and acceptance criteria, then promote tasks to agentic.json."
-  );
-}
-
 // ── Status reporting ──────────────────────────────────────────────────────────
 
 export interface StatusData {
@@ -146,9 +120,8 @@ export function printStatusResult(data: StatusData, opts: ReportOptions): void {
 
   for (const task of tasks) {
     const deps = (task.dependsOn ?? []).length > 0 ? ` deps=[${task.dependsOn!.join(",")}]` : "";
-    const review = task.reviewBranch ? ` review=[${task.reviewBranch}]` : "";
     console.log(
-      `  ${pad(task.status ?? "?", 13)} ${pad(task.id ?? "", 40)} ${task.workflow ?? ""} ${task.title ?? ""}${deps}${review}`
+      `  ${pad(task.status ?? "?", 13)} ${pad(task.id ?? "", 40)} ${task.workflow ?? ""} ${task.title ?? ""}${deps}`
     );
   }
 
@@ -311,13 +284,12 @@ export function printWhyStuckResult(
   for (const t of needsHuman) {
     console.log(`needs_human: ${t.id}`);
     if (t.lastRunDir) console.log(`  inspect: ${t.lastRunDir}`);
-    console.log(`  resolve manually or split/reset if safe.`);
+    console.log(`  resolve manually, then start a new goal or update the task state intentionally.`);
   }
 
   for (const t of retryable) {
     console.log(`retryable:   ${t.id}  attempts=${getTaskAttempts(t)}`);
-    console.log(`  suggested: pwsh -File scripts/agentic/agentic-loop.ps1 --retry ${t.id}`);
-    console.log(`             pwsh -File scripts/agentic/agentic-loop.ps1 --reset-task ${t.id}`);
+    console.log(`  suggested: npm run agent -- run`);
   }
 
   for (const t of pendingBlocked) {
@@ -328,122 +300,6 @@ export function printWhyStuckResult(
   if (recentFailures.length > 0) {
     console.log("\nRecent failures:");
     recentFailures.forEach((e) => console.log(formatEventLine(e)));
-  }
-}
-
-// ── Doctor reporting ──────────────────────────────────────────────────────────
-
-export interface DoctorIssue {
-  taskId: string;
-  kind: "missing-branch" | "missing-worktree";
-  value: string;
-}
-
-export interface DoctorResult {
-  issues: DoctorIssue[];
-  passed: boolean;
-}
-
-export function printDoctorResult(result: DoctorResult, opts: ReportOptions): void {
-  if (opts.json) {
-    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-    return;
-  }
-
-  if (result.passed) {
-    console.log("Doctor found no issues.");
-    return;
-  }
-
-  console.log(`Doctor found ${result.issues.length} issue(s):`);
-  for (const issue of result.issues) {
-    const label = issue.kind === "missing-branch" ? "review branch missing" : "review worktree missing";
-    console.log(`  - [${issue.taskId}] ${label}: ${issue.value}`);
-  }
-}
-
-// ── Reset-task reporting ──────────────────────────────────────────────────────
-
-export interface ResetPlan {
-  taskId: string;
-  branch: string;
-  worktree: string;
-  worktreeWillRemove: boolean;
-  branchWillDelete: boolean;
-  newStatus: string;
-  applied: boolean;
-}
-
-export function printResetResult(plan: ResetPlan, opts: ReportOptions): void {
-  if (opts.json) {
-    process.stdout.write(JSON.stringify(plan, null, 2) + "\n");
-    return;
-  }
-
-  const verb = plan.applied ? "Reset" : "Would reset";
-  console.log(`${verb} task: ${plan.taskId}`);
-  console.log("");
-
-  const mark = (will: boolean) => (plan.applied ? "✓" : will ? "•" : "—");
-  console.log(`  ${mark(plan.worktreeWillRemove)} remove worktree: ${plan.worktree}${plan.worktreeWillRemove ? "" : " (not present)"}`);
-  console.log(`  ${mark(plan.branchWillDelete)} delete branch:   ${plan.branch}${plan.branchWillDelete ? "" : " (not present)"}`);
-  console.log(`  ${plan.applied ? "✓" : "•"} set status:      ${plan.newStatus}`);
-  console.log("");
-
-  if (plan.applied) {
-    console.log(`Done. Suggested next: pwsh -File scripts/agentic/agentic-loop.ps1 --retry ${plan.taskId}`);
-  } else {
-    console.log("Dry run — nothing changed. Re-run with --apply to execute.");
-  }
-}
-
-// ── Accept reporting ──────────────────────────────────────────────────────────
-
-export interface AcceptPlan {
-  taskId: string;
-  branch: string;
-  worktree: string;
-  mergeMode: string;
-  mergeLabel: string;
-  alreadyIntegrated: boolean; // branch HEAD == current HEAD, nothing to merge
-  willCleanup: boolean; // false for apply mode (leaves worktree/branch intact)
-  applied: boolean;
-  integrated?: boolean; // set on apply: whether a merge/cherry-pick actually ran
-}
-
-export function printAcceptResult(plan: AcceptPlan, opts: ReportOptions): void {
-  if (opts.json) {
-    process.stdout.write(JSON.stringify(plan, null, 2) + "\n");
-    return;
-  }
-
-  const verb = plan.applied ? "Accepted" : "Would accept";
-  console.log(`${verb} task: ${plan.taskId}  (mode: ${plan.mergeMode})`);
-  console.log("");
-
-  if (plan.alreadyIntegrated) {
-    console.log(`  • no tracked branch changes — ${plan.branch} is already at HEAD`);
-  } else {
-    console.log(`  • integrate: ${plan.mergeLabel}`);
-  }
-
-  if (plan.willCleanup) {
-    console.log(`  ${plan.applied ? "✓" : "•"} remove worktree: ${plan.worktree}`);
-    console.log(`  ${plan.applied ? "✓" : "•"} delete branch:   ${plan.branch}`);
-    console.log(`  ${plan.applied ? "✓" : "•"} stamp acceptedAt, clear review state`);
-  } else {
-    console.log(`  • apply mode: changes staged with no commit; worktree and branch left intact for review`);
-  }
-  console.log("");
-
-  if (plan.applied) {
-    if (plan.mergeMode === "apply") {
-      console.log(`Applied '${plan.taskId}' without committing. Inspect staged/unstaged changes, then remove the worktree/branch when done.`);
-    } else {
-      console.log(`Done. '${plan.taskId}' integrated and cleaned up.`);
-    }
-  } else {
-    console.log("Dry run — nothing changed. Re-run with --apply to execute.");
   }
 }
 

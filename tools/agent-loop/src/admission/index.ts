@@ -1,39 +1,34 @@
-import type { Task, AgenticState, VerifierResult } from "../state/index.js";
+import { computePlanContextFingerprint, type Task, type AgenticState } from "../state/index.js";
 import { matchPolicyHumanGates, type PhaseAdmissionConfig, type WorkflowPolicy } from "../policy/index.js";
 import { getTaskScope, isScopeMeaningfullyBounded, testPathsAreDocumentation, testPathsTouchHumanGate } from "../scope/index.js";
 
 export type TaskRisk = "low" | "medium" | "high";
 export type VerifierMode = "skip" | "single" | "adversarial";
 
-export interface VerificationProfile {
+interface VerificationEvidence {
   risk: TaskRisk;
-  verifierMode: VerifierMode;
-  votes: number;
   reasons: string[];
   evidence: string[];
 }
 
-export type AdmissionPhase = "task-grill" | "verifier" | "post-task-review" | "finalize-docs";
+export type VerificationProfile = VerificationEvidence & (
+  | { verifierMode: "skip"; votes: 0 }
+  | { verifierMode: "single"; votes: 1 }
+  | { verifierMode: "adversarial"; votes: 3 }
+);
+
+export type AdmissionPhase = "replan" | "stance" | "verifier" | "finalize-docs";
 
 export interface AdmissionDecision {
   run: boolean;
   reason: string;
 }
 
-export interface VerifierAdmissionDecision extends AdmissionDecision {
-  risk: TaskRisk;
-  verifierMode: VerifierMode;
-  votes: number;
-  reasons: string[];
-  evidence: string[];
-}
+export type VerifierAdmissionDecision = AdmissionDecision & VerificationProfile;
 
 const DEFAULT_ADMISSION: Required<PhaseAdmissionConfig> = {
-  taskGrill: "plan-aware",
   verifier: "auto",
-  postTaskReview: "on-drift",
   finalizeDocs: "on-change",
-  retryTaskGrill: "on-drift",
 };
 
 function admissionConfig(policy: WorkflowPolicy): Required<PhaseAdmissionConfig> {
@@ -42,20 +37,6 @@ function admissionConfig(policy: WorkflowPolicy): Required<PhaseAdmissionConfig>
 
 function latestFailure(task: Task): { phase?: string } | undefined {
   return task.failureHistory?.[task.failureHistory.length - 1];
-}
-
-function scopePrefix(scope: string): string {
-  return scope.replace(/[\\*?].*$/, "").replace(/\/+$/, "");
-}
-
-function scopesMayOverlap(left: string[], right: string[]): boolean {
-  if (left.length === 0 || right.length === 0) return true;
-  return left.some((a) => right.some((b) => {
-    if (a === b) return true;
-    const ap = scopePrefix(a);
-    const bp = scopePrefix(b);
-    return ap.length > 0 && bp.length > 0 && (ap.startsWith(bp) || bp.startsWith(ap));
-  }));
 }
 
 export function resolveVerificationProfile(
@@ -107,77 +88,40 @@ export function taskWasPlannedForCurrentRevision(task: Task, state: AgenticState
     && task.plannedRevision === state.planRevision;
 }
 
-export function shouldRunTaskGrill(
-  task: Task,
-  state: AgenticState,
-  policy: WorkflowPolicy,
-  force = false
-): AdmissionDecision {
-  const config = admissionConfig(policy);
-  if (force || config.taskGrill === "always") {
-    return { run: true, reason: force ? "operator or retry forced task-grill" : "policy requires task-grill for every task" };
-  }
-
+export function shouldReplanBeforeTask(task: Task, state: AgenticState): AdmissionDecision {
   const failure = latestFailure(task);
-  if (failure && config.retryTaskGrill === "always") {
-    return { run: true, reason: `retry policy requires task-grill after ${failure.phase ?? "unknown"} failure` };
-  }
   if (failure && failure.phase && failure.phase !== "checks") {
-    return { run: true, reason: `${failure.phase} failure may indicate stale task understanding` };
+    return { run: true, reason: `${failure.phase} failure invalidated task understanding` };
+  }
+  if (task.plannedContextFingerprint && task.plannedContextFingerprint !== computePlanContextFingerprint(state)) {
+    return { run: true, reason: "goal decisions, assumptions, questions, or blockers changed after planning" };
   }
   if (taskWasPlannedForCurrentRevision(task, state) && !(state.openQuestions?.length) && !(state.blockers?.length)) {
-    return { run: false, reason: "fresh planner revision; no open questions, blockers, or drift evidence" };
+    return { run: false, reason: "fresh planner revision with no ambiguity or drift evidence" };
   }
-  return { run: true, reason: "task has no fresh planner revision; readiness must be checked" };
+  return { run: true, reason: "task lacks a fresh, unambiguous planner revision" };
 }
 
 export function shouldRunVerifier(
   task: Task,
   policy: WorkflowPolicy,
-  explicitFastVerifier: boolean,
-  changedPaths: string[] = [],
-  forcedVotes = 0
+  changedPaths: string[] = []
 ): VerifierAdmissionDecision {
   const config = admissionConfig(policy);
   const profile = resolveVerificationProfile(task, policy, changedPaths);
   const profileReason = profile.reasons.join("; ");
 
-  if (config.verifier !== "always" && forcedVotes <= 0 && profile.verifierMode === "skip") {
+  if (config.verifier !== "always" && profile.verifierMode === "skip") {
     return { run: false, reason: `low-risk change passed deterministic checks: ${profileReason}`, ...profile };
   }
 
-  const votes = forcedVotes > 0 ? forcedVotes : Math.max(1, profile.votes);
-  const verifierMode: VerifierMode = votes > 1 ? "adversarial" : "single";
+  const admittedProfile: VerificationProfile = profile.verifierMode === "skip"
+    ? { ...profile, verifierMode: "single", votes: 1 }
+    : profile;
   const prefix = config.verifier === "always"
     ? "policy requires verifier"
-    : explicitFastVerifier
-      ? "explicit fast-verifier denied"
-      : `${profile.risk}-risk change requires ${verifierMode} verification`;
-  return { run: true, reason: `${prefix}: ${profileReason}`, ...profile, verifierMode, votes };
-}
-
-export function shouldRunPostTaskReview(args: {
-  task: Task;
-  remainingTasks: Task[];
-  policy: WorkflowPolicy;
-  enabled: boolean;
-  verifierResult?: VerifierResult;
-}): AdmissionDecision {
-  if (!args.enabled) return { run: false, reason: "post-task review disabled by operator" };
-  if (args.remainingTasks.length === 0) return { run: false, reason: "plan complete; no remaining runnable tasks" };
-  const config = admissionConfig(args.policy);
-  if (config.postTaskReview === "always") return { run: true, reason: "policy requires review after every passed task" };
-  if ((args.verifierResult?.issues?.length ?? 0) > 0) return { run: true, reason: "verifier reported issues requiring remaining-plan review" };
-  if (args.task.complexity === "high") return { run: true, reason: "high-complexity task requires remaining-plan review" };
-
-  const currentScope = args.task.scope ?? [];
-  if (currentScope.length === 0 || args.remainingTasks.some((task) => (task.scope ?? []).length === 0)) {
-    return { run: true, reason: "unscoped task prevents safe deterministic drift check" };
-  }
-  if (args.remainingTasks.some((task) => scopesMayOverlap(currentScope, task.scope ?? []))) {
-    return { run: true, reason: "completed task scope may overlap remaining task scope" };
-  }
-  return { run: false, reason: "no verifier, complexity, or scope-drift evidence" };
+    : `${admittedProfile.risk}-risk change requires ${admittedProfile.verifierMode} verification`;
+  return { run: true, reason: `${prefix}: ${profileReason}`, ...admittedProfile };
 }
 
 export function shouldRunFinalizeDocs(

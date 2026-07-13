@@ -1,6 +1,6 @@
 # Autonomous Coding Loop
 
-An autonomous agent harness that takes a goal, plans it into tasks, self-reviews each one before touching code, executes in isolated git worktrees, and hands you back an unstaged diff to review — all without human intervention per task.
+An adaptive agent harness that takes a goal, plans it into tasks, executes in an isolated git worktree, escalates only from evidence, and hands you back an unstaged diff.
 
 Built for [Claude Code](https://claude.ai/code) and compatible CLI agents (`claude`, `pi`, custom).
 
@@ -9,7 +9,7 @@ agentic-loop init "Refactor the auth module to use the new token store"
 agentic-loop run
 ```
 
-That's it. The loop plans, grills itself, executes, verifies — and when it's done, your main tree has the changes sitting unstaged, ready for you to review, stage, and commit.
+That's it. Normal work pays for planning, execution, checks, and one risk-appropriate verification decision. Extra reasoning runs only when ambiguity, complexity, failure, drift, risk, or documentation changes require it.
 
 **→ [Quickstart — get running in 2 minutes](#quickstart)**
 
@@ -20,9 +20,9 @@ That's it. The loop plans, grills itself, executes, verifies — and when it's d
 You give the loop a goal in plain English. It:
 
 1. Reads your repo and figures out what the goal actually requires.
-2. Resolves design questions from evidence (naming, algorithm, placement) — binding those decisions before any code runs.
+2. Resolves design questions during planning and stops if evidence cannot settle them.
 3. Executes each task in an isolated branch/worktree, so your working tree stays clean throughout.
-4. Runs adversarial verifiers that try to *refute* the result before accepting it.
+4. Skips a separate verifier for bounded low-risk documentation, uses one verifier for normal work, and three adversarial votes for high risk.
 5. Applies the final diff to your main tree as **unstaged changes** — you see exactly what changed, nothing is committed until you say so.
 
 You never need to babysit it mid-run. If it hits something that genuinely needs a human decision, it stops and tells you why.
@@ -36,14 +36,12 @@ Each run admits these phases per task from evidence, preserving the full trace e
 | Phase | What happens |
 |---|---|
 | **Plan** | Planner agent reads the goal, runs `grill-with-docs` discovery, produces a task graph with acceptance criteria, scope globs, and validation commands. |
-| **Task-grill** | Fresh planner tasks inherit readiness; stale/manual tasks and understanding-sensitive retries get a fresh reviewer. If not ready, it replans or escalates rather than guessing. |
-| **Decision-grill** | Design forks are resolved with 2–4 evidenced options when the task-grill path is admitted. The chosen option becomes a **binding rule** injected into the executor prompt. |
-| **Approach reflection** | High-complexity tasks receive 2–3 fresh `reflect-on-approach` stance rounds before implementation begins. |
-| **Execute** | Executor agent works inside a shared run worktree (`agentic/run-<timestamp>`) on a dedicated branch. Uses the canonical workflow skill (`tdd`, `diagnose`, `zoom-out`, etc.). |
+| **Replan admission** | Fresh planner tasks execute. Stale/manual tasks, changed planning context, and understanding-sensitive failures return directly to planner. Check failures retry directly. |
+| **Approach reflection** | High-complexity tasks receive one `reflect-on-approach` self-challenge before implementation. |
+| **Execute** | Executor agent works inside a shared run worktree (`agentic/run-<timestamp>`) on a dedicated branch. Every model phase is guarded against parent-checkout mutation. |
 | **Scope rail** | Harness checks `git diff` before the verifier. Any file outside the task's declared scope fails the task immediately. |
-| **Verify** | Low-risk scoped maintenance/discovery/investigation tasks can rely on passed checks; implementation/high-risk work keeps verifier review and adversarial votes where required. |
-| **Post-task review** | Runs when changed assumptions, verifier issues, high complexity, unscoped work, or overlapping scopes indicate drift. |
-| **Plan reflection** | Admission emits `phase_admitted`/`phase_skipped`; only admitted review phases reassess pending work and may trigger replanning. |
+| **Verify** | Bounded low-risk documentation relies on checks; normal work gets one verifier; high-risk work gets adversarial votes. |
+| **Finalize docs** | Runs once only when durable documentation changed. |
 | **Apply** | All task commits are applied to your main tree as unstaged changes. Run worktree is cleaned up. |
 
 State persists in `agentic.json` so runs survive interruption and resume where they left off.
@@ -98,15 +96,8 @@ The loop auto-detects `claude` or `pi` as the executor. When it finishes, you ge
 # Optional: run with a specific check command
 agentic-loop run --checks "npm test"
 
-# Plan first, review agentic.json, then execute
-agentic-loop run --plan-only
-agentic-loop run
-
 # Skip the apply step — keep changes in the run branch instead
 agentic-loop run --no-apply
-
-# Auto-merge into main instead of applying unstaged
-agentic-loop run --merge
 ```
 
 ---
@@ -131,13 +122,12 @@ Nothing is committed until you decide to commit it.
 The loop is designed to fail loudly rather than silently produce wrong output:
 
 - **Clean-tree gate** — refuses to start with uncommitted changes unless `--allow-dirty`.
-- **Adaptive phase admission** — fresh planner context takes the fast path; ambiguity, complexity, failed checks, changed assumptions, risk, and documentation changes selectively restore ceremony. Every skip is logged with a reason.
-- **Decision-grill** — design decisions resolved with evidence before code runs. Shallow or unanchored decisions are rejected by the harness.
+- **Adaptive phase admission** — ambiguity, complexity, failed checks, changed assumptions, risk, and documentation changes select only necessary paths. Every decision is logged.
 - **Scope enforcement** — each task declares a glob list of files it may touch. Out-of-scope changes fail immediately before the verifier runs.
-- **Adversarial verifiers** — verifiers are explicitly told to refute the result. Multi-vote required for implementation/architecture tasks.
+- **Adversarial verifiers** — three votes for resolved high risk; normal code uses one vote.
 - **Retry budget** — failures retry with a failure-analysis artifact so the next attempt knows what went wrong. Budget exhaustion escalates to `needs_human`.
-- **Complexity-gated stance reflection** — high-complexity work is challenged before edits; periodic architect checkpoints remain optional and default off.
-- **CodeGraph sync** — the code knowledge graph is synced before admitted discovery/review phases and after apply; fresh planner tasks use the planner context without paying for another sync session.
+- **Complexity-gated stance reflection** — high-complexity work is challenged once before edits.
+- **CodeGraph sync** — knowledge graph is synced for planning, execution context, and apply.
 
 ---
 
@@ -147,7 +137,6 @@ The loop is designed to fail loudly rather than silently produce wrong output:
 agentic-loop status           # task list and what's next
 agentic-loop why-stuck        # explain blocked or needs_human tasks
 agentic-loop last-failure     # most recent failure details
-agentic-loop reset-task <id>  # clean up a stuck task and retry
 ```
 
 ---

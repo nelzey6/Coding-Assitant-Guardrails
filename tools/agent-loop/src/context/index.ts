@@ -1,5 +1,6 @@
 import { readFileSync, existsSync, readdirSync, statSync } from "fs";
 import { join, resolve } from "path";
+import type { AgenticState } from "../state/index.js";
 
 export const PROMOTABLE_BUCKETS = ["engineering", "productivity", "misc"] as const;
 export const EXCLUDED_BUCKETS = ["personal", "in-progress", "deprecated"] as const;
@@ -19,40 +20,6 @@ export interface BucketStructure {
   skills: SkillEntry[];
   readmePath: string;
   readmeExists: boolean;
-}
-
-export interface AgenticState {
-  version?: number;
-  goal?: string;
-  phase?: string;
-  maxIterations?: number;
-  checks?: string[];
-  tasks?: AgenticTask[];
-  decisions?: string[];
-  assumptions?: string[];
-  openQuestions?: string[];
-  blockers?: string[];
-  promptPolicy?: { lessons?: string[] };
-}
-
-export interface AgenticTask {
-  id: string;
-  title?: string;
-  kind?: string;
-  workflow?: string;
-  status?: string;
-  priority?: number;
-  acceptanceCriteria?: string[];
-  validation?: string[];
-  dependsOn?: string[];
-  scope?: string[];
-  reviewBranch?: string;
-  reviewWorktree?: string;
-  failureHistory?: unknown[];
-  artifacts?: unknown[];
-  complexity?: "low" | "medium" | "high";
-  complexityReasons?: string[];
-  approvedStanceFile?: string;
 }
 
 export interface RepoContext {

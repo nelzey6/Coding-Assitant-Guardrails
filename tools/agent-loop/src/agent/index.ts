@@ -1,10 +1,9 @@
-import { spawnSync, spawn } from "child_process";
+import { spawn } from "child_process";
 import { mkdirSync, readFileSync, appendFileSync, createWriteStream, writeFileSync, unlinkSync, existsSync, statSync } from "fs";
 import { dirname, resolve, join } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
-import type { AgenticTask, AgenticState } from "../context/index.js";
-import { runShellScript } from "../tools/shell.js";
+import type { Task as AgenticTask, AgenticState } from "../state/index.js";
 
 export type AgentTool = "claude" | "pi" | "custom";
 
@@ -12,8 +11,6 @@ export interface AgentConfig {
   tool: AgentTool;
   /** Shell command template; must contain `{prompt}` which is replaced with the absolute prompt file path. */
   commandTemplate?: string;
-  /** Shell command template for the verifier agent (falls back to commandTemplate if absent). */
-  verifierCommandTemplate?: string;
   /** Seconds before the agent invocation is killed. 0 = no timeout. */
   timeoutSeconds?: number;
 }
@@ -25,26 +22,6 @@ export class AgentError extends Error {
   }
 }
 
-function toAgentError(err: unknown, command: string): AgentError {
-  const msg = err instanceof Error ? err.message : String(err);
-  return new AgentError(msg.includes(command) ? msg : `${msg}: ${command}`);
-}
-
-function shellRun(command: string, cwd: string, timeoutSeconds: number): void {
-  try {
-    runShellScript(command, cwd, timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined, "inherit");
-  } catch (err) {
-    throw toAgentError(err, command);
-  }
-}
-
-function shellCapture(command: string, cwd: string, timeoutSeconds: number): string {
-  try {
-    return runShellScript(command, cwd, timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined, "pipe");
-  } catch (err) {
-    throw toAgentError(err, command);
-  }
-}
 
 /**
  * Run a shell command, streaming output live to stdout AND appending to logPath.
@@ -115,67 +92,6 @@ function spawnTee(command: string, cwd: string, timeoutSeconds: number, logPath:
       });
     });
   });
-}
-
-/**
- * Invoke an agent with the given prompt file.
- * When config.commandTemplate is set, substitutes `{prompt}` with the resolved
- * prompt path and runs it via the shell (mirroring `Invoke-Agent` with --command).
- * Otherwise dispatches to the named tool ("claude" or "pi").
- * Output goes directly to stdout/stderr (no capture).
- */
-export function invokeAgent(
-  promptFile: string,
-  config: AgentConfig,
-  workingDirectory = process.cwd()
-): void {
-  const template = config.commandTemplate;
-  const timeout = config.timeoutSeconds ?? 0;
-
-  if (template) {
-    const resolvedPrompt = resolve(promptFile);
-    const command = template.replace("{prompt}", resolvedPrompt);
-    if (timeout > 0) {
-      // capture so the loop can inspect output; print it too
-      const out = shellCapture(command, workingDirectory, timeout);
-      if (out) process.stdout.write(out + "\n");
-    } else {
-      shellRun(command, workingDirectory, 0);
-    }
-    return;
-  }
-
-  switch (config.tool) {
-    case "claude": {
-      const prompt = readFileSync(promptFile, "utf-8");
-      const result = spawnSync("claude", ["-p", prompt], {
-        cwd: workingDirectory,
-        stdio: "inherit",
-        timeout: timeout > 0 ? timeout * 1000 : undefined,
-      });
-      if (result.error) throw new AgentError(`claude failed: ${result.error.message}`);
-      if (result.status !== 0) throw new AgentError(`claude exited with code ${result.status}`);
-      break;
-    }
-    case "pi": {
-      const resolvedPrompt = resolve(promptFile);
-      const result = spawnSync("pi", ["-p", `@${resolvedPrompt}`], {
-        cwd: workingDirectory,
-        stdio: "inherit",
-        timeout: timeout > 0 ? timeout * 1000 : undefined,
-      });
-      if (result.error) throw new AgentError(`pi failed: ${result.error.message}`);
-      // pi does not always set exit code reliably; only throw on definite non-zero
-      if (typeof result.status === "number" && result.status !== 0) {
-        throw new AgentError(`pi exited with code ${result.status}`);
-      }
-      break;
-    }
-    case "custom":
-      throw new AgentError("--tool custom requires --command '... {prompt} ...'");
-    default:
-      throw new AgentError(`Unknown tool '${config.tool}'. Use --command for custom CLIs.`);
-  }
 }
 
 export interface TokenUsage {

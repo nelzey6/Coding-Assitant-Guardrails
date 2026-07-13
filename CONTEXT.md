@@ -1,86 +1,92 @@
 # Coding Assistant Guardrails — Domain Language
 
-This file defines the canonical terms used across this repository. Use these names consistently in code, docs, prompts, and issues.
+Canonical terms for code, docs, prompts, and issues.
 
-## Harness and run lifecycle
+## Harness and lifecycle
 
 **Agentic loop** (or **harness**):
-The TypeScript CLI (`tools/agent-loop/`) that orchestrates an autonomous coding run end-to-end — planning, grilling, executing, verifying, and applying results.
-
-**Run**:
-One invocation of `agentic-loop run`. A run processes all tasks for the current goal and ends by applying changes or reporting a stop condition. A run has one shared run worktree for its lifetime.
-
-**Run worktree**:
-The isolated git worktree created at the start of a run, at `.worktrees/run-<timestamp>/` on branch `agentic/run-<timestamp>`. All tasks in the run commit onto this branch. Cleaned up (or applied) when the run ends.
-
-**Apply** (default end-of-run behavior):
-After all tasks pass, the harness checks out the run branch into the main working tree as unstaged changes — no commit, no merge. The user reviews, stages selectively, and commits manually.
+TypeScript CLI under `tools/agent-loop/` that turns one goal into isolated, checked repository changes.
 
 **Goal**:
-The plain-English description of what the run should accomplish, stored in `agentic.json`. Set with `agentic-loop init "<goal>"`.
+Plain-English outcome stored in `agentic.json`. Created with `agent init "<goal>"`.
+
+**Run**:
+One `agent run` invocation. It plans when necessary, executes runnable tasks, escalates only from evidence, and either applies changes or stops with traceable state.
+
+**Run worktree**:
+Single isolated worktree at `.worktrees/run-<timestamp>/` on `agentic/run-<timestamp>`. All task commits stay there until completion.
+
+**Apply**:
+Default completion behavior. Harness copies run-branch files into parent checkout as unstaged changes, then removes run worktree and branch. `--no-apply` retains them.
 
 **Task**:
-One discrete unit of work inside a run. Stored in `agentic.json` with an id, title, workflow, acceptance criteria, scope globs, validation commands, and status.
+Verification slice with id, title, workflow, acceptance criteria, scope, validation commands, dependencies, complexity, and status.
 
 **Task status**:
-One of: `pending`, `running`, `passed`, `failed`, `needs_retry`, `needs_human`, `blocked`.
+`pending`, `running`, `passed`, `failed`, `needs_retry`, `needs_human`, or `blocked`.
 
-## Phases
+## Adaptive phases
 
 **Planner**:
-The first agent phase. Reads the goal and repo, runs `grill-with-docs` discovery, and writes a task graph to `agentic.json` plus `grill-transcript.md`.
+Owns understanding, questions, decisions, assumptions, task slicing, scope, and validation design. Fresh planner revisions authorize execution.
 
-**Task-grill**:
-A fresh agent that re-reads repo state before every executor turn and answers: "Is this task still understood, scoped, and safe?" Returns a structured verdict (`ready`, `needs_replan`, `needs_human`, `blocked`).
+**Replan admission**:
+Deterministic check before execution. Stale/manual tasks, changed planning context, unresolved ambiguity, and understanding-sensitive failures return to Planner. Check failures retry directly.
 
-**Decision-grill**:
-A fresh agent that surfaces genuine design forks before the executor acts. Each decision requires 2–4 evidenced options, exactly one recommended. Accepted decisions become **binding rules** injected into the executor prompt.
+**Planning context fingerprint**:
+Stable identity of goal, decisions, assumptions, open questions, and blockers when Planner authorizes a task. Drift invalidates that task before Executor starts.
+
+**Stance reflection**:
+One pre-edit self-challenge for high-complexity tasks. Produces an approved technical stance or stops for human input.
 
 **Executor**:
-The agent that does the actual code work. Runs inside the shared run worktree and follows the canonical `SKILL.md` for the selected workflow.
+Edits exactly one task inside Run worktree.
+
+**Checks**:
+Deterministic validation commands from state, task, and operator.
 
 **Scope rail**:
-Harness-owned check after executor and before verifier. Diffs changed files against the task's declared `scope` globs. Out-of-scope changes are a retryable failure.
+Compares changed files with task scope. Out-of-scope changes fail before verification.
+
+**Verification profile**:
+Single risk decision from task complexity, meaningful scope, actual changed paths, failures, architecture intent, path gates, and semantic human gates.
 
 **Verifier**:
-A fresh agent that reviews the diff, check output, and acceptance criteria and returns `pass`, `fail`, or `needs_human`. High-risk tasks use multi-vote adversarial verifiers (told to refute first; majority pass required).
+Independent review after checks. Low-risk bounded documentation changes skip it; normal changes use one vote; high-risk changes use three adversarial votes.
 
-**Post-task review**:
-After each passed task: a fresh agent checks whether the remaining task graph is still valid. Verdicts: `continue`, `adjust_remaining_tasks`, `replan`, `needs_human`.
+**Finalize docs**:
+Single documentation pass, admitted only when durable documentation changed. No second finalizer-verifier ceremony.
 
-**Architect checkpoint**:
-Every N passed tasks (default 3): a broader review of the cumulative diff against the original goal. May force a replan.
+**Parent checkout guard**:
+One protected invocation seam around every model phase. It detects parent HEAD or content changes, records evidence, and stops without restoring or hiding mutations.
 
-## Workflows
+## Escalation rules
 
-**Workflow**:
-The canonical skill the executor follows for a given task. Selected by the planner based on task kind. Common values: `tdd`, `diagnose`, `zoom-out`, `improve-codebase-architecture`, `grill-with-docs`, `prototype`.
-
-**Skill**:
-A reusable agent workflow packaged as a folder under `skills/` with a `SKILL.md` defining its trigger conditions, inputs, outputs, and step sequence. Usable standalone or selected by the agentic loop.
+- Ambiguity → Planner returns `needs_human`
+- Stale revision or changed planning context → replan
+- High complexity → stance reflection
+- Failed checks → retry
+- Changed assumptions or understanding-sensitive failure → replan
+- High risk → adversarial verification
+- Durable docs changed → finalize docs
 
 ## Key artifacts
 
-**`agentic.json`**: Task graph and loop state for the current goal.
-
-**`grill-transcript.md`**: Planner's evidence-based Q&A audit trail — visible record of what was decided and why.
-
-**`task-grill-result.json`**: Structured readiness verdict from the task-grill phase.
-
-**`decision-grill-result.json`**: Structured design decisions from the decision-grill phase.
-
-**`executor.md`**: Prompt handed to the executor. Includes task JSON, binding decisions, task-grill result, and scope.
-
-**`verifier-result.json`**: Verifier verdict — `pass`, `fail`, or `needs_human`.
-
-**`handover.md`**: Continuation note written by the executor or harness for the next agent turn.
-
-**`failure-analysis.json`**: Phase, attempt, reason, and diff-stat on every failure — injected into the next task-grill to break blind-retry loops.
+- `agentic.json` — goal, task graph, decisions, assumptions, statuses
+- `grill-transcript.md` — planner evidence and resolved goal decisions
+- `executor.md` / `executor.log` — execution contract and output
+- `checks.log` — deterministic validation evidence
+- `verifier-result.json` — verification verdict when admitted
+- `approved-stance.json` — high-complexity stance
+- `failure-analysis.json` — failed phase, reason, attempt, diff stat
+- `handover.md` — task continuation evidence
+- `.agent-runs/events.jsonl` — append-only trace
 
 ## Relationships
 
-- A **Goal** has one **`agentic.json`** with many **Tasks**
-- A **Run** processes all pending tasks for the current goal in one **Run worktree**
-- Each **Task** goes through: Task-grill → Decision-grill → Executor → Scope rail → Checks → Verifier → Post-task review
-- **Binding decisions** flow from Decision-grill into the Executor prompt as hard rules
-- **Failure analysis** flows from each failed attempt into the next Task-grill prompt
+- Goal has one task graph.
+- Planner owns understanding; no parallel task-grill contract exists.
+- Run processes tasks in one Run worktree.
+- Each fresh task follows: replan admission → optional stance → Executor → Checks → Scope rail → adaptive Verifier.
+- Every model phase crosses Parent checkout guard; only Executor and Finalize docs may mutate Run worktree.
+- Failure evidence flows into retries or Planner.

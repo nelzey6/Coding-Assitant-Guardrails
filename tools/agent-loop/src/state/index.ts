@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
+import { createHash } from "crypto";
 
 export type TaskStatus =
   | "pending"
@@ -29,9 +30,6 @@ export interface Task {
   validation?: string[];
   dependsOn?: string[];
   failureHistory?: FailureRecord[];
-  reviewBranch?: string;
-  reviewWorktree?: string;
-  acceptedAt?: string;
   lastRunDir?: string;
   attempts?: number;
   scope?: string[];
@@ -40,6 +38,7 @@ export interface Task {
   complexityReasons?: string[];
   approvedStanceFile?: string;
   plannedRevision?: number;
+  plannedContextFingerprint?: string;
 }
 
 export interface AgenticState {
@@ -80,6 +79,17 @@ export interface VerifierResult {
   humanGates?: string[];
   recommendedStatus?: string;
   artifacts?: string[];
+}
+
+export function computePlanContextFingerprint(state: AgenticState): string {
+  const normalized = (values: string[] | undefined): string[] => [...new Set(values ?? [])].sort();
+  return createHash("sha256").update(JSON.stringify({
+    goal: state.goal ?? "",
+    decisions: normalized(state.decisions),
+    assumptions: normalized(state.assumptions),
+    openQuestions: normalized(state.openQuestions),
+    blockers: normalized(state.blockers),
+  })).digest("hex");
 }
 
 export function loadState(repoRoot: string, stateFile = "agentic.json"): AgenticState | null {
@@ -150,18 +160,6 @@ export function getTaskAttempts(task: Task): number {
   return task.failureHistory?.length ?? 0;
 }
 
-// Mutates the matching task in place: clears review branch/worktree pointers and
-// stamps acceptedAt. Mirrors the PS1 Clear-TaskReviewState. Caller writes state.
-export function clearTaskReviewState(state: AgenticState, taskId: string, acceptedAt: string): void {
-  for (const task of getTasks(state)) {
-    if (task.id === taskId) {
-      task.reviewBranch = "";
-      task.reviewWorktree = "";
-      task.acceptedAt = acceptedAt;
-    }
-  }
-}
-
 // Set a task's status and optionally append a failure record. Writes state + event.
 export function setTaskStatus(
   repoRoot: string,
@@ -188,23 +186,19 @@ export function setTaskStatus(
   return state;
 }
 
-// Mark a task passed, recording verifier artifacts and optional review branch/worktree.
+// Mark a task passed and record verifier artifacts.
 export function setTaskPassed(
   repoRoot: string,
   stateFile: string,
   runsRoot: string,
   taskId: string,
-  verifierResult: VerifierResult,
-  reviewBranch = "",
-  reviewWorktree = ""
+  verifierResult: VerifierResult
 ): AgenticState {
   const state = loadState(repoRoot, stateFile)!;
   for (const task of getTasks(state)) {
     if (task.id === taskId) {
       task.status = "passed";
       (task as Task & { completedAt?: string }).completedAt = new Date().toISOString();
-      if (reviewBranch) task.reviewBranch = reviewBranch;
-      if (reviewWorktree) task.reviewWorktree = reviewWorktree;
       if (verifierResult.artifacts?.length) {
         task.artifacts = [...(task.artifacts ?? []), ...verifierResult.artifacts];
       }
@@ -212,8 +206,6 @@ export function setTaskPassed(
   }
   writeState(repoRoot, state, stateFile);
   const eventData: Record<string, unknown> = { task: taskId, status: "passed" };
-  if (reviewBranch) eventData["reviewBranch"] = reviewBranch;
-  if (reviewWorktree) eventData["reviewWorktree"] = reviewWorktree;
   if (verifierResult.summary) eventData["summary"] = verifierResult.summary;
   appendEventToLog(repoRoot, runsRoot, stateFile, "task_passed", eventData);
   return state;
@@ -240,28 +232,6 @@ export function addTaskAttempt(
   return state;
 }
 
-// Persist task-grill assumption verdicts back into state.assumptions.
-// Items from assumptionsStillValid are tagged "[valid]"; from assumptionsChanged "[changed]".
-// Writes state and appends an assumptions_updated event.
-export function updateAssumptionsFromGrill(
-  repoRoot: string,
-  stateFile: string,
-  runsRoot: string,
-  taskId: string,
-  assumptionsStillValid: string[],
-  assumptionsChanged: string[]
-): void {
-  const tagged = [
-    ...assumptionsStillValid.map((a) => `[valid] ${a}`),
-    ...assumptionsChanged.map((a) => `[changed] ${a}`),
-  ];
-  if (tagged.length === 0) return;
-  const state = loadState(repoRoot, stateFile)!;
-  state.assumptions = [...(state.assumptions ?? []), ...tagged];
-  writeState(repoRoot, state, stateFile);
-  appendEventToLog(repoRoot, runsRoot, stateFile, "assumptions_updated", { task: taskId, count: tagged.length, items: tagged });
-}
-
 // Flatten a (loosely-typed) decision record into the string form stored in state.decisions.
 // Kept here (rather than importing from prompts) so the state layer has no prompt dependency.
 export function flattenDecisionRecord(d: Record<string, unknown>, taskId: string): string {
@@ -274,24 +244,6 @@ export function flattenDecisionRecord(d: Record<string, unknown>, taskId: string
     .map((o) => `${o["recommended"] === true ? "*" : "-"} ${o["label"] ?? ""} (${o["evidence"] ?? ""})`)
     .join(" | ");
   return `[${taskId}] Q: ${d["question"] ?? ""} | why: ${d["whyItMatters"] ?? ""} | options: ${optStr} | chose: ${d["chosen"] ?? ""} | self-answer: ${d["selfAnswer"] ?? ""} | confidence: ${d["confidence"] ?? ""}`;
-}
-
-// Append self-grill decision records (flattened to strings) to state.decisions and emit an event.
-// Mirrors updateAssumptionsFromGrill. Returns the count recorded.
-export function recordDecisions(
-  repoRoot: string,
-  stateFile: string,
-  runsRoot: string,
-  taskId: string,
-  decisions: Record<string, unknown>[]
-): number {
-  if (!decisions.length) return 0;
-  const flat = decisions.map((d) => flattenDecisionRecord(d, taskId));
-  const state = loadState(repoRoot, stateFile)!;
-  state.decisions = [...(state.decisions ?? []), ...flat];
-  writeState(repoRoot, state, stateFile);
-  appendEventToLog(repoRoot, runsRoot, stateFile, "decisions_recorded", { task: taskId, count: flat.length, items: flat });
-  return flat.length;
 }
 
 // Return the most recent failure-analysis.json path for a task, if recorded.
@@ -334,8 +286,9 @@ export function mergePlannerResult(
   if (result.verdict === "planned") {
     const newTasks = result.tasks ?? [];
     const planRevision = (state.planRevision ?? 0) + 1;
+    const plannedContextFingerprint = computePlanContextFingerprint(state);
     state.planRevision = planRevision;
-    state.tasks = [...(state.tasks ?? []), ...newTasks.map((task) => ({ ...task, plannedRevision: planRevision }))];
+    state.tasks = [...(state.tasks ?? []), ...newTasks.map((task) => ({ ...task, plannedRevision: planRevision, plannedContextFingerprint }))];
     state.phase = "execution";
     state.lastReplanTaskIds = newTasks.map((t) => t.id);
   } else if (result.verdict === "needs_human") {

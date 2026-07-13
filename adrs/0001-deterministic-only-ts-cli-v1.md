@@ -2,7 +2,7 @@
 
 ## Status
 
-Superseded by [ADR-0002](./0002-ts-agent-loop-autonomous-runner.md).
+Superseded by [ADR-0005](./0005-adaptive-core-loop.md).
 
 ## Context
 
