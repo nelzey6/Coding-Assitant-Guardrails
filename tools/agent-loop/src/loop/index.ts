@@ -246,11 +246,6 @@ function applyRunWorktree(cfg: Required<LoopConfig>, runBranch: string, runWorkt
   }
 }
 
-function appendProgress(runsRoot: string, taskId: string, summary: string, handoverFile: string): void {
-  const progressFile = join(runsRoot, "agentic-progress.txt");
-  appendFileSync(progressFile, `\n## ${new Date().toISOString()} ${taskId}\n- Verdict: pass\n- Summary: ${summary}\n- Handover: ${handoverFile}\n`, "utf-8");
-}
-
 function handleMainWorktreeMutation(
   cfg: Required<LoopConfig>,
   taskId: string,
@@ -299,13 +294,13 @@ async function runPlannerPhase(
   const promptFile       = join(plannerRunDir, "planner.md");
   const repoContextFile  = join(plannerRunDir, "repo-context.md");
   const resultFile       = join(plannerRunDir, "planner-result.json");
-  const grillFile        = join(plannerRunDir, "grill-transcript.md");
   const codeGraphFile    = join(plannerRunDir, "codegraph.md");
   const plannerLogFile   = join(plannerRunDir, "planner.log");
 
   const state = loadState(cfg.repoRoot, cfg.stateFile)!;
 
   const plannerMode = resolveEffectivePlannerMode(policy, state, priorFailureAnalysisFile);
+  const grillFile = plannerMode.mode === "full" ? join(plannerRunDir, "grill-transcript.md") : "";
   appendEvent(cfg.repoRoot, "planner_mode_selected", {
     mode: plannerMode.mode,
     source: plannerMode.source,
@@ -334,13 +329,13 @@ async function runPlannerPhase(
     priorFailureAnalysisFile,
   });
 
-  appendEvent(cfg.repoRoot, "planner_started", { runDir: plannerRunDir, prompt: promptFile, resultFile, grillTranscript: grillFile, log: plannerLogFile }, cfg.runsRoot, cfg.stateFile);
+  appendEvent(cfg.repoRoot, "planner_started", { runDir: plannerRunDir, prompt: promptFile, resultFile, ...(grillFile ? { grillTranscript: grillFile } : {}), log: plannerLogFile }, cfg.runsRoot, cfg.stateFile);
   console.log("=== Agentic planner ===");
   agentCallCounter.count++;
   emitTokenUsage(cfg, await invokeAgentPhase({ ...cfg, promptFile, workingDirectory: cfg.repoRoot, logFile: plannerLogFile, phase: "planner" }));
 
   if (!existsSync(resultFile)) throw new LoopError(`Planner did not write ${resultFile}`);
-  if (!existsSync(grillFile))  throw new LoopError(`Planner did not write ${grillFile}`);
+  if (grillFile && !existsSync(grillFile)) throw new LoopError(`Planner did not write ${grillFile}`);
 
   let plannerResult = JSON.parse(readFileSync(resultFile, "utf-8")) as Record<string, unknown>;
   let errors = [
@@ -375,7 +370,7 @@ async function runPlannerPhase(
     if (errors.length > 0) throw new LoopError(`Planner result invalid after repair:\n${errors.join("\n")}`);
   }
 
-  appendEvent(cfg.repoRoot, "planner_finished", { runDir: plannerRunDir, verdict: plannerResult["verdict"], resultFile, grillTranscript: grillFile }, cfg.runsRoot, cfg.stateFile);
+  appendEvent(cfg.repoRoot, "planner_finished", { runDir: plannerRunDir, verdict: plannerResult["verdict"], resultFile, ...(grillFile ? { grillTranscript: grillFile } : {}) }, cfg.runsRoot, cfg.stateFile);
   const stateAfterPlan = mergePlannerResult(cfg.repoRoot, cfg.stateFile, plannerResult as unknown as PlannerResult);
   if (plannerResult["verdict"] !== "planned") {
     const verdict = String(plannerResult["verdict"] ?? "blocked");
@@ -399,7 +394,6 @@ async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter:
 
   const promptFile    = join(runDir, "finalize-docs.md");
   const executorLog   = join(runDir, "finalize-docs.log");
-  const summaryFile   = join(runDir, "final-summary.md");
 
   const state = loadState(cfg.repoRoot, cfg.stateFile)!;
   writeFinalizeDocsPrompt(promptFile, {
@@ -409,10 +403,9 @@ async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter:
     stateFile: cfg.stateFile,
     budget: "medium",
     state,
-    summaryFile,
   });
 
-  appendEvent(cfg.repoRoot, "finalize_docs_started", { runDir, prompt: promptFile, summary: summaryFile }, cfg.runsRoot, cfg.stateFile);
+  appendEvent(cfg.repoRoot, "finalize_docs_started", { runDir, prompt: promptFile }, cfg.runsRoot, cfg.stateFile);
   console.log("=== Agentic finalize-docs ===");
   agentCallCounter.count++;
   emitTokenUsage(cfg, await invokeAgentPhase({ ...cfg, promptFile, workingDirectory: runWorktreePath, logFile: executorLog, phase: "finalize-docs" }));
@@ -426,12 +419,8 @@ async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter:
     git(["commit", "-m", "agentic: finalize docs"], runWorktreePath);
   }
 
-  if (!existsSync(summaryFile)) {
-    writeFileSync(summaryFile, `# Agentic final summary\n\nFinalizer did not create a summary; inspect ${executorLog}.`, "utf-8");
-  }
-
   appendEvent(cfg.repoRoot, "finalize_docs_finished", {
-    runDir, summary: summaryFile, changedPaths,
+    runDir, changedPaths,
   }, cfg.runsRoot, cfg.stateFile);
 }
 
@@ -644,7 +633,6 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     const executorLog     = join(runDir, "executor.log");
     const checksLog       = join(runDir, "checks.log");
     const verifierLog     = join(runDir, "verifier.log");
-    const handoverFile         = join(runDir, "handover.md");
     const failureAnalysisFile  = join(runDir, "failure-analysis.json");
     const stateBefore          = join(runDir, "state-before.json");
     const stateAfter           = join(runDir, "state-after.json");
@@ -696,9 +684,6 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         continue;
       }
 
-      syncCodeGraph(worktreePath);
-      writeCodeGraphContext(codeGraphFile, worktreePath);
-
       const complexity = resolveTaskComplexity(task as any, policy);
       task.complexity = complexity.level;
       task.complexityReasons = complexity.reasons;
@@ -712,6 +697,16 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         }
       }
       appendEvent(cfg.repoRoot, "task_complexity_resolved", { task: taskId, level: complexity.level, reasons: complexity.reasons }, cfg.runsRoot, cfg.stateFile);
+
+      const declaredScope = getTaskScope(task as any);
+      const compactExecutor = complexity.level === "low"
+        && !isTaskUnscoped(task as any)
+        && (["maintenance", "discovery", "investigation"].includes(task.kind ?? "")
+          || testPathsAreDocumentation(declaredScope));
+      if (!compactExecutor) {
+        syncCodeGraph(worktreePath);
+        writeCodeGraphContext(codeGraphFile, worktreePath);
+      }
 
       let approvedStance: StanceReflectionResult | undefined;
       if (complexity.level === "high") {
@@ -736,11 +731,6 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       }
 
       // Executor
-      const declaredScope = getTaskScope(task as any);
-      const compactExecutor = complexity.level === "low"
-        && !isTaskUnscoped(task as any)
-        && (["maintenance", "discovery", "investigation"].includes(task.kind ?? "")
-          || testPathsAreDocumentation(declaredScope));
       writeExecutorPrompt(executorPrompt, {
         repoRoot: cfg.repoRoot,
         worktreePath,
@@ -924,29 +914,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         }
         setTaskPassed(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, verifierResultObj);
 
-        // Write handover if executor didn't
-        if (!existsSync(handoverFile)) {
-          const diffStatForHandover = (() => { try { return readFileSync(join(runDir, "diff-stat.txt"), "utf-8"); } catch { return ""; } })();
-          writeFileSync(handoverFile, [
-            `# Task handover: ${taskId}`,
-            "",
-            "## Summary",
-            verifierResultObj.summary ?? "",
-            "",
-            "## Validation",
-            `See checks log: ${checksLog}`,
-            `Verifier result: ${verifierResult}`,
-            "",
-            "## Changed files",
-            diffStatForHandover,
-            "",
-            "## Next-task notes",
-            "No executor-authored handover was found, so the harness generated this fallback from verifier/check artifacts.",
-          ].join("\n"), "utf-8");
-        }
-        appendEvent(cfg.repoRoot, "task_handover_written", { task: taskId, path: handoverFile }, cfg.runsRoot, cfg.stateFile);
         copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
-        appendProgress(join(cfg.repoRoot, cfg.runsRoot), taskId, verifierResultObj.summary ?? "", handoverFile);
 
       } else if (verifierResultObj.verdict === "needs_human") {
         writeFailureAnalysis({ taskId, phase: "verifier", attempt: task.attempts ?? 1, rawOutput: [verifierResultObj.summary ?? "", ...(verifierResultObj.issues ?? [])].filter(Boolean).join("\n"), worktreePath, outputFile: failureAnalysisFile });

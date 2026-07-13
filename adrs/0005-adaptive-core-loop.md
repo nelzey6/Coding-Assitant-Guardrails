@@ -26,6 +26,12 @@ Use one adaptive core loop:
 10. Every model phase crosses one protected invocation seam that detects parent HEAD/content mutation and preserves forensic evidence.
 11. Verification admission emits only valid mode/vote pairs: skip/0, single/1, or adversarial/3. Single-root recursive scopes are broad, not low risk.
 12. Effective planner mode is resolved once with traceable policy/adaptive source and reason. Human gates use structured matching rules with legacy-string compatibility.
+13. Append-only events, state snapshots, checks, diffs, and verifier JSON are the canonical run evidence. Routine task handovers, progress markdown, and final-summary markdown are not generated.
+14. Planner-lite writes only planner JSON. Full Planner keeps the grill transcript because complex discovery needs human-readable decision evidence.
+15. Pi transport persists compact operational events only: session identity, assistant/tool completion counts, aggregate whole-invocation token/cost usage, and bounded errors. It never stores repeated message history, thinking, tool arguments, or tool results.
+16. Finalize-docs admission is limited to source-of-truth documentation paths (`PROJECT.md`, `CONTEXT.md`, agent guidance, `docs/`, `adrs/`, and `templates/`). An arbitrary root Markdown file such as `README.md` does not pay for another model pass.
+17. Compact tasks do not generate CodeGraph context or initialize a repository index. Existing indexes are synchronized after applicable changes, but index creation is never an incidental run side effect.
+18. Do not duplicate console output into a top-level run log. Phase logs and append-only events are the diagnostic sources; live console output remains available to the operator.
 
 Delete standalone task-grill, decision-grill, post-task review, architect checkpoint, goal review, bundled preflight/review, finalizer verifier, deterministic `plan`, review-branch lifecycle, and their compatibility fallbacks.
 
@@ -41,6 +47,7 @@ Positive:
 - CLI and policy expose fewer internal mechanics.
 - State has one canonical schema and one run lifecycle.
 - Tests exercise public behavior rather than deleted phase contracts.
+- Small runs produce less duplicated Markdown and bounded Pi logs while retaining machine-readable traceability.
 
 Tradeoffs:
 
@@ -48,6 +55,7 @@ Tradeoffs:
 - Manual task graphs without a current planner revision are replanned before execution.
 - Remaining-plan drift must surface through stale revision, failure evidence, or a new goal run rather than periodic review agents.
 - Finalize-docs has no independent second-pass verifier; its edits remain visible in the final diff.
+- Compact Pi logs intentionally omit conversational content; detailed execution evidence lives in changed files, checks, diffs, result JSON, and failure analysis.
 
 ## Supersedes
 

@@ -55,7 +55,7 @@ Single risk decision from task complexity, meaningful scope, actual changed path
 Independent review after checks. Low-risk bounded documentation changes skip it; normal changes use one vote; high-risk changes use three adversarial votes.
 
 **Finalize docs**:
-Single documentation pass, admitted only when durable documentation changed. No second finalizer-verifier ceremony.
+Single documentation pass, admitted only when source-of-truth documentation changed. README-only edits do not trigger it. No second finalizer-verifier ceremony.
 
 **Parent checkout guard**:
 One protected invocation seam around every model phase. It detects parent HEAD or content changes, records evidence, and stops without restoring or hiding mutations.
@@ -68,19 +68,20 @@ One protected invocation seam around every model phase. It detects parent HEAD o
 - Failed checks → retry
 - Changed assumptions or understanding-sensitive failure → replan
 - High risk → adversarial verification
-- Durable docs changed → finalize docs
+- Source-of-truth docs changed → finalize docs
 
 ## Key artifacts
 
 - `agentic.json` — goal, task graph, decisions, assumptions, statuses
-- `grill-transcript.md` — planner evidence and resolved goal decisions
+- `grill-transcript.md` — full-Planner evidence and resolved goal decisions; omitted in Planner-lite
 - `executor.md` / `executor.log` — execution contract and output
 - `checks.log` — deterministic validation evidence
 - `verifier-result.json` — verification verdict when admitted
 - `approved-stance.json` — high-complexity stance
 - `failure-analysis.json` — failed phase, reason, attempt, diff stat
-- `handover.md` — task continuation evidence
 - `.agent-runs/events.jsonl` — append-only trace
+
+Routine handover, progress, and final-summary Markdown are intentionally omitted. State, events, checks, diffs, and phase result JSON own traceability.
 
 ## Relationships
 

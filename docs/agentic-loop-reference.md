@@ -82,13 +82,18 @@ Bootstrap commands run inside worktree. Declared bootstrap artifacts are ignored
 
 Each failure writes `failure-analysis.json`. Events append to `.agent-runs/events.jsonl`.
 
+Pi JSON transport logs only session metadata, assistant/tool completion summaries, aggregate whole-invocation token/cost usage, and bounded errors. It omits message history, thinking, tool arguments, and tool results. Compact tasks do not generate CodeGraph context or initialize `.codegraph/`.
+
 ## Completion
 
 Passed tasks commit inside run branch. After final task:
 
-- durable docs changed → one finalize-docs call; reject non-doc edits and commit accepted docs before apply
+- source-of-truth docs changed (`PROJECT.md`, `CONTEXT.md`, agent guidance, `docs/`, `adrs/`, or `templates/`) → one finalize-docs call; reject non-doc edits and commit accepted docs before apply
+- README-only change → skip finalize-docs
 - default → copy branch files into parent as unstaged changes, clean worktree/branch
 - `--no-apply` → retain run worktree/branch
+
+Planner-lite writes no grill transcript. Routine handover, progress, final-summary Markdown, and duplicate top-level run logs are not generated; use state, phase logs, events, checks, diffs, and result JSON for traceability.
 
 ## Removed interfaces
 

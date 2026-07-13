@@ -803,6 +803,8 @@ if (![string]::IsNullOrWhiteSpace($acceptTaskId)) {
     catch { Write-Output $_.Exception.Message; exit 1 }
 }
 
+$runStartHead = ((& git rev-parse HEAD) -join "").Trim()
+
 function Invoke-Agent([string]$PromptFile, [string]$Template, [string]$WorkingDirectory = "") {
     $script:agentCallCount++
     if (![string]::IsNullOrWhiteSpace($Template)) {
@@ -1186,17 +1188,16 @@ You are executing one task inside an agentic harness worktree.
 Hard rules:
 - Complete exactly one task: the task JSON below.
 - Read AGENTS.md / CLAUDE.md and follow repository rules.
-- Read and follow the canonical SKILL.md for the selected workflow.
+- Read and follow the canonical SKILL.md for the selected workflow when the task is not a bounded mechanical edit.
 - The harness owns task status, verification, commits, and merges.
 - Do not mark the task passed yourself.
 - Do not edit upstream-derived files unless explicit permission is present.
 - Keep task artifacts under this run directory when useful: $RunDir
-- Before finishing, write a concise handover note to `$RunDir/handover.md` with: what changed, key files, validation run, gotchas, and next-task notes.
 - For discovery/investigation tasks, useful artifact files may be the main output; code changes are not required unless the task asks for them.
 - For implementation/architecture/maintenance tasks, prefer tracked repo changes plus validation unless the task is explicitly artifact-only.
 - When you add a focused smoke test/check that proves this task, use or propose it as a task.validation command (for example `pwsh -File tests/path/focused-smoke.ps1`) so the harness runs it before verification.
 - Use `pwsh -File` in harness and smoke-test command examples. Mention `powershell.exe` only as a legacy Windows PowerShell compatibility fallback when explicitly needed.
-- If the task JSON has a non-empty `scope`, change only files matching those globs. The harness enforces this as a hard pre-verifier rail: files changed outside scope fail the task. If you must touch a file outside scope, stop and record it in the handover instead of editing it.
+- If the task JSON has a non-empty `scope`, change only files matching those globs. The harness enforces this as a hard pre-verifier rail. If another file is required, stop without editing it.
 
 Iteration: $Iteration
 State file: $stateFile
@@ -1223,12 +1224,23 @@ function Invoke-FinalizeDocsIfNeeded {
     if (!$merge) { Write-AgenticEvent "finalize_docs_skipped" @{ reason = "changes-not-merged" }; return }
     if (!(Test-Path -LiteralPath "PROJECT.md") -and !(Test-Path -LiteralPath "CONTEXT.md")) { Write-AgenticEvent "finalize_docs_skipped" @{ reason = "no-project-or-context-md" }; return }
 
+    $changedPaths = @(& git diff --name-only "$runStartHead..HEAD")
+    $changedPaths += @(& git status --porcelain | ForEach-Object {
+        $line = [string]$_
+        if ($line.Length -gt 3) { $line.Substring(3).Trim() }
+    })
+    $sourceDocs = @($changedPaths | Where-Object {
+        $path = ([string]$_).Replace("\", "/")
+        $path -match '^(PROJECT\.md|CONTEXT\.md|CONTEXT-MAP\.md|AGENTS\.md|CLAUDE\.md)$' -or
+        $path -match '^(docs|adrs|templates)/'
+    } | Select-Object -Unique)
+    if ($sourceDocs.Count -eq 0) { Write-AgenticEvent "finalize_docs_skipped" @{ reason = "no-source-of-truth-docs-changed" }; return }
+
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $finalizeRunDir = Join-Path $runsRoot "agentic-$timestamp-finalize-docs"
     $finalizeRunDirAbs = Join-Path (Resolve-Path -LiteralPath ".").Path $finalizeRunDir
     $promptFile = Join-Path $finalizeRunDirAbs "finalize-docs.md"
     $logFile = Join-Path $finalizeRunDirAbs "finalize-docs.log"
-    $summaryFile = Join-Path $finalizeRunDirAbs "final-summary.md"
     New-Item -ItemType Directory -Force -Path $finalizeRunDirAbs | Out-Null
 
     $stateJson = (Read-StateJson) | ConvertTo-Json -Depth 20
@@ -1244,11 +1256,10 @@ Goal: update durable repository markdowns only when the completed work changed d
 Rules:
 - Use the canonical update-project-md behavior for PROJECT.md.
 - Update PROJECT.md for technical facts: commands, architecture, validation, workflows, debugging, file roles, setup changes.
-- Do not normally edit CONTEXT.md here; CONTEXT.md belongs to the planning grill-with-docs stage. Only touch it if execution discovered a durable domain/product fact that could not have been known during planning, and explain that exception in the final summary.
+- Do not normally edit CONTEXT.md here; CONTEXT.md belongs to the planning grill-with-docs stage. Only touch it if execution discovered a durable domain/product fact that could not have been known during planning.
 - Do not edit AGENTS.md or CLAUDE.md unless the task explicitly changed agent policy.
 - Keep edits concise and factual. Do not add transient run logs.
-- If no durable docs need changes, leave the markdown files unchanged and explain why in the final summary.
-- Always write a final human checkpoint summary to: $summaryFile
+- If no durable docs need changes, leave the markdown files unchanged.
 
 Docs available:
 - $projectState
@@ -1264,17 +1275,14 @@ Current uncommitted diff stat before doc finalization:
 $diffStat
 "@
     Set-Content -LiteralPath $promptFile -Value $content -Encoding UTF8
-    Write-AgenticEvent "finalize_docs_started" @{ runDir = $finalizeRunDir; prompt = $promptFile; summary = $summaryFile }
+    Write-AgenticEvent "finalize_docs_started" @{ runDir = $finalizeRunDir; prompt = $promptFile; changedPaths = $sourceDocs }
     Invoke-AgentWithLog $promptFile $commandTemplate "" $logFile
-    if (!(Test-Path -LiteralPath $summaryFile)) {
-        Set-Content -LiteralPath $summaryFile -Value "# Agentic final summary`n`nFinalizer did not create a summary; inspect $logFile." -Encoding UTF8
-    }
     $docChanges = (& git status --porcelain -- PROJECT.md)
     if ($docChanges -and $commit) {
         Invoke-CheckedNative git @("add", "PROJECT.md")
         Invoke-CheckedNative git @("commit", "-m", "agentic: finalize docs")
     }
-    Write-AgenticEvent "finalize_docs_finished" @{ runDir = $finalizeRunDir; summary = $summaryFile; docsChanged = [bool]$docChanges }
+    Write-AgenticEvent "finalize_docs_finished" @{ runDir = $finalizeRunDir; docsChanged = [bool]$docChanges }
 }
 
 function Complete-AgenticRun {
@@ -1436,7 +1444,6 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
     $executorLog = Join-Path $runDirAbs "executor.log"
     $checksLog = Join-Path $runDirAbs "checks.log"
     $verifierLog = Join-Path $runDirAbs "verifier.log"
-    $handoverFile = Join-Path $runDirAbs "handover.md"
     $stateBefore = Join-Path $runDirAbs "state-before.json"
     $stateAfter = Join-Path $runDirAbs "state-after.json"
     $verifierResultForPrompt = $verifierResult
@@ -1596,29 +1603,7 @@ for ($iteration = 1; $iteration -le $maxIterationsValue; $iteration++) {
                     exit 1
                 }
             }
-            if (!(Test-Path -LiteralPath $handoverFile)) {
-                $diffStatForHandover = if (Test-Path -LiteralPath (Join-Path $runDirAbs "diff-stat.txt")) { Get-Content -LiteralPath (Join-Path $runDirAbs "diff-stat.txt") -Raw } else { "" }
-                $handoverContent = @"
-# Task handover: $taskId
-
-## Summary
-$($result.summary)
-
-## Validation
-See checks log: $checksLog
-Verifier result: $verifierResult
-
-## Changed files
-$diffStatForHandover
-
-## Next-task notes
-No executor-authored handover was found, so the harness generated this fallback from verifier/check artifacts.
-"@
-                Set-Content -LiteralPath $handoverFile -Value $handoverContent -Encoding UTF8
-            }
-            Write-AgenticEvent "task_handover_written" @{ task = $taskId; path = $handoverFile }
             Copy-Item -LiteralPath $stateFile -Destination $stateAfter -Force
-            Add-Content -Path (Join-Path $runsRoot "agentic-progress.txt") -Value "`n## $(Get-Date -Format o) $taskId`n- Verdict: pass`n- Summary: $($result.summary)`n- Handover: $handoverFile"
             if ($cleanupPassed -and (Test-Path -LiteralPath $worktreePath)) { Invoke-CheckedNative git @("worktree", "remove", $worktreePath) }
             if (![string]::IsNullOrWhiteSpace($retryTaskId)) { Write-Output "<promise>COMPLETE</promise>"; exit 0 }
         } elseif ($verdict -eq "needs_human") {

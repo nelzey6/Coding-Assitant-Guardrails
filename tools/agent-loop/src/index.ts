@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { program } from "commander";
-import { writeFileSync, existsSync, copyFileSync, mkdirSync, createWriteStream } from "fs";
+import { writeFileSync, existsSync, copyFileSync, mkdirSync } from "fs";
 import { execFileSync } from "child_process";
 import { join, resolve, dirname, relative } from "path";
 import { loadContext } from "./context/index.js";
@@ -246,7 +246,7 @@ program
   .option("--no-apply",                      "Do not apply run worktree changes to main tree at end (default: apply)")
   .option("--allow-dirty",                   "Proceed even if policy requires a clean main worktree")
   .option("--no-finalize-docs",              "Skip the finalize-docs agent after all tasks pass")
-  .action((opts) => {
+  .action(async (opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
     failOnInterruptedRun(repoRoot, DEFAULT_STATE_FILE, DEFAULT_RUNS_ROOT);
 
@@ -298,21 +298,7 @@ program
       finalizeDocs:                opts.finalizeDocs !== false,
     };
 
-    const runsRoot = join(repoRoot, loopConfig.runsRoot ?? DEFAULT_RUNS_ROOT);
-    mkdirSync(runsRoot, { recursive: true });
-    const runTs = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
-    const runLogPath = join(runsRoot, `run-${runTs}.log`);
-    const logStream = createWriteStream(runLogPath, { flags: "a" });
-    for (const stream of [process.stdout, process.stderr] as NodeJS.WriteStream[]) {
-      const orig = stream.write.bind(stream);
-      (stream as NodeJS.WriteStream).write = function(chunk: Uint8Array | string, ...rest: unknown[]) {
-        logStream.write(chunk);
-        return (orig as (...a: unknown[]) => boolean)(chunk, ...rest);
-      } as typeof stream.write;
-    }
-    if (process.stdout.isTTY) console.log(`Run log: ${runLogPath}`);
-
-    runAgenticLoop(loopConfig).catch((err) => {
+    await runAgenticLoop(loopConfig).catch((err) => {
       if (err instanceof LoopError) {
         console.error(err.message);
         process.exit(err.exitCode);

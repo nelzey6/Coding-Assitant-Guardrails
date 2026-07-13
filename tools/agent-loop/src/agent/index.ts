@@ -22,12 +22,72 @@ export class AgentError extends Error {
   }
 }
 
+function aggregatePiUsage(values: unknown[]): Record<string, unknown> | undefined {
+  const usages = values.filter((value): value is Record<string, unknown> => !!value && typeof value === "object");
+  if (usages.length === 0) return undefined;
+  const sum = (key: string) => usages.reduce((total, usage) => total + (typeof usage[key] === "number" ? usage[key] as number : 0), 0);
+  const costTotal = usages.reduce((total, usage) => {
+    const cost = usage.cost as Record<string, unknown> | undefined;
+    return total + (typeof cost?.total === "number" ? cost.total : 0);
+  }, 0);
+  return {
+    input: sum("input"),
+    output: sum("output"),
+    cacheRead: sum("cacheRead"),
+    cacheWrite: sum("cacheWrite"),
+    totalTokens: sum("totalTokens"),
+    cost: { total: costTotal },
+  };
+}
+
 
 /**
  * Run a shell command, streaming output live to stdout AND appending to logPath.
  * Resolves when the process exits; rejects on non-zero exit or spawn error.
  */
-function spawnTee(command: string, cwd: string, timeoutSeconds: number, logPath: string, filterVerboseJson = false): Promise<void> {
+function compactPiEvent(line: string): string | null {
+  let event: Record<string, unknown>;
+  try {
+    event = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return line;
+  }
+
+  const type = typeof event.type === "string" ? event.type : "";
+  if (type === "session") {
+    return JSON.stringify({ type, id: event.id, cwd: event.cwd });
+  }
+  if (type === "message_end") {
+    const message = event.message as Record<string, unknown> | undefined;
+    if (message?.role !== "assistant") return null;
+    const content = Array.isArray(message.content) ? message.content as Array<Record<string, unknown>> : [];
+    return JSON.stringify({
+      type: "assistant_end",
+      stopReason: message.stopReason,
+      toolCalls: content.filter((item) => item.type === "toolCall").length,
+      usage: message.usage,
+    });
+  }
+  if (type === "tool_execution_end") {
+    return JSON.stringify({
+      type: "tool_end",
+      toolName: event.toolName,
+      isError: event.isError === true,
+    });
+  }
+  if (type === "agent_end") {
+    const messages = Array.isArray(event.messages) ? event.messages as Array<Record<string, unknown>> : [];
+    const usage = aggregatePiUsage(messages.filter((message) => message.role === "assistant").map((message) => message.usage));
+    return JSON.stringify({ type, usage });
+  }
+  if (type === "error") {
+    const message = typeof event.message === "string" ? event.message.slice(0, 500) : "Pi agent error";
+    return JSON.stringify({ type, message });
+  }
+  return null;
+}
+
+function spawnTee(command: string, cwd: string, timeoutSeconds: number, logPath: string, compactPiJson = false): Promise<void> {
   return new Promise((resolve, reject) => {
     const isWindows = process.platform === "win32";
     const id = randomBytes(8).toString("hex");
@@ -53,19 +113,19 @@ function spawnTee(command: string, cwd: string, timeoutSeconds: number, logPath:
       }, timeoutSeconds * 1000);
     }
 
-    // Filter pi --mode json message_update events inline (97% of log volume).
+    // Pi's JSON stream repeats full conversation history, thoughts, arguments,
+    // and tool results. Persist only operational summaries needed for telemetry.
     let lineBuf = "";
-    const filterLine = filterVerboseJson
-      ? ((line: string) => { try { const e = JSON.parse(line) as { type?: string }; return e.type !== "message_update"; } catch { return true; } })
-      : undefined;
+    const transformLine = compactPiJson ? compactPiEvent : undefined;
 
     const onData = (chunk: Buffer) => {
-      if (!filterLine) { process.stdout.write(chunk); logStream.write(chunk); return; }
+      if (!transformLine) { process.stdout.write(chunk); logStream.write(chunk); return; }
       lineBuf += chunk.toString("utf-8");
       const lines = lineBuf.split("\n");
       lineBuf = lines.pop() ?? "";
       for (const line of lines) {
-        if (filterLine(line)) { const out = line + "\n"; process.stdout.write(out); logStream.write(out); }
+        const compact = transformLine(line);
+        if (compact !== null) { const out = compact + "\n"; process.stdout.write(out); logStream.write(out); }
       }
     };
 
@@ -81,7 +141,10 @@ function spawnTee(command: string, cwd: string, timeoutSeconds: number, logPath:
 
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (filterLine && lineBuf.length > 0 && filterLine(lineBuf)) { const out = lineBuf + "\n"; process.stdout.write(out); logStream.write(out); }
+      if (transformLine && lineBuf.length > 0) {
+        const compact = transformLine(lineBuf);
+        if (compact !== null) { const out = compact + "\n"; process.stdout.write(out); logStream.write(out); }
+      }
       logStream.end(() => {
         try { unlinkSync(scriptPath); } catch { /* ignore */ }
         if (code !== 0 && code !== null) {
@@ -126,7 +189,11 @@ function extractInvocationShape(logPath: string): { assistantTurns: number; tool
     for (const line of readFileSync(logPath, "utf-8").split("\n")) {
       if (!line.trim()) continue;
       try {
-        const event = JSON.parse(line) as { type?: string; message?: { role?: string; content?: Array<{ type?: string }> } };
+        const event = JSON.parse(line) as { type?: string; toolCalls?: number; message?: { role?: string; content?: Array<{ type?: string }> } };
+        if (event.type === "assistant_end") {
+          assistantTurns++;
+          toolCalls += event.toolCalls ?? 0;
+        }
         if (event.type === "message_end" && event.message?.role === "assistant") {
           assistantTurns++;
           toolCalls += (event.message.content ?? []).filter((item) => item.type === "toolCall").length;
@@ -169,10 +236,9 @@ function extractPiUsage(logPath: string, phase: string): TokenUsage | null {
   for (const line of lines) {
     try {
       const d = JSON.parse(line) as Record<string, unknown>;
-      if (d.type === "agent_end" && Array.isArray(d.messages)) {
-        const msgs = d.messages as Array<Record<string, unknown>>;
-        const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
-        const u = (lastAssistant?.usage ?? {}) as Record<string, unknown>;
+      if (d.type === "agent_end" && (Array.isArray(d.messages) || (d.usage && typeof d.usage === "object"))) {
+        const msgs = Array.isArray(d.messages) ? d.messages as Array<Record<string, unknown>> : [];
+        const u = (d.usage ?? aggregatePiUsage(msgs.filter((message) => message.role === "assistant").map((message) => message.usage)) ?? {}) as Record<string, unknown>;
         const cost = (u.cost ?? {}) as Record<string, number>;
         return {
           tool: "pi",

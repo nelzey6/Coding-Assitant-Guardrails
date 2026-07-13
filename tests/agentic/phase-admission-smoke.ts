@@ -101,6 +101,7 @@ assert(litePlanner.mode === "lite" && litePlanner.source === "adaptive", "small 
 const replanPlanner = resolveEffectivePlannerMode(policy, { goal: "Update docs/guide.md wording", planRevision: 1 });
 assert(replanPlanner.mode === "full" && replanPlanner.reason.includes("revision"), "replanning should use full planner context");
 assert(!shouldRunFinalizeDocs(["src/index.ts"], policy, true).run, "code-only diff should skip finalize-docs");
+assert(!shouldRunFinalizeDocs(["README.md"], policy, true).run, "README-only diff should skip finalize-docs");
 assert(shouldRunFinalizeDocs(["docs/agentic-loop-flow.md"], policy, true).run, "documentation diff should run finalize-docs");
 
 console.log("phase-admission smoke passed");

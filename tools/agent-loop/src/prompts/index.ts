@@ -202,16 +202,12 @@ function git(args: string[], cwd?: string): string {
   }
 }
 
-// Run `codegraph sync` in the given directory to bring the index up to date after file changes.
-// If the index is not initialized, runs `codegraph init -i` first. Silent no-op if codegraph is not on PATH.
+// Sync an existing CodeGraph index after file changes. Never initialize one as
+// a side effect of a run; compact tasks do not need that setup or artifact.
 export function syncCodeGraph(workingDirectory = "."): void {
+  if (!existsSync(join(workingDirectory, ".codegraph"))) return;
   try {
-    const statusOut = execFileSync("codegraph", ["status", workingDirectory], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 });
-    if (statusOut.includes("Not initialized")) {
-      execFileSync("codegraph", ["init", "-i", workingDirectory], { encoding: "utf-8", stdio: "ignore", timeout: 120_000 });
-    } else {
-      execFileSync("codegraph", ["sync", workingDirectory], { encoding: "utf-8", stdio: "ignore", timeout: 60_000 });
-    }
+    execFileSync("codegraph", ["sync", workingDirectory], { encoding: "utf-8", stdio: "ignore", timeout: 60_000 });
   } catch {
     // codegraph not installed or failed — non-fatal
   }
@@ -349,7 +345,7 @@ interface PlannerPromptOptions {
   resolvedPolicyFile?: string;
   plannerResultFile: string;
   repoContextFile: string;
-  grillTranscriptFile: string;
+  grillTranscriptFile?: string;
   codeGraphFile: string;
   mode?: "full" | "lite";
   /** Path to failure-analysis.json from the task that triggered this replan, if any. */
@@ -359,7 +355,7 @@ interface PlannerPromptOptions {
 export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOptions): void {
   const {
     repoRoot, runsRoot, stateFile, budget, state, policy, resolvedPolicyFile,
-    plannerResultFile, repoContextFile, grillTranscriptFile, codeGraphFile,
+    plannerResultFile, repoContextFile, grillTranscriptFile = "", codeGraphFile,
     priorFailureAnalysisFile = "",
   } = opts;
   const mode = opts.mode ?? "full";
@@ -414,21 +410,17 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "When planning validation, match proof to workflow. Discovery/investigation/zoom-out tasks may be proven by artifacts and evidence notes; do not attach implementation test commands to artifact-only discovery tasks. Implementation/architecture tasks need focused task.validation commands when behavior or code changes should be proven. If a task adds or changes a small smoke test/check that directly proves the change, include that command in task.validation so the harness runs it before verification. Prefer `pwsh -File path/to/smoke.ps1`; mention `powershell.exe` only as legacy fallback.",
     "",
     `Do not edit ${stateFile} directly. Write planner JSON only to: ${plannerResultFile}`,
-    `Also write an autonomous grill transcript markdown file to: ${grillTranscriptFile}`,
+    ...(!lite ? [`Also write an autonomous grill transcript markdown file to: ${grillTranscriptFile}`] : []),
     "",
-    ...(lite ? [
-      "Write a concise planner-lite transcript with the goal, directly inspected evidence, task choice, scope, validation, and fallback reason if any.",
-    ] : [
+    ...(!lite ? [
       "The grill transcript must make your discovery visible for human review. Use this structure:",
-    ]),
-    "# Autonomous Grill Transcript",
-    "## Goal Restatement",
-    "## Questions, Evidence, Answers, Proposals",
-    ...(lite ? [] : [
+      "# Autonomous Grill Transcript",
+      "## Goal Restatement",
+      "## Questions, Evidence, Answers, Proposals",
       "For each grill question include: question, repo/docs evidence inspected, autonomous answer, proposal/decision, and whether human input is needed.",
       "## Final Plan Rationale",
       "Explain why the task split, dependencies, validation commands, assumptions, and open questions are appropriate.",
-    ]),
+    ] : []),
     "",
     "Allowed verdicts: planned, needs_human, blocked.",
     "Allowed task statuses in planner output: pending, needs_human, blocked.",
@@ -450,7 +442,7 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     ]),
     "",
     "Planner result schema (write valid JSON only):",
-    `{"verdict":"planned|needs_human|blocked","summary":"...","decisions":[{"question":"...","whyItMatters":"...","optionsConsidered":[{"label":"...","evidence":"repo path / command / doc inspected","recommended":true}],"chosen":"...","selfAnswer":"...","confidence":"high|medium|low","escalate":false}],"assumptions":[],"openQuestions":[],"blockers":[],"tasks":[],"artifacts":["${grillTranscriptFile}"]}`,
+    `{"verdict":"planned|needs_human|blocked","summary":"...","decisions":[{"question":"...","whyItMatters":"...","optionsConsidered":[{"label":"...","evidence":"repo path / command / doc inspected","recommended":true}],"chosen":"...","selfAnswer":"...","confidence":"high|medium|low","escalate":false}],"assumptions":[],"openQuestions":[],"blockers":[],"tasks":[],"artifacts":${lite ? "[]" : `["${grillTranscriptFile}"]`}}`,
     `Each task object: {"id":"...","title":"...","kind":"discovery|investigation|implementation|architecture|maintenance|handoff","workflow":"...","status":"pending","priority":1,"acceptanceCriteria":[],"validation":[],"dependsOn":[],"failureHistory":[],"artifacts":[],"scope":["path/**"],"complexity":"low|medium|high","complexityReasons":[]}`,
     priorFailureBlock,
     "",
@@ -542,23 +534,20 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     "Hard rules:",
     "- Complete exactly one task: the task JSON below.",
     "- Read AGENTS.md / CLAUDE.md and follow repository rules.",
-    "- Read and follow the canonical SKILL.md for the selected workflow.",
+    ...(!compact ? ["- Read and follow the canonical SKILL.md for the selected workflow."] : []),
     "- The harness owns task status, verification, commits, and merges.",
     "- Do not mark the task passed yourself.",
     "- Do not edit upstream-derived files unless explicit permission is present.",
     `- Your active repository worktree is ${worktreePath} (your process working directory).`,
     "- For repository files, use paths relative to the active worktree and never edit the parent repo via an absolute path.",
     "- Absolute paths under the parent repo may be used only for harness artifacts explicitly named below, such as the run directory.",
-    ...(compact ? [
-      "- Compact low-risk task: make the smallest scoped edit and do not spend time writing a handover; the harness will generate one from the diff and checks.",
-    ] : []),
+    ...(compact ? ["- Compact low-risk task: read only directly named files and make the smallest scoped edit."] : []),
     `- Keep task artifacts under this run directory when useful: ${runDir}`,
-    ...(!compact ? [`- Before finishing, write a concise handover note to \`${runDir}/handover.md\` with: what changed, key files, validation run, gotchas, and next-task notes.`] : []),
     "- For discovery/investigation tasks, useful artifact files may be the main output; code changes are not required unless the task asks for them.",
     "- For implementation/architecture/maintenance tasks, prefer tracked repo changes plus validation unless the task is explicitly artifact-only.",
     "- When you add a focused smoke test/check that proves this task, use or propose it as a task.validation command (for example `pwsh -File tests/path/focused-smoke.ps1`) so the harness runs it before verification.",
     "- Use `pwsh -File` in harness and smoke-test command examples. Mention `powershell.exe` only as a legacy Windows PowerShell compatibility fallback when explicitly needed.",
-    "- If the task JSON has a non-empty `scope`, change only files matching those globs. The harness enforces this as a hard pre-verifier rail: files changed outside scope fail the task. If you must touch a file outside scope, stop and record it in the handover instead of editing it.",
+    "- If the task JSON has a non-empty `scope`, change only files matching those globs. The harness enforces this as a hard pre-verifier rail. If another file is required, stop without editing it.",
     "",
     ...(approvedStance ? [
       "Approved implementation stance — treat this as the current technical approach:",
@@ -572,15 +561,15 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     `Task kind: ${kind}`,
     `Run directory: ${runDir}`,
     `Execution worktree: ${worktreePath}`,
-    `CodeGraph context: ${codeGraphFile}`,
+    ...(!compact ? [`CodeGraph context: ${codeGraphFile}`] : []),
     "",
     ...(compact ? [] : getOperatorContextBlock(state)),
-    "Use CodeGraph context for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions by reading source files. If CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding.",
+    ...(!compact ? ["Use CodeGraph context for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions by reading source files. If CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding."] : []),
     "",
     `Recent harness history (verdicts, failures, assumption changes; source of truth is ${evLogPath}):`,
     recentHistory,
     "",
-    getWorkflowBlock(workflow, policy, repoRoot),
+    ...(compact ? [] : [getWorkflowBlock(workflow, policy, repoRoot)]),
     "",
     "Task JSON:",
     taskJson,
@@ -818,11 +807,10 @@ interface FinalizeDocsPromptOptions {
   stateFile: string;
   budget: PromptBudget;
   state: AgenticState;
-  summaryFile: string;
 }
 
 export function writeFinalizeDocsPrompt(promptFile: string, opts: FinalizeDocsPromptOptions): void {
-  const { repoRoot, worktreePath, runsRoot, stateFile, budget, state, summaryFile } = opts;
+  const { repoRoot, worktreePath, runsRoot, stateFile, budget, state } = opts;
 
   const stateJson = JSON.stringify(state, null, 2);
   const recentHistory = getRecentHistoryText(repoRoot, runsRoot, 30, budget);
@@ -848,8 +836,7 @@ export function writeFinalizeDocsPrompt(promptFile: string, opts: FinalizeDocsPr
     "Additional rules for this phase:",
     "- Do not edit CONTEXT.md here; it belongs to the planning grill-with-docs stage. Only touch it if execution discovered a durable domain/product fact that could not have been known during planning.",
     "- Do not edit AGENTS.md or CLAUDE.md unless the run explicitly changed agent policy.",
-    "- If no durable facts changed, leave PROJECT.md unchanged and explain why in the summary.",
-    `- Always write a final human checkpoint summary to: ${summaryFile}`,
+    "- If no durable facts changed, leave PROJECT.md unchanged.",
     "",
     "Docs available:",
     `- ${projectState}`,

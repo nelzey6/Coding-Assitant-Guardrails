@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { tmpdir } from "os";
 import { spawnSync } from "child_process";
@@ -66,13 +66,14 @@ const mutateParent = (phase) => {
 if (prompt.includes("Write planner JSON only to:")) {
   mutateParent("planner");
   const result = prompt.match(/Write planner JSON only to: (.+)/)[1].trim();
-  const transcript = prompt.match(/Also write an autonomous grill transcript markdown file to: (.+)/)[1].trim();
+  const transcriptMatch = prompt.match(/Also write an autonomous grill transcript markdown file to: (.+)/);
+  const transcript = transcriptMatch?.[1].trim();
   const stale = prompt.includes("Replace stale task");
   json(result, { verdict:"planned", summary:"planned", decisions:[], assumptions:[], openQuestions:[], blockers:[],
     tasks:[{ id:stale?"replacement":"planned-task", title:stale?"Replacement execution":"Planned execution",
       kind:"implementation", workflow:"tdd", status:"pending", priority:1, acceptanceCriteria:["output exists"],
-      validation:[], dependsOn:[], scope:["output.txt"], complexity:"low" }], artifacts:[transcript] });
-  writeFileSync(transcript, "# Planner evidence\\n"); process.exit(0);
+      validation:[], dependsOn:[], scope:["output.txt"], complexity:"low" }], artifacts:transcript ? [transcript] : [] });
+  if (transcript) writeFileSync(transcript, "# Planner evidence\\n"); process.exit(0);
 }
 if (prompt.includes("Write stance reflection JSON only to:")) {
   mutateParent("stance");
@@ -90,14 +91,14 @@ if (prompt.includes("Write JSON only to this path:")) {
 }
 if (prompt.includes("You are finalizing a completed agentic loop run.")) {
   mutateParent("finalize-docs");
-  const summary = prompt.match(/Always write a final human checkpoint summary to: (.+)/)[1].trim();
   if (prompt.includes('"goal": "Reject finalize code mutation"')) writeFileSync("runtime.ts", "export {};\\n");
   else writeFileSync("PROJECT.md", "# Durable project facts\\n");
-  writeFileSync(summary, "# Final summary\\n"); process.exit(0);
+  process.exit(0);
 }
 if (prompt.includes("Task JSON:")) {
   mutateParent("executor");
-  if (prompt.includes('"title": "Documentation update"')) writeFileSync("README.md", "# Smoke\\n\\nUpdated.\\n");
+  if (prompt.includes('"title": "Durable docs update"')) { mkdirSync("docs", { recursive:true }); writeFileSync("docs/guide.md", "# Guide\\n"); }
+  else if (prompt.includes('"title": "Documentation update"')) writeFileSync("README.md", "# Smoke\\n\\nUpdated.\\n");
   else if (prompt.includes('"title": "Retry output"')) writeFileSync("retry.txt", prompt.includes('"attempts": 2') ? "ok" : "bad");
   else if (prompt.includes('"title": "Architecture change"')) writeFileSync("architecture.txt", "done");
   else if (prompt.includes('"title": "Scope violation"')) writeFileSync("outside.txt", "bad");
@@ -147,6 +148,16 @@ test("planner from empty state plans then executes", (dir) => {
   assert(state(dir).tasks.some((t:any) => t.id === "planned-task" && t.status === "passed"), "task did not pass");
 });
 
+test("planner-lite omits grill transcript", (dir) => {
+  writeState(dir, [], { goal:"Update README.md wording", phase:"planning", planRevision:0 });
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
+  const planner = events(dir).find((event) => event.type === "planner_finished");
+  assert(planner && planner.grillTranscript === undefined, "planner-lite retained grill transcript artifact");
+  const prompt = readFileSync(join(planner.runDir, "planner.md"), "utf-8");
+  assert(!prompt.includes("Also write an autonomous grill transcript"), "planner-lite still asks model for transcript");
+});
+
 test("planner parent checkout mutation is detected", (dir) => {
   writeState(dir, [], { phase:"planning", planRevision:0 });
   const result = run(dir, fakeAgent(dir, "planner"));
@@ -157,15 +168,20 @@ test("planner parent checkout mutation is detected", (dir) => {
 
 test("bounded documentation change skips verifier", (dir) => {
   writeState(dir, [task({ title:"Documentation update", kind:"maintenance", scope:["README.md"] })]);
-  const result = run(dir, fakeAgent(dir));
+  const result = run(dir, fakeAgent(dir), true);
   assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
   const log = events(dir);
   assert(log.some((e) => e.type === "verifier_skipped"), "skip missing");
   assert(!log.some((e) => e.type === "verifier_started"), "verifier started");
+  assert(!log.some((e) => e.type === "finalize_docs_started"), "README-only task started finalizer");
+  assert(!log.some((e) => e.type === "task_handover_written"), "routine handover event should not exist");
+  assert(!existsSync(join(dir, ".agent-runs/agentic-progress.txt")), "redundant progress markdown should not exist");
+  assert(!existsSync(join(dir, ".codegraph")), "compact README task initialized unused CodeGraph state");
+  assert(!readdirSync(join(dir, ".agent-runs")).some((name) => /^run-.*\.log$/.test(name)), "duplicate top-level run log should not exist");
 });
 
 test("finalize docs commits and applies documentation edits", (dir) => {
-  writeState(dir, [task({ title:"Documentation update", kind:"maintenance", scope:["README.md"] })]);
+  writeState(dir, [task({ title:"Durable docs update", kind:"maintenance", scope:["docs/guide.md"] })]);
   const result = run(dir, fakeAgent(dir), true);
   assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
   assert(readFileSync(join(dir, "PROJECT.md"), "utf-8").includes("Durable project facts"), "finalizer edit was not applied");
@@ -173,7 +189,7 @@ test("finalize docs commits and applies documentation edits", (dir) => {
 });
 
 test("finalize docs rejects non-documentation edits", (dir) => {
-  writeState(dir, [task({ title:"Documentation update", kind:"maintenance", scope:["README.md"] })], { goal:"Reject finalize code mutation" });
+  writeState(dir, [task({ title:"Durable docs update", kind:"maintenance", scope:["docs/guide.md"] })], { goal:"Reject finalize code mutation" });
   const result = run(dir, fakeAgent(dir), true);
   assert(result.status !== 0, "non-documentation finalizer mutation passed");
   assert(result.stderr.includes("Finalize-docs changed non-documentation files: runtime.ts"), "finalizer scope error missing");
@@ -181,7 +197,7 @@ test("finalize docs rejects non-documentation edits", (dir) => {
 });
 
 test("finalize-docs parent checkout mutation is detected", (dir) => {
-  writeState(dir, [task({ title:"Documentation update", kind:"maintenance", scope:["README.md"] })]);
+  writeState(dir, [task({ title:"Durable docs update", kind:"maintenance", scope:["docs/guide.md"] })]);
   const result = run(dir, fakeAgent(dir, "finalize-docs"), true);
   assert(result.status !== 0, "finalize-docs parent mutation passed");
   assert(events(dir).some((e) => e.type === "parent_worktree_mutated" && e.phase === "finalize-docs"), "finalize-docs mutation evidence missing");

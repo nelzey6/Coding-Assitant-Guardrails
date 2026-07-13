@@ -134,7 +134,7 @@ export function shouldRunFinalizeDocs(
   if (config.finalizeDocs === "always") return { run: true, reason: "policy requires finalize-docs after every run" };
   const durableDocs = changedPaths.filter((path) => {
     const normalized = path.replace(/\\/g, "/");
-    return normalized.endsWith(".md")
+    return ["PROJECT.md", "CONTEXT.md", "CONTEXT-MAP.md", "AGENTS.md", "CLAUDE.md"].includes(normalized)
       || normalized.startsWith("docs/")
       || normalized.startsWith("adrs/")
       || normalized.startsWith("templates/");

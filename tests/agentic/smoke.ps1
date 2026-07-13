@@ -19,7 +19,7 @@ try {
   "version": 1,
   "goal": "Smoke test agentic loop",
   "maxIterations": 1,
-  "checks": ["test -f smoke-output.txt", "cmd /c echo METRIC smoke_count=1"],
+  "checks": ["test -f smoke-output.txt", "echo METRIC smoke_count=1"],
   "defaultDiscoveryWorkflow": "grill-with-docs",
   "tasks": [
     {
@@ -29,7 +29,7 @@ try {
       "workflow": "tdd",
       "priority": 1,
       "acceptanceCriteria": ["smoke-output.txt exists"],
-      "validation": ["test -f smoke-output.txt", "cmd /c echo METRIC smoke_validation=2"],
+      "validation": ["test -f smoke-output.txt", "echo METRIC smoke_validation=2"],
       "dependsOn": [],
       "failureHistory": []
     }
@@ -79,7 +79,7 @@ Write-Output "created smoke-output.txt"
     if (!(Test-Path -Path (Join-Path $tmp "smoke-output.txt"))) { throw "Expected smoke-output.txt after merge" }
 
     $runDir = Join-Path $tmp $state.tasks[0].lastRunDir
-    $requiredArtifacts = @("executor.log", "checks.log", "verifier.log", "handover.md", "diff.patch", "diff-stat.txt", "state-before.json", "state-after.json")
+    $requiredArtifacts = @("executor.log", "checks.log", "verifier.log", "diff.patch", "diff-stat.txt", "state-before.json", "state-after.json")
     foreach ($artifact in $requiredArtifacts) {
         $path = Join-Path $runDir $artifact
         if (!(Test-Path -LiteralPath $path)) { throw "Expected run artifact missing: $artifact in $runDir" }
@@ -97,14 +97,13 @@ Write-Output "created smoke-output.txt"
     if ((Get-Content -LiteralPath (Join-Path $runDir "verifier.log") -Raw) -notmatch "smoke verifier passed|verifier-result") { throw "Expected verifier.log to capture verifier output" }
     if ((Get-Content -LiteralPath (Join-Path $runDir "diff.patch") -Raw) -notmatch "smoke-output.txt") { throw "Expected diff.patch before commit" }
     if ((Get-Content -LiteralPath (Join-Path $runDir "diff-stat.txt") -Raw) -notmatch "smoke-output.txt") { throw "Expected diff-stat.txt before commit" }
-    if ((Get-Content -LiteralPath (Join-Path $runDir "handover.md") -Raw) -notmatch "Task handover|smoke") { throw "Expected handover.md content" }
     $eventLog = Join-Path $tmp ".agent-runs/events.jsonl"
     if (!(Test-Path -LiteralPath $eventLog)) { throw "Expected events.jsonl" }
     $events = Get-Content -LiteralPath $eventLog -Raw
     if ($events -notmatch '"type":"checks_passed"') { throw "Expected checks_passed event" }
     if ($events -notmatch '"smoke_count":1') { throw "Expected metric in event log" }
     if ($events -notmatch '"type":"verifier_finished"') { throw "Expected verifier_finished event" }
-    if ($events -notmatch '"type":"task_handover_written"') { throw "Expected task_handover_written event" }
+    if ($events -match '"type":"task_handover_written"') { throw "Routine task handover event should not exist" }
     Write-Output "agentic smoke passed: $tmp"
 } finally {
     if ($env:AGENTIC_KEEP_SMOKE -ne "1") { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }

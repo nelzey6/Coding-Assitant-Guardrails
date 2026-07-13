@@ -77,7 +77,7 @@ Canonical state types live only in `state/index.ts`. Context, scope, agent, prom
 ## Run flow
 
 1. Load policy and `agentic.json`; reject dirty parent checkout unless allowed.
-2. If tasks are absent, Planner inspects goal/repo and writes one task graph plus grill transcript.
+2. If tasks are absent, Planner inspects goal/repo and writes one task graph. Planner-lite writes JSON only; full Planner also writes a grill transcript.
 3. Create one shared run worktree.
 4. Select next runnable task.
 5. Replan admission:
@@ -93,8 +93,8 @@ Canonical state types live only in `state/index.ts`. Context, scope, agent, prom
     - bounded low-complexity documentation diff → skip verifier;
     - normal change → one verifier;
     - high risk → three adversarial votes.
-11. Commit passed task inside run worktree.
-12. If durable docs changed, run one finalize-docs pass; reject non-documentation edits and commit accepted docs before apply.
+11. Commit passed task inside run worktree. Events, phase logs, state snapshots, checks, diffs, and verifier JSON are canonical evidence; no routine handover, progress Markdown, or duplicate top-level run log is generated.
+12. If source-of-truth docs changed, run one finalize-docs pass; reject non-documentation edits and commit accepted docs before apply. README-only changes do not admit this phase.
 13. Apply run branch to parent checkout as unstaged changes unless `--no-apply`.
 
 ## Deliberately removed ceremony
@@ -133,10 +133,14 @@ No merge-mode matrix, retry selector, verifier-vote override, fast-verifier flag
 - semantic human gates
 - effective planner-mode precedence, source, and reason
 - finalize-docs admission
+- README-only finalize-docs exclusion
+
+`agent-log-smoke.ts` covers compact Pi telemetry, usage/turn preservation, content omission, and a bounded log size.
 
 `agent-loop-ts-smoke.ts` covers:
 
 - planning from an empty task graph
+- planner-lite operation without a grill transcript
 - low-risk documentation verifier skip
 - finalize-docs commit/apply and non-documentation rejection
 - stale-task replan and replacement execution
@@ -145,6 +149,8 @@ No merge-mode matrix, retry selector, verifier-vote override, fast-verifier flag
 - scope violation
 - parent checkout mutation from planner, stance, executor, verifier, and finalizer
 - dirty checkout rejection
+
+Pi JSON logs retain only session metadata, assistant/tool completion summaries, aggregate whole-invocation usage/cost, and bounded errors. Full message history, thinking, tool arguments, and tool results are intentionally omitted; use events, checks, diffs, result JSON, and failure analysis for run evidence. Compact tasks neither generate CodeGraph context nor initialize `.codegraph/`; existing indexes are synchronized when present.
 
 `checkout-integrity-smoke.ts` covers parent HEAD movement without a file diff.
 

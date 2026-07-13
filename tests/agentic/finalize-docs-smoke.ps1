@@ -25,13 +25,13 @@ if ($content -match "Write JSON only to this path: (.+)") {
     '{"verdict":"pass","summary":"ok","issues":[],"humanGates":[],"recommendedStatus":"passed","artifacts":[]}' | Set-Content -LiteralPath $resultPath -Encoding UTF8
     exit 0
 }
-if ($content -match "write a final human checkpoint summary to: (.+)") {
-    $summaryPath = $Matches[1].Trim()
+if ($content -match "You are finalizing a completed agentic loop run") {
     Add-Content -LiteralPath "PROJECT.md" -Value "- Finalized docs smoke technical fact."
-    "# Final summary`nDocs updated." | Set-Content -LiteralPath $summaryPath -Encoding UTF8
     exit 0
 }
 "ok" | Set-Content -Path "smoke-output.txt" -Encoding UTF8
+New-Item -ItemType Directory -Force -Path "docs" | Out-Null
+"# Durable guide" | Set-Content -Path "docs/guide.md" -Encoding UTF8
 '@ | Set-Content -Path $fake -Encoding UTF8
     git -C $tmp add -A; git -C $tmp commit -m initial | Out-Null
     Push-Location $tmp
@@ -46,7 +46,7 @@ if ($content -match "write a final human checkpoint summary to: (.+)") {
     if ($events -notmatch '"type":"finalize_docs_started"') { throw "Expected finalize_docs_started event" }
     if ($events -notmatch '"type":"finalize_docs_finished"') { throw "Expected finalize_docs_finished event" }
     $summary = Get-ChildItem -Path (Join-Path $tmp ".agent-runs") -Recurse -Filter final-summary.md | Select-Object -First 1
-    if ($null -eq $summary) { throw "Expected final-summary.md" }
+    if ($null -ne $summary) { throw "Routine final-summary.md should not be created" }
     Write-Output "agentic finalize-docs smoke passed: $tmp"
 } finally {
     if ($env:AGENTIC_KEEP_SMOKE -ne "1") { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
