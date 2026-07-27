@@ -35,6 +35,15 @@ export interface AgenticState {
   promptPolicy?: { lessons?: string[] };
 }
 
+export interface ExecutionIntent {
+  objective: string;
+  steps: string[];
+  currentStep?: string;
+  branches?: string[];
+  completionEvidence: string[];
+  updatedAt: string;
+}
+
 export interface AgenticTask {
   id: string;
   title?: string;
@@ -53,6 +62,7 @@ export interface AgenticTask {
   complexity?: "low" | "medium" | "high";
   complexityReasons?: string[];
   approvedStanceFile?: string;
+  executionIntent?: ExecutionIntent;
 }
 
 export interface RepoContext {

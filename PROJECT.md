@@ -68,7 +68,7 @@ Known environment note: local Node runs may print a warning about `NODE_EXTRA_CA
 
 ### State And Artifacts
 
-The TS loop consumes `agentic.json` in the target repo. It appends lifecycle events to `.agent-runs/events.jsonl` and creates one run directory per planner/task/finalizer phase.
+The TS loop consumes `agentic.json` in the target repo. Tasks may carry an optional `executionIntent` (`objective`, intended `steps`, current step, conditional branches, completion evidence, and update timestamp); phase prompts receive it as transparent task context. The harness does not execute it as a workflow definition. It appends lifecycle events to `.agent-runs/events.jsonl` and creates one run directory per planner/task/finalizer phase.
 
 Important per-task artifacts:
 

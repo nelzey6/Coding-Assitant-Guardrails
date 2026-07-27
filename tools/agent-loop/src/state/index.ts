@@ -18,6 +18,15 @@ export interface FailureRecord {
   failureAnalysisFile?: string;
 }
 
+export interface ExecutionIntent {
+  objective: string;
+  steps: string[];
+  currentStep?: string;
+  branches?: string[];
+  completionEvidence: string[];
+  updatedAt: string;
+}
+
 export interface Task {
   id: string;
   title?: string;
@@ -39,6 +48,7 @@ export interface Task {
   complexity?: "low" | "medium" | "high";
   complexityReasons?: string[];
   approvedStanceFile?: string;
+  executionIntent?: ExecutionIntent;
 }
 
 export interface AgenticState {

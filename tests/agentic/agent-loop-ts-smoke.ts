@@ -20,6 +20,8 @@ import {
 import { join, resolve } from "path";
 import { tmpdir } from "os";
 import { spawnSync, execFileSync } from "child_process";
+import { projectTaskForPhase } from "../../tools/agent-loop/src/prompts/index.js";
+import type { Task } from "../../tools/agent-loop/src/state/index.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -316,6 +318,27 @@ function runCase(name: string, fn: () => void): void {
     console.error(`  FAIL  ${name}\n        ${msg}`);
   }
 }
+
+// ── execution intent: persisted task guidance reaches agent phases ───────────
+
+runCase("execution intent: projected into task phase context", () => {
+  const executionIntent = {
+    objective: "Preserve the controller's current intended path.",
+    steps: ["Inspect evidence", "Implement the smallest change"],
+    currentStep: "Inspect evidence",
+    branches: ["Replan if ownership differs"],
+    completionEvidence: ["Targeted checks pass"],
+    updatedAt: "2026-06-23T00:00:00.000Z",
+  };
+  const projected = projectTaskForPhase(
+    { ...baseTask(), executionIntent } as Task,
+    "executor"
+  );
+  assert(
+    JSON.stringify(projected.executionIntent) === JSON.stringify(executionIntent),
+    "expected executionIntent to remain visible in executor task context"
+  );
+});
 
 // ── case 1: happy path — executor writes file, verifier passes ────────────────
 

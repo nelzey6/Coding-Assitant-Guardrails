@@ -129,6 +129,7 @@ export function projectTaskForPhase(task: Task, phase: TaskPhase): Record<string
     dependsOn: task.dependsOn,
     complexity: task.complexity,
     complexityReasons: task.complexityReasons,
+    executionIntent: task.executionIntent,
   };
   // task-grill / decision-grill reason about proof targets (artifacts).
   if (phase === "task_grill" || phase === "decision_grill") {
