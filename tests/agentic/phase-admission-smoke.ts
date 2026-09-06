@@ -1,11 +1,12 @@
 #!/usr/bin/env tsx
-import { shouldReplanBeforeTask, shouldRunFinalizeDocs, shouldRunVerifier } from "../../tools/agent-loop/src/admission/index.js";
+import { resolveTaskComplexity } from "../../tools/agent-loop/src/scope/index.js";
+import { shouldReplanBeforeTask, shouldRunVerifier } from "../../tools/agent-loop/src/admission/index.js";
 import { resolveEffectivePlannerMode, type WorkflowPolicy } from "../../tools/agent-loop/src/policy/index.js";
 import { computePlanContextFingerprint, type AgenticState, type Task } from "../../tools/agent-loop/src/state/index.js";
 
 const policy = {
   autonomousLoop: {
-    phaseAdmission: { verifier: "auto", finalizeDocs: "on-change" },
+    phaseAdmission: { verifier: "auto" },
   },
 } as WorkflowPolicy;
 
@@ -96,12 +97,13 @@ const forcedPlanner = resolveEffectivePlannerMode(
   state,
 );
 assert(forcedPlanner.mode === "full" && forcedPlanner.source === "policy", "planner mode should inherit repository policy with traceable source");
-const litePlanner = resolveEffectivePlannerMode(policy, { goal: "Update docs/guide.md wording", planRevision: 0 });
-assert(litePlanner.mode === "lite" && litePlanner.source === "adaptive", "small documentation goal should use adaptive planner-lite");
+const adaptivePlanner = resolveEffectivePlannerMode(policy, { goal: "Optimize docs/guide.md wording", planRevision: 0 });
+assert(adaptivePlanner.mode === "full" && adaptivePlanner.source === "adaptive", "goals rejected by direct routing should use full planner");
 const replanPlanner = resolveEffectivePlannerMode(policy, { goal: "Update docs/guide.md wording", planRevision: 1 });
 assert(replanPlanner.mode === "full" && replanPlanner.reason.includes("revision"), "replanning should use full planner context");
-assert(!shouldRunFinalizeDocs(["src/index.ts"], policy, true).run, "code-only diff should skip finalize-docs");
-assert(!shouldRunFinalizeDocs(["README.md"], policy, true).run, "README-only diff should skip finalize-docs");
-assert(shouldRunFinalizeDocs(["docs/agentic-loop-flow.md"], policy, true).run, "documentation diff should run finalize-docs");
 
+const mechanical: Task = {id:"extract",title:"Extract helper; preserve behavior",kind:"architecture",workflow:"improve-codebase-architecture",complexity:"low",scope:["src/main.ts","src/helper.ts","src/index.ts","tests/helper.ts"]};
+const complexity = resolveTaskComplexity(mechanical, policy);
+assert(complexity.level === "low", "file count and workflow label must not invent high complexity");
+assert(shouldRunVerifier(mechanical, policy, mechanical.scope).votes === 1, "bounded structural edit should keep one independent reviewer");
 console.log("phase-admission smoke passed");

@@ -27,11 +27,7 @@ export function resolveTaskComplexity(task: AgenticTask, policy: WorkflowPolicy)
     if (!reasons.includes(reason)) reasons.push(reason);
   };
 
-  if (task.kind === "architecture" || task.workflow === "improve-codebase-architecture") {
-    raise("high", "architecture workflow or task kind");
-  }
-  if ((task.dependsOn ?? []).length >= 2) raise("high", "multiple task dependencies");
-  if (getTaskScope(task).length >= 4) raise("high", "broad declared scope");
+  if (testPathsTouchHumanGate(getTaskScope(task), policy)) raise("high", "declared scope touches protected behavior");
   return { level, reasons };
 }
 

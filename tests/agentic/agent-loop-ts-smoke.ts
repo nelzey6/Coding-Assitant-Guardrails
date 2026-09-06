@@ -25,9 +25,17 @@ function makeRepo(tag: string): string {
   git(["config", "user.email", "smoke@example.test"], dir);
   git(["config", "user.name", "Smoke"], dir);
   mkdirSync(join(dir, "templates/agent-policy"), { recursive: true });
-  copyFileSync(POLICY, join(dir, "templates/agent-policy/workflow-policy.json"));
+  const fixturePolicy = JSON.parse(readFileSync(POLICY,"utf8"));
+  fixturePolicy.autonomousLoop.worktreeBootstrap = [];
+  fixturePolicy.autonomousLoop.worktreeBootstrapIgnore = [];
+  writeFileSync(join(dir,"templates/agent-policy/workflow-policy.json"), JSON.stringify(fixturePolicy));
   writeFileSync(join(dir, "README.md"), "# Smoke\n");
   writeFileSync(join(dir, "AGENTS.md"), "Keep changes scoped.");
+  writeFileSync(join(dir, "check.mjs"), `import {readFileSync,existsSync} from 'node:fs';
+import assert from 'node:assert/strict';
+const expected = {'output.txt':'done','architecture.txt':'done','README.md':'Updated.','docs/guide.md':'# Guide'};
+assert.ok(Object.entries(expected).some(([path,text]) => existsSync(path) && readFileSync(path,'utf8').includes(text)), 'expected output missing');
+`);
   git(["add", "-A"], dir);
   git(["commit", "-m", "fixture"], dir);
   return dir;
@@ -37,7 +45,7 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
   return {
     id: "task-001", title: "Write output", kind: "implementation", workflow: "tdd",
     status: "pending", priority: 1, acceptanceCriteria: ["requested file exists"],
-    validation: [], dependsOn: [], scope: ["output.txt"], complexity: "low",
+    validation: ["node check.mjs"], dependsOn: [], scope: ["output.txt"], complexity: "low",
     plannedRevision: 1, ...overrides,
   };
 }
@@ -52,7 +60,7 @@ function writeState(dir: string, tasks: Record<string, unknown>[], overrides: Re
   git(["commit", "-m", "state"], dir);
 }
 
-function fakeAgent(dir: string, mutatePhase: "" | "planner" | "stance" | "executor" | "verifier" | "finalize-docs" = ""): string {
+function fakeAgent(dir: string, mutatePhase: "" | "planner" | "stance" | "executor" | "verifier" = ""): string {
   const file = join(dir, "fake-agent.mjs");
   writeFileSync(file, `#!/usr/bin/env node
 import { mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -69,10 +77,10 @@ if (prompt.includes("Write planner JSON only to:")) {
   const transcriptMatch = prompt.match(/Also write an autonomous grill transcript markdown file to: (.+)/);
   const transcript = transcriptMatch?.[1].trim();
   const stale = prompt.includes("Replace stale task");
-  json(result, { verdict:"planned", summary:"planned", decisions:[], assumptions:[], openQuestions:[], blockers:[],
-    tasks:[{ id:stale?"replacement":"planned-task", title:stale?"Replacement execution":"Planned execution",
+  const tasks = [{ id:stale?"replacement":"planned-task", title:stale?"Replacement execution":"Planned execution",
       kind:"implementation", workflow:"tdd", status:"pending", priority:1, acceptanceCriteria:["output exists"],
-      validation:[], dependsOn:[], scope:["output.txt"], complexity:"low" }], artifacts:transcript ? [transcript] : [] });
+      validation:["node check.mjs"], dependsOn:[], scope:["output.txt"], complexity:"low", sliceRole:"primary" }];
+  json(result, { verdict:"planned", summary:"planned", decisions:[], assumptions:[], openQuestions:[], blockers:[], tasks, artifacts:transcript ? [transcript] : [] });
   if (transcript) writeFileSync(transcript, "# Planner evidence\\n"); process.exit(0);
 }
 if (prompt.includes("Write stance reflection JSON only to:")) {
@@ -86,23 +94,50 @@ if (prompt.includes("Write stance reflection JSON only to:")) {
 if (prompt.includes("Write JSON only to this path:")) {
   mutateParent("verifier");
   const result = prompt.match(/Write JSON only to this path: (.+)/)[1].trim();
-  json(result, { verdict:"pass", summary:"verified", issues:[], humanGates:[], recommendedStatus:"passed", artifacts:[] });
-  process.exit(0);
-}
-if (prompt.includes("You are finalizing a completed agentic loop run.")) {
-  mutateParent("finalize-docs");
-  if (prompt.includes('"goal": "Reject finalize code mutation"')) writeFileSync("runtime.ts", "export {};\\n");
-  else writeFileSync("PROJECT.md", "# Durable project facts\\n");
+  if (prompt.includes('"title": "Reviewer mutation"')) writeFileSync("output.txt", "tampered");
+  const reviewedTask = JSON.parse(prompt.split("Task JSON:\\n")[1].split("\\n\\nHuman gates:")[0]);
+  const validationEvidence = prompt.includes('"title": "Review without proof"') ? [] : reviewedTask.acceptanceCriteria.map((criterion) => ({criterion, command:reviewedTask.validation[0], proves:"fixture check asserts requested output"}));
+  const defect = prompt.includes('"title": "Unresolved review defect"') && result.includes("vote-3");
+  const human = prompt.includes('"title": "Unresolved review gate"') && result.includes("vote-3");
+  json(result, { verdict:human?"needs_human":defect?"fail":"pass", summary:"verified", validationEvidence, issues:defect?["output.txt: missing edge case"]:[], humanGates:human?["approval needed"]:[], recommendedStatus:human?"needs_human":"passed", artifacts:[] });
   process.exit(0);
 }
 if (prompt.includes("Task JSON:")) {
   mutateParent("executor");
-  if (prompt.includes('"title": "Durable docs update"')) { mkdirSync("docs", { recursive:true }); writeFileSync("docs/guide.md", "# Guide\\n"); }
+  if (prompt.includes('"title": "Slow output"')) await new Promise((resolve) => setTimeout(resolve, 1100));
+  const directResult = prompt.match(/Write direct execution JSON only to: (.+)/)?.[1]?.trim();
+  if (prompt.includes('"title": "Update README.md but escalate cleanly"')) {
+    if (directResult) json(directResult, { verdict:"needs_planner", summary:"needs broader context", validation:[], assumptions:[] });
+    process.exit(0);
+  }
+  if (prompt.includes('"title": "Update README.md then escalate after editing"')) {
+    writeFileSync("README.md", "# Unsafe early edit\\n");
+    if (directResult) json(directResult, { verdict:"needs_planner", summary:"edited before escalation", validation:[], assumptions:[] });
+    process.exit(0);
+  }
+  if (prompt.includes('"title": "Add retry result in output.txt"') && !prompt.includes('"attempts": 2')) {
+    process.exit(0);
+  }
+  if (prompt.includes('"title": "Add assumed retry result in retry.txt"')) {
+    writeFileSync("retry.txt", prompt.includes('"attempts": 2') ? "ok" : "bad");
+    json(directResult, {verdict:"completed",summary:"retry output",validation:["node check-retry.cjs"],assumptions:["output format remains unchanged"]});
+    process.exit(0);
+  }
+  if (prompt.includes('"title": "Extract helper from src/main.js')) {
+    writeFileSync("src/helper.js", "exports.helper = () => 42;");
+    writeFileSync("src/main.js", "exports.helper = require('./helper.js').helper;");
+    if (directResult) json(directResult, {verdict:"completed",summary:"extracted",validation:["node check-extraction.cjs"],assumptions:[]});
+    process.exit(0);
+  }
+  if (prompt.includes('"title": "Update wording in README.md"')) writeFileSync("README.md", "# Smoke\\n\\nUpdated.\\n");
+  else if (prompt.includes('"title": "Durable docs update"')) { mkdirSync("docs", { recursive:true }); writeFileSync("docs/guide.md", "# Guide\\n"); }
   else if (prompt.includes('"title": "Documentation update"')) writeFileSync("README.md", "# Smoke\\n\\nUpdated.\\n");
   else if (prompt.includes('"title": "Retry output"')) writeFileSync("retry.txt", prompt.includes('"attempts": 2') ? "ok" : "bad");
+  else if (prompt.includes('"title": "Dependency input change"')) { writeFileSync("package.json", '{"name":"changed"}'); writeFileSync("output.txt", "done"); }
   else if (prompt.includes('"title": "Architecture change"')) writeFileSync("architecture.txt", "done");
   else if (prompt.includes('"title": "Scope violation"')) writeFileSync("outside.txt", "bad");
   else writeFileSync("output.txt", "done");
+  if (directResult) json(directResult, { verdict:"completed", summary:"direct task complete", validation:["node check.mjs"], assumptions:[] });
   process.exit(0);
 }
 throw new Error("unknown prompt");
@@ -112,9 +147,9 @@ throw new Error("unknown prompt");
   return file;
 }
 
-function run(dir: string, agent: string, finalizeDocs = false): { status: number; stderr: string } {
+function run(dir: string, agent: string, apply = false, extraFlags: string[] = []): { status: number; stderr: string } {
   const command = `"${process.execPath}" "${agent}" "{prompt}"`;
-  const flags = [TSX, CLI, "run", "--command", command, ...(finalizeDocs ? [] : ["--no-apply", "--no-finalize-docs"])];
+  const flags = [TSX, CLI, "run", "--command", command, ...extraFlags, ...(apply ? [] : ["--no-apply"])];
   const r = spawnSync(process.execPath, flags,
     { cwd: dir, encoding: "utf-8", timeout: 120_000, env: { ...process.env, FORCE_COLOR: "0" } });
   return { status: r.status ?? 1, stderr: r.stderr ?? "" };
@@ -148,14 +183,94 @@ test("planner from empty state plans then executes", (dir) => {
   assert(state(dir).tasks.some((t:any) => t.id === "planned-task" && t.status === "passed"), "task did not pass");
 });
 
-test("planner-lite omits grill transcript", (dir) => {
-  writeState(dir, [], { goal:"Update README.md wording", phase:"planning", planRevision:0 });
+test("bounded documentation goal executes directly without planner", (dir) => {
+  writeState(dir, [], { goal:"Update wording in README.md", phase:"planning", planRevision:0 });
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
+  const log = events(dir);
+  assert(log.some((e) => e.type === "execution_route_selected" && e.route === "direct"), "direct route event missing");
+  assert(!log.some((e) => e.type === "planner_started"), "planner ran for direct goal");
+  assert(log.some((e) => e.type === "checks_started" && e.commands?.includes('node check.mjs')), "executor validation was not adopted");
+  assert(log.some((e) => e.type === "verifier_skipped"), "documentation direct task should skip verifier");
+});
+
+test("bounded code goal executes directly with verifier", (dir) => {
+  writeState(dir, [], { goal:"Add output in output.txt", phase:"planning", planRevision:0 });
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
+  const log = events(dir);
+  assert(!log.some((e) => e.type === "planner_started"), "planner ran for direct code goal");
+  assert(log.some((e) => e.type === "verifier_started"), "code direct task skipped verifier");
+});
+
+test("mechanical extraction preserves runtime exports with two model calls", (dir) => {
+  mkdirSync(join(dir,"src"));
+  writeFileSync(join(dir,"src/main.js"), "exports.helper = () => 42;");
+  writeFileSync(join(dir,"check-extraction.cjs"), "const assert=require('node:assert/strict'); assert.equal(require('./src/main.js').helper(),42); assert.equal(require('./src/helper.js').helper(),42);");
+  git(["add","src/main.js","check-extraction.cjs"],dir); git(["commit","-m","extraction fixture"],dir);
+  writeState(dir, [], {goal:"Extract helper from src/main.js into src/helper.js. Preserve behavior.",phase:"planning",planRevision:0});
+  const started = performance.now();
+  const result = run(dir, fakeAgent(dir), true);
+  assert(result.status === 0, `extraction failed: ${result.stderr}`);
+  assert(spawnSync(process.execPath,["check-extraction.cjs"],{cwd:dir}).status === 0, "applied runtime exports broke");
+  const log = events(dir);
+  assert(log.filter((e) => e.type === "agent_invocation_finished").length === 2, "small extraction paid for extra model phases");
+  const executor = log.find((e) => e.type === "executor_started");
+  const prompt = readFileSync(executor.prompt,"utf8");
+  assert(prompt.includes("Compact low-risk task"), "code prompt was not compact");
+  assert(!prompt.includes("Read and follow the canonical SKILL.md"), "mechanical task forced a full workflow");
+  assert(!existsSync(join(dir,".codegraph")), "extraction created an index");
+  console.log(`        fixture wall=${Math.round(performance.now()-started)}ms; agent invocations=2`);
+});
+
+test("clean direct escalation falls back to full planner", (dir) => {
+  writeState(dir, [], { goal:"Update README.md but escalate cleanly", phase:"planning", planRevision:0 });
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
+  const log = events(dir);
+  assert(log.some((e) => e.type === "direct_execution_needs_planner"), "direct fallback event missing");
+  assert(log.some((e) => e.type === "planner_started"), "fallback planner missing");
+  assert(state(dir).tasks.find((t:any) => t.id === "direct-goal")?.status === "blocked", "direct task not blocked before replacement");
+});
+
+test("dirty direct escalation fails instead of planning over edits", (dir) => {
+  writeState(dir, [], { goal:"Update README.md then escalate after editing", phase:"planning", planRevision:0 });
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status !== 0, "dirty direct escalation passed");
+  assert(result.stderr.includes("needs_planner after changing"), "dirty escalation error missing");
+  assert(!events(dir).some((e) => e.type === "planner_started"), "planner ran over dirty direct changes");
+});
+
+test("missing direct result uses bounded retry policy", (dir) => {
+  writeState(dir, [], { goal:"Add retry result in output.txt", phase:"planning", planRevision:0 });
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
+  const log = events(dir);
+  assert(log.filter((e) => e.type === "executor_started").length === 2, "missing result did not retry once");
+  assert(log.some((e) => e.type === "direct_execution_result_invalid" && e.status === "needs_retry"), "invalid result retry event missing");
+  assert(!log.some((e) => e.type === "planner_started"), "missing result should not force planner");
+});
+
+test("ambiguous bounded documentation goal uses full planner", (dir) => {
+  writeState(dir, [], { goal:"Optimize wording in README.md", phase:"planning", planRevision:0 });
   const result = run(dir, fakeAgent(dir));
   assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
   const planner = events(dir).find((event) => event.type === "planner_finished");
-  assert(planner && planner.grillTranscript === undefined, "planner-lite retained grill transcript artifact");
+  assert(planner?.grillTranscript, "full planner transcript missing");
   const prompt = readFileSync(join(planner.runDir, "planner.md"), "utf-8");
-  assert(!prompt.includes("Also write an autonomous grill transcript"), "planner-lite still asks model for transcript");
+  assert(prompt.includes("Also write an autonomous grill transcript"), "ambiguous goal did not receive full planning contract");
+});
+
+test("slow history never adds a planner repair", (dir) => {
+  writeState(dir, [], { goal:"Optimize wording in README.md", phase:"planning", planRevision:0 });
+  writeFileSync(join(dir, ".git/info/exclude"), ".agent-runs/\n");
+  mkdirSync(join(dir, ".agent-runs"), { recursive:true });
+  writeFileSync(join(dir, ".agent-runs/events.jsonl"), Array.from({length:3}, () => JSON.stringify({ ts:new Date().toISOString(), type:"agent_invocation_finished", phase:"planner", durationMs:600000 })).join("\n") + "\n");
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
+  const log = events(dir);
+  assert(log.filter((e) => e.type === "agent_invocation_finished" && String(e.phase).startsWith("planner")).length === 4, "slow history added another planning invocation");
+  assert(!log.some((e) => e.type === "planner_latency_repair_started"), "observational latency must not add model work");
 });
 
 test("planner parent checkout mutation is detected", (dir) => {
@@ -180,27 +295,13 @@ test("bounded documentation change skips verifier", (dir) => {
   assert(!readdirSync(join(dir, ".agent-runs")).some((name) => /^run-.*\.log$/.test(name)), "duplicate top-level run log should not exist");
 });
 
-test("finalize docs commits and applies documentation edits", (dir) => {
+test("durable documentation is checked and applied without finalizer", (dir) => {
   writeState(dir, [task({ title:"Durable docs update", kind:"maintenance", scope:["docs/guide.md"] })]);
   const result = run(dir, fakeAgent(dir), true);
   assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
-  assert(readFileSync(join(dir, "PROJECT.md"), "utf-8").includes("Durable project facts"), "finalizer edit was not applied");
-  assert(events(dir).some((e) => e.type === "finalize_docs_finished" && e.changedPaths?.includes("PROJECT.md")), "finalizer completion evidence missing");
-});
-
-test("finalize docs rejects non-documentation edits", (dir) => {
-  writeState(dir, [task({ title:"Durable docs update", kind:"maintenance", scope:["docs/guide.md"] })], { goal:"Reject finalize code mutation" });
-  const result = run(dir, fakeAgent(dir), true);
-  assert(result.status !== 0, "non-documentation finalizer mutation passed");
-  assert(result.stderr.includes("Finalize-docs changed non-documentation files: runtime.ts"), "finalizer scope error missing");
-  assert(!existsSync(join(dir, "runtime.ts")), "unsafe finalizer edit reached parent checkout");
-});
-
-test("finalize-docs parent checkout mutation is detected", (dir) => {
-  writeState(dir, [task({ title:"Durable docs update", kind:"maintenance", scope:["docs/guide.md"] })]);
-  const result = run(dir, fakeAgent(dir, "finalize-docs"), true);
-  assert(result.status !== 0, "finalize-docs parent mutation passed");
-  assert(events(dir).some((e) => e.type === "parent_worktree_mutated" && e.phase === "finalize-docs"), "finalize-docs mutation evidence missing");
+  assert(readFileSync(join(dir,"docs/guide.md"),"utf8").includes("# Guide"), "executor docs not applied");
+  assert(!events(dir).some((e) => e.type === "finalize_docs_started"), "documentation triggered another agent");
+  assert(!existsSync(join(dir,"PROJECT.md")), "unscoped finalizer edit reached parent");
 });
 
 test("stale task replans before executor", (dir) => {
@@ -219,8 +320,40 @@ test("failed checks retry without replanning", (dir) => {
   assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
   const log = events(dir);
   assert(log.filter((e) => e.type === "executor_started").length === 2, "retry count wrong");
+  assert(new Set(log.filter((e) => e.type === "iteration_started").map((e) => e.runDir)).size === 2, "retry reused prior verdict artifacts");
   assert(!log.some((e) => e.type === "planner_started"), "check failure replanned");
   assert(state(dir).tasks[0].status === "passed", "retry did not pass");
+});
+
+test("direct assumptions do not force planning on check retry", (dir) => {
+  writeFileSync(join(dir,"check-retry.cjs"), "require('node:assert/strict').equal(require('node:fs').readFileSync('retry.txt','utf8'),'ok');");
+  git(["add","check-retry.cjs"],dir); git(["commit","-m","retry assertion"],dir);
+  writeState(dir, [], {goal:"Add assumed retry result in retry.txt",phase:"planning",planRevision:0});
+  const result = run(dir,fakeAgent(dir));
+  assert(result.status === 0, `direct retry failed: ${result.stderr}`);
+  assert(!events(dir).some((e) => e.type === "planner_started"), "accepted direct assumptions invalidated retry");
+  assert(events(dir).filter((e) => e.type === "executor_started").length === 2, "direct retry did not repair once");
+});
+
+test("bootstrap is reused across a check retry", (dir) => {
+  writeState(dir, [task({title:"Retry output",scope:["retry.txt"],validation:["node -e \"require('node:assert').equal(require('node:fs').readFileSync('retry.txt','utf8'),'ok')\""]})]);
+  const command = "node -e \"require('node:fs').appendFileSync('.bootstrap-count','1')\"";
+  const result = run(dir, fakeAgent(dir), false, ["--worktree-bootstrap",command,"--worktree-bootstrap-ignore",".bootstrap-count"]);
+  assert(result.status === 0, `bootstrap run failed: ${result.stderr}`);
+  assert(events(dir).filter((e) => e.type === "worktree_bootstrap_passed").length === 1, "unchanged dependencies repeated bootstrap");
+});
+
+test("policy bootstrap reruns before checks when dependencies change", (dir) => {
+  writeState(dir, [task({title:"Dependency input change",scope:["output.txt","package.json"],validation:["node -e \"require('node:assert').equal(require('node:fs').readFileSync('.bootstrap-count','utf8'),'11')\""]})]);
+  const policyPath = join(dir,"templates/agent-policy/workflow-policy.json");
+  const policy = JSON.parse(readFileSync(policyPath,"utf8"));
+  policy.autonomousLoop.worktreeBootstrap = ["node -e \"require('node:fs').appendFileSync('.bootstrap-count','1')\""];
+  policy.autonomousLoop.worktreeBootstrapIgnore = [".bootstrap-count"];
+  writeFileSync(policyPath,JSON.stringify(policy));
+  git(["add",policyPath],dir); git(["commit","-m","bootstrap policy"],dir);
+  const result = run(dir,fakeAgent(dir));
+  assert(result.status === 0, `dependency bootstrap failed: ${result.stderr}`);
+  assert(events(dir).filter((e) => e.type === "worktree_bootstrap_passed").length === 2, "dependency edit did not invalidate setup");
 });
 
 test("high complexity runs stance and adversarial verification", (dir) => {
@@ -231,6 +364,9 @@ test("high complexity runs stance and adversarial verification", (dir) => {
   const log = events(dir);
   assert(log.some((e) => e.type === "stance_reflection_finished"), "stance missing");
   assert(log.filter((e) => e.type === "verifier_started").length === 3, "three votes missing");
+  const thirdStart = log.map((e) => e.type).lastIndexOf("verifier_started");
+  const firstVoteFinish = log.findIndex((e) => e.type === "agent_invocation_finished" && String(e.phase).startsWith("verifier-vote-"));
+  assert(firstVoteFinish > thirdStart, "adversarial votes were not launched together before completion collection");
 });
 
 test("stance parent checkout mutation is detected", (dir) => {
@@ -243,11 +379,42 @@ test("stance parent checkout mutation is detected", (dir) => {
 });
 
 test("scope violation blocks passing", (dir) => {
-  writeState(dir, [task({ title:"Scope violation", scope:["allowed.txt"] })], { maxIterations:1 });
+  writeState(dir, [task({ title:"Scope violation", scope:["allowed.txt"], validation:["node -e \"require('node:assert').ok(require('node:fs').existsSync('outside.txt'))\""] })], { maxIterations:1 });
   const result = run(dir, fakeAgent(dir));
   assert(result.status !== 0, "scope violation passed");
   assert(events(dir).some((e) => e.type === "scope_violation"), "scope event missing");
   assert(state(dir).tasks[0].status === "needs_retry", "wrong scope status");
+});
+
+test("passing review must explain acceptance proof", (dir) => {
+  writeState(dir, [task({title:"Review without proof"})]);
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status !== 0, "unsupported pass verdict accepted");
+  assert(!events(dir).some((e) => e.type === "task_passed"), "unsupported pass committed");
+});
+
+test("one unresolved defect cannot be outvoted", (dir) => {
+  writeState(dir, [task({title:"Unresolved review defect",complexity:"high",complexityReasons:["behavioral uncertainty"]})],{maxIterations:1});
+  const result = run(dir,fakeAgent(dir));
+  assert(result.status !== 0, "two passing votes hid a concrete defect");
+  assert(events(dir).find((e) => e.type === "verifier_finished")?.verdict === "fail", "defect verdict lost");
+});
+
+test("one unresolved human gate cannot be outvoted", (dir) => {
+  writeState(dir, [task({title:"Unresolved review gate",complexity:"high",complexityReasons:["public contract uncertainty"]})]);
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status !== 0, "two passes overruled human gate");
+  const event = events(dir).find((e) => e.type === "verifier_finished");
+  assert(event?.verdict === "needs_human", "unresolved gate must stop run");
+  assert(JSON.parse(readFileSync(event.resultFile,"utf8")).humanGates.includes("approval needed"), "human gate lost during aggregation");
+});
+
+test("reviewer cannot change the checked candidate", (dir) => {
+  writeState(dir, [task({title:"Reviewer mutation"})]);
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status !== 0, "reviewer changed candidate and still passed");
+  assert(events(dir).some((e) => e.type === "candidate_mutated"), "candidate mutation evidence missing");
+  assert(!events(dir).some((e) => e.type === "task_passed"), "mutated candidate committed");
 });
 
 test("verifier parent checkout mutation is detected", (dir) => {
@@ -273,6 +440,26 @@ test("dirty parent checkout is rejected", (dir) => {
   const result = run(dir, agent);
   assert(result.status !== 0, "dirty checkout ran");
   assert(result.stderr.includes("Main worktree is dirty"), "dirty error missing");
+});
+
+test("hard max-runtime circuit breaker remains authoritative", (dir) => {
+  writeState(dir, [task({ title:"Slow output" })]);
+  const result = run(dir, fakeAgent(dir), false, ["--max-runtime-seconds", "1"]);
+  assert(result.status !== 0, "hard runtime breaker did not stop run");
+  assert(events(dir).some((e) => e.type === "budget_exhausted"), "hard runtime budget event missing");
+});
+
+test("soft phase overrun emits evidence without stopping", (dir) => {
+  writeState(dir, [task()]);
+  const policyPath = join(dir, "templates/agent-policy/workflow-policy.json");
+  const localPolicy = JSON.parse(readFileSync(policyPath, "utf-8"));
+  localPolicy.autonomousLoop.latency.phaseTargetsSeconds.executor = 0.001;
+  writeFileSync(policyPath, JSON.stringify(localPolicy, null, 2));
+  git(["add", policyPath], dir);
+  git(["commit", "-m", "tight latency fixture"], dir);
+  const result = run(dir, fakeAgent(dir));
+  assert(result.status === 0, `soft overrun stopped run: ${result.stderr}`);
+  assert(events(dir).some((e) => e.type === "latency_target_exceeded" && e.scope === "phase" && e.phase === "executor"), "soft phase overrun event missing");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

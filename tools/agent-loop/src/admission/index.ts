@@ -17,7 +17,7 @@ export type VerificationProfile = VerificationEvidence & (
   | { verifierMode: "adversarial"; votes: 3 }
 );
 
-export type AdmissionPhase = "replan" | "stance" | "verifier" | "finalize-docs";
+export type AdmissionPhase = "replan" | "stance" | "verifier";
 
 export interface AdmissionDecision {
   run: boolean;
@@ -28,7 +28,6 @@ export type VerifierAdmissionDecision = AdmissionDecision & VerificationProfile;
 
 const DEFAULT_ADMISSION: Required<PhaseAdmissionConfig> = {
   verifier: "auto",
-  finalizeDocs: "on-change",
 };
 
 function admissionConfig(policy: WorkflowPolicy): Required<PhaseAdmissionConfig> {
@@ -60,11 +59,9 @@ export function resolveVerificationProfile(
     ...changedPaths,
   ]);
   const highRiskReasons: string[] = [];
-  if (task.kind === "architecture" || task.workflow === "improve-codebase-architecture") highRiskReasons.push("architecture work");
   if (task.complexity === "high") highRiskReasons.push("high task complexity");
   if (scope.length > 0 && !isScopeMeaningfullyBounded(scope)) highRiskReasons.push("broad or catch-all declared scope");
   if (testPathsTouchHumanGate([...scope, ...changedPaths], policy)) highRiskReasons.push("scope or diff touches a human-gate path");
-  if (scope.length >= 4 || changedPaths.length >= 4) highRiskReasons.push("broad scope or actual diff");
   highRiskReasons.push(...semanticHumanGates.map((gate) => `semantic human gate: ${gate}`));
   if (semanticHumanGates.length > 0) evidence.push(`humanGates=${semanticHumanGates.join(",")}`);
   if (highRiskReasons.length > 0) {
@@ -82,6 +79,12 @@ export function resolveVerificationProfile(
   return { risk: "medium", verifierMode: "single", votes: 1, reasons: mediumReasons, evidence };
 }
 
+export function shouldUseCompactExecutor(task: Task, policy: WorkflowPolicy): boolean {
+  return isScopeMeaningfullyBounded(getTaskScope(task))
+    && !(task.failureHistory?.length)
+    && resolveVerificationProfile(task, policy).risk !== "high";
+}
+
 export function taskWasPlannedForCurrentRevision(task: Task, state: AgenticState): boolean {
   return typeof task.plannedRevision === "number"
     && typeof state.planRevision === "number"
@@ -90,7 +93,7 @@ export function taskWasPlannedForCurrentRevision(task: Task, state: AgenticState
 
 export function shouldReplanBeforeTask(task: Task, state: AgenticState): AdmissionDecision {
   const failure = latestFailure(task);
-  if (failure && failure.phase && failure.phase !== "checks") {
+  if (failure && failure.phase && !["checks", "direct_result"].includes(failure.phase)) {
     return { run: true, reason: `${failure.phase} failure invalidated task understanding` };
   }
   if (task.plannedContextFingerprint && task.plannedContextFingerprint !== computePlanContextFingerprint(state)) {
@@ -122,23 +125,4 @@ export function shouldRunVerifier(
     ? "policy requires verifier"
     : `${admittedProfile.risk}-risk change requires ${admittedProfile.verifierMode} verification`;
   return { run: true, reason: `${prefix}: ${profileReason}`, ...admittedProfile };
-}
-
-export function shouldRunFinalizeDocs(
-  changedPaths: string[],
-  policy: WorkflowPolicy,
-  enabled: boolean
-): AdmissionDecision {
-  if (!enabled) return { run: false, reason: "finalize-docs disabled by operator" };
-  const config = admissionConfig(policy);
-  if (config.finalizeDocs === "always") return { run: true, reason: "policy requires finalize-docs after every run" };
-  const durableDocs = changedPaths.filter((path) => {
-    const normalized = path.replace(/\\/g, "/");
-    return ["PROJECT.md", "CONTEXT.md", "CONTEXT-MAP.md", "AGENTS.md", "CLAUDE.md"].includes(normalized)
-      || normalized.startsWith("docs/")
-      || normalized.startsWith("adrs/")
-      || normalized.startsWith("templates/");
-  });
-  if (durableDocs.length > 0) return { run: true, reason: `durable documentation changed: ${durableDocs.join(", ")}` };
-  return { run: false, reason: "no durable documentation changed" };
 }

@@ -16,7 +16,7 @@ import { loadState } from "./state/index.js";
 import { runAgenticLoop, LoopError, type LoopConfig } from "./loop/index.js";
 import type { AgentConfig } from "./agent/index.js";
 
-function collect(val: string, acc: string[]): string[] { return [...acc, val]; }
+function collect(val: string, acc: string[] = []): string[] { return [...acc, val]; }
 
 function uniq(values: string[]): string[] {
   return [...new Set(values)];
@@ -240,12 +240,11 @@ program
   .option("--check-timeout <seconds>",       "Seconds before a check command is killed (0 = none)", "0")
   .option("--max-runtime-seconds <n>",       "Hard runtime budget in seconds (0 = none)", "0")
   .option("--checks <cmd>",                  "Extra check command (repeatable)", collect, [])
-  .option("--worktree-bootstrap <cmd>",      "Bootstrap command run inside the isolated run worktree before agents/checks (repeatable)", collect, [])
-  .option("--worktree-bootstrap-ignore <path>", "Worktree-relative bootstrap artifact ignored by scope/diff/commit (repeatable)", collect, [])
+  .option("--worktree-bootstrap <cmd>",      "Bootstrap command run inside the isolated run worktree before agents/checks (repeatable)", collect)
+  .option("--worktree-bootstrap-ignore <path>", "Worktree-relative bootstrap artifact ignored by scope/diff/commit (repeatable)", collect)
   .option("--check-env-file <path>",         "Env file loaded for validation checks, relative to worktree or absolute")
   .option("--no-apply",                      "Do not apply run worktree changes to main tree at end (default: apply)")
   .option("--allow-dirty",                   "Proceed even if policy requires a clean main worktree")
-  .option("--no-finalize-docs",              "Skip the finalize-docs agent after all tasks pass")
   .action(async (opts) => {
     const repoRoot = opts.repo ? resolve(opts.repo) : detectRepoRoot();
     failOnInterruptedRun(repoRoot, DEFAULT_STATE_FILE, DEFAULT_RUNS_ROOT);
@@ -266,7 +265,7 @@ program
       }
       return null;
     };
-    const defaultTool = detectDefaultTool();
+    const defaultTool = opts.command ? null : detectDefaultTool();
     if (!defaultTool && !opts.command) {
       throw new LoopError("No executor found. Install 'pi' or 'claude', or pass --command.");
     }
@@ -290,12 +289,11 @@ program
       maxRuntimeSeconds:   parseInt(opts.maxRuntimeSeconds ?? "0", 10),
       checkTimeoutSeconds: parseInt(opts.checkTimeout     ?? "0",  10),
       extraChecks:         (opts.checks as string[]) ?? [],
-      worktreeBootstrap:   (opts.worktreeBootstrap as string[]) ?? [],
-      worktreeBootstrapIgnore: (opts.worktreeBootstrapIgnore as string[]) ?? [],
-      checkEnvFile:        opts.checkEnvFile ?? "",
+      worktreeBootstrap:   opts.worktreeBootstrap as string[] | undefined,
+      worktreeBootstrapIgnore: opts.worktreeBootstrapIgnore as string[] | undefined,
+      checkEnvFile:        opts.checkEnvFile,
       apply:                       opts.apply !== false,
       allowDirty:                  !!opts.allowDirty,
-      finalizeDocs:                opts.finalizeDocs !== false,
     };
 
     await runAgenticLoop(loopConfig).catch((err) => {

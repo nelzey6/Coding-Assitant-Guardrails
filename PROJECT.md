@@ -17,6 +17,12 @@ npm exec -- tsc --noEmit
 cd ../..
 ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/phase-admission-smoke.ts
 
+# Impact routing, Planner slicing, and latency policy
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/impact-routing-smoke.ts
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/planner-slice-contract-smoke.ts
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/latency-policy-smoke.ts
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/acceptance-proof-smoke.ts
+
 # Parent-checkout identity/content guard
 ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/checkout-integrity-smoke.ts
 
@@ -37,7 +43,7 @@ Use targeted checks first. Full legacy PowerShell smokes are compatibility evide
 
 ## Public CLI
 
-`run` intentionally exposes twelve options:
+`run` intentionally exposes only operator-facing execution options:
 
 - `--repo`
 - `--command`
@@ -50,9 +56,8 @@ Use targeted checks first. Full legacy PowerShell smokes are compatibility evide
 - `--check-env-file`
 - `--allow-dirty`
 - `--no-apply`
-- `--no-finalize-docs`
 
-Policy owns planner mode, retries, phase admission, verification intensity, bootstrap defaults, and human gates. `agentic.json.maxIterations` owns task-turn budget.
+Policy owns planner mode, retries, phase admission, verification intensity, bootstrap defaults, human gates, and soft latency targets. `agentic.json.maxIterations` owns task-turn budget. `--max-runtime-seconds` remains a separate hard breaker.
 
 ## Architecture
 
@@ -61,7 +66,9 @@ Policy owns planner mode, retries, phase admission, verification intensity, boot
 | `tools/agent-loop/src/index.ts` | Small CLI: validate, init, diagnostics, run |
 | `tools/agent-loop/src/loop/index.ts` | Deep run module: planner, replan, worktree, executor, checks, scope, verification, apply |
 | `tools/agent-loop/src/loop/agent-phase.ts` | One protected agent-invocation interface for every model phase |
-| `tools/agent-loop/src/admission/index.ts` | Deterministic replan, verification-risk, and finalize-docs decisions |
+| `tools/agent-loop/src/admission/index.ts` | Deterministic replan, verification risk, and compact execution decisions |
+| `tools/agent-loop/src/routing/index.ts` | Deterministic direct-vs-Planner impact route and direct-result contract |
+| `tools/agent-loop/src/latency/index.ts` | Soft targets and measured phase overrun decisions |
 | `tools/agent-loop/src/state/index.ts` | Canonical task/state types and transitions |
 | `tools/agent-loop/src/context/index.ts` | Repository discovery; consumes canonical state |
 | `tools/agent-loop/src/prompts/index.ts` | Private prompt implementation; exports only phase entry points and validators |
@@ -77,29 +84,41 @@ Canonical state types live only in `state/index.ts`. Context, scope, agent, prom
 ## Run flow
 
 1. Load policy and `agentic.json`; reject dirty parent checkout unless allowed.
-2. If tasks are absent, Planner inspects goal/repo and writes one task graph. Planner-lite writes JSON only; full Planner also writes a grill transcript.
-3. Create one shared run worktree.
-4. Select next runnable task.
-5. Replan admission:
+2. If tasks are absent, deterministic impact routing selects:
+   - bounded concrete goal naming one to four files → synthetic direct task;
+   - ambiguous, risky, pathless, gated, or broader goal → full Planner.
+3. Full Planner writes one primary implementation slice. One true prerequisite is allowed only with a dependency, distinct validation, and explicit split reason.
+4. Create one shared run worktree.
+5. Select next runnable task.
+6. Replan admission:
    - fresh revision + no ambiguity → execute;
    - changed goal/decisions/assumptions/questions/blockers → invalidate plan and replan;
    - stale/manual task or non-check understanding failure → block stale task and replan;
    - check failure → retry directly.
-6. Resolve complexity. High complexity runs stance reflection.
-7. Every agent phase runs through one parent-checkout guard; agents may edit only their assigned worktree/artifact paths.
-8. Run targeted checks.
-9. Enforce declared scope.
-10. Resolve one verification profile:
+7. Resolve complexity from declared uncertainty and protected behavior. File count and workflow label do not raise it. High complexity runs stance reflection.
+8. Executor runs in a fresh session. Direct Executor writes a compact verdict plus one to three focused checks; clean `needs_planner` escalates to a fresh full Planner, while dirty escalation stops.
+9. Every agent phase protects parent HEAD/content. Verifier also guards candidate HEAD/content and records candidate identity. Any mutation stops before commit; any unresolved human gate stops regardless of vote count.
+10. Run targeted acceptance checks. Reject empty/diagnostic-only proof; reviewers map acceptance criteria to passed commands.
+11. Enforce declared scope.
+12. Resolve one verification profile:
     - bounded low-complexity documentation diff → skip verifier;
     - normal change → one verifier;
     - high risk → three adversarial votes.
-11. Commit passed task inside run worktree. Events, phase logs, state snapshots, checks, diffs, and verifier JSON are canonical evidence; no routine handover, progress Markdown, or duplicate top-level run log is generated.
-12. If source-of-truth docs changed, run one finalize-docs pass; reject non-documentation edits and commit accepted docs before apply. README-only changes do not admit this phase.
-13. Apply run branch to parent checkout as unstaged changes unless `--no-apply`.
+13. Commit passed task inside run worktree. Events, phase logs, state snapshots, checks, diffs, and verifier JSON are canonical evidence; no routine handover, progress Markdown, or duplicate top-level run log is generated.
+14. Executor completes required scoped documentation before checks and verification. No finalizer edits the verified result.
+15. Apply run branch to parent checkout as unstaged changes unless `--no-apply`.
+
+Soft run targets are 60 seconds direct, 180 seconds planned, and 300 seconds complex. `phase_latency`, `run_latency`, and `latency_target_exceeded` expose measured durations and overruns. No predictive forecasts or latency-triggered Planner calls. Targets never terminate active work or bypass safety phases. High-risk reviewers run concurrently with distinct review focuses.
+
+Bootstrap inherits policy unless overridden. It runs once per dependency fingerprint and reruns after dependency changes before checks. Fingerprint covers package manifests, common lockfiles/package-manager config, commands, Node version, platform and architecture. Bootstrap artifacts stay excluded from commits and scope checks.
+
+Direct routing accepts up to 1000 characters. Mechanical extract/move/split/refactor goals require explicit behavior preservation. Short aliases resolve only to unique existing repository files. Bounded code uses compact context and existing focused validation; no fabricated red tests or incidental CodeGraph initialization.
+
+`acceptance-proof-smoke.ts` tests rejection of vacuous commands. CLI smoke coverage includes runtime-preserving extraction with two invocations, candidate tampering, evidence-free review rejection, human-gate precedence, bootstrap reuse and dependency invalidation. These are deterministic adapter fixtures, not model quality or latency benchmarks.
 
 ## Deliberately removed ceremony
 
-No standalone task-grill, decision-grill, post-task review, architect checkpoint, goal review, bundled preflight/review, or finalizer verifier.
+No standalone task-grill, decision-grill, post-task review, architect checkpoint, goal review, bundled preflight/review, finalize-docs, or finalizer verifier.
 
 No deterministic `plan` command, per-task review branches, `accept`, `reset-task`, or `doctor`.
 
@@ -109,7 +128,7 @@ No merge-mode matrix, retry selector, verifier-vote override, fast-verifier flag
 
 - clean-parent gate
 - single isolated run worktree
-- identity/content parent mutation detection across planner, stance, executor, verifier, and finalizer, including HEAD, untracked, already-dirty, and error-exit mutations
+- identity/content parent mutation detection across planner, stance, executor, and verifier, including HEAD, untracked, already-dirty, and error-exit mutations
 - task dependency ordering
 - worktree bootstrap and ignored bootstrap artifacts
 - targeted checks with env and timeout support
@@ -132,23 +151,29 @@ No merge-mode matrix, retry selector, verifier-vote override, fast-verifier flag
 - changed planning-context invalidation
 - semantic human gates
 - effective planner-mode precedence, source, and reason
-- finalize-docs admission
-- README-only finalize-docs exclusion
+- compact code admission without label/file-count escalation
 
 `agent-log-smoke.ts` covers compact Pi telemetry, usage/turn preservation, content omission, and a bounded log size.
 
 `agent-loop-ts-smoke.ts` covers:
 
 - planning from an empty task graph
-- planner-lite operation without a grill transcript
+- direct documentation/code execution without Planner
+- clean and dirty direct-to-Planner escalation
+- direct-result retry
+- full planning for ambiguous bounded goals
+- slow history never adds Planner work
 - low-risk documentation verifier skip
-- finalize-docs commit/apply and non-documentation rejection
+- scoped documentation checked and applied without finalization
 - stale-task replan and replacement execution
 - check retry without replan
 - high-complexity stance plus adversarial verification
 - scope violation
-- parent checkout mutation from planner, stance, executor, verifier, and finalizer
+- parent checkout mutation from planner, stance, executor, and verifier
 - dirty checkout rejection
+- hard runtime breaker preservation and parallel adversarial vote launch
+
+Focused policy smokes cover direct-route admission, coherent Planner slices, measured latency targets, and phase target decisions.
 
 Pi JSON logs retain only session metadata, assistant/tool completion summaries, aggregate whole-invocation usage/cost, and bounded errors. Full message history, thinking, tool arguments, and tool results are intentionally omitted; use events, checks, diffs, result JSON, and failure analysis for run evidence. Compact tasks neither generate CodeGraph context nor initialize `.codegraph/`; existing indexes are synchronized when present.
 

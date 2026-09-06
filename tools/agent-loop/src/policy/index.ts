@@ -36,15 +36,31 @@ export interface AutonomousLoopConfig {
   worktreeBootstrapIgnore?: string[];
   checkEnvFile?: string;
   phaseAdmission?: PhaseAdmissionConfig;
+  latency?: LatencyPolicyConfig;
 }
+
+export interface LatencyPolicy {
+  directTargetSeconds: number;
+  plannedTargetSeconds: number;
+  complexTargetSeconds: number;
+  phaseTargetsSeconds: {
+    planner: number;
+    stance: number;
+    executor: number;
+    checks: number;
+    verifier: number;
+  };
+}
+
+export type LatencyPolicyConfig = Omit<Partial<LatencyPolicy>, "phaseTargetsSeconds"> & {
+  phaseTargetsSeconds?: Partial<LatencyPolicy["phaseTargetsSeconds"]>;
+};
 
 export type PlannerMode = "auto" | "lite" | "full";
 
 export interface PhaseAdmissionConfig {
   /** Run the per-task verifier for every task, or skip it for low-risk scoped work after checks. */
   verifier?: "always" | "auto";
-  /** Run finalize-docs always, or only when durable documentation changed. */
-  finalizeDocs?: "always" | "on-change";
 }
 
 const FALLBACK_POLICY_RELATIVE = "templates/agent-policy/workflow-policy.json";
@@ -85,14 +101,7 @@ export function resolveEffectivePlannerMode(
   if (priorFailureAnalysisFile) return { mode: "full", source: "adaptive", reason: "replan after failure requires full planner context" };
   if ((state.planRevision ?? 0) > 0) return { mode: "full", source: "adaptive", reason: "non-initial planning revision requires full planner context" };
 
-  const goal = (state.goal ?? "").trim();
-  const lowRiskGoal = goal.length <= 240
-    && /\b(add|update|change|edit|document|docs?|wording|sentence|readme|markdown)\b/i.test(goal)
-    && /(?:^|\s|[`"'(])(?:[\w./-]+\.md|docs?\/)[\w./-]*/i.test(goal)
-    && !/\b(api|architecture|auth|billing|database|delete|dependency|migration|package|permission|public|refactor|schema|security|service|transport|worktree)\b/i.test(goal);
-  return lowRiskGoal
-    ? { mode: "lite", source: "adaptive", reason: "short documentation/maintenance goal with no elevated-risk terms" }
-    : { mode: "full", source: "adaptive", reason: "goal does not meet conservative planner-lite admission" };
+  return { mode: "full", source: "adaptive", reason: "direct routing owns bounded low-impact goals; remaining goals require full planning" };
 }
 
 const GENERIC_HUMAN_GATE_WORDS = new Set([

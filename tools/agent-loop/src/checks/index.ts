@@ -94,3 +94,16 @@ export function invokeChecks(
   log.push(`Structured metrics:\n${formatMetricsForPrompt(allMetrics)}`);
   return log.join("\n");
 }
+
+/** Reject empty or diagnostic-only proof. Semantic relevance is judged by the verifier. */
+export function validateAcceptanceChecks(checks: string[]): string[] {
+  const hasAssertion = checks.some((raw) => {
+    const command = raw.trim();
+    if (!command || /^(?:true|:|exit\s+0)\s*;?$/.test(command)) return false;
+    if (/^(?:echo|printf)\b/.test(command) && !/[;&|]/.test(command)) return false;
+    if (/^git\s+(?:diff|status|log|show)\b/.test(command) && !/[;&|]/.test(command)) return false;
+    if (/^node\s+-e\s+['"]\s*process\.exit\(0\);?\s*['"]$/.test(command)) return false;
+    return true;
+  });
+  return hasAssertion ? [] : ["Acceptance requires a focused assertion/test; empty or diagnostic-only commands do not prove completion"];
+}

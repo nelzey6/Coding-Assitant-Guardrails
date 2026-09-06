@@ -5,7 +5,7 @@ import { homedir } from "os";
 import type { AgenticState, Task } from "../state/index.js";
 import type { WorkflowPolicy } from "../policy/index.js";
 import { appendEvent, getRecentEvents, formatEventLine, loadEvents } from "../events/index.js";
-import { git as gitTool } from "../tools/index.js";
+import { git as gitTool, captureCheckoutSnapshot } from "../tools/index.js";
 
 // Resolve a skill's SKILL.md path from the installed skills directories.
 // Checks ~/.claude/skills, ~/.codex/skills, and the repo's own skills/ folder.
@@ -118,6 +118,9 @@ function projectTaskForPhase(task: Task, phase: TaskPhase): Record<string, unkno
     dependsOn: task.dependsOn,
     complexity: task.complexity,
     complexityReasons: task.complexityReasons,
+    origin: task.origin,
+    sliceRole: task.sliceRole,
+    splitReason: task.splitReason,
     ...(phase === "executor" && typeof task.attempts === "number" ? { attempts: task.attempts } : {}),
   };
   return base;
@@ -403,7 +406,7 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     `The harness provided a context packet at: ${repoContextFile}`,
     ...(lite ? [] : [
       `The harness also generated optional CodeGraph context at: ${codeGraphFile}`,
-      "Use CodeGraph context for orientation before broad manual search, then verify conclusions against source files. If the artifact says CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding.",
+      "Use CodeGraph context for orientation before broad manual search, then verify conclusions against source files. If unavailable, use focused source inspection; do not initialize an index during this run.",
     ]),
     "Inspect deeper in the repository when needed.",
     "",
@@ -425,14 +428,17 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "Allowed verdicts: planned, needs_human, blocked.",
     "Allowed task statuses in planner output: pending, needs_human, blocked.",
     "Allowed task kinds: discovery, investigation, implementation, architecture, maintenance, handoff.",
-    "Each task must have: id, title, kind, workflow, status, priority, acceptanceCriteria, validation, dependsOn, failureHistory, artifacts, scope, complexity, complexityReasons.",
+    "Each task must have: id, title, kind, workflow, status, priority, acceptanceCriteria, validation, dependsOn, failureHistory, artifacts, scope, complexity, complexityReasons, sliceRole, and optional splitReason.",
     "Use one workflow per task. Use dependencies for workflow sequences. Use only canonical workflows from the policy.",
     "Plan around verification seams, not file boundaries. Every task incurs execution and deterministic-check cost, and may incur stance or independent-verifier cost, so each task must buy meaningful independent proof.",
     "Split a task only when at least one is true: it has a different risk profile, a different acceptance proof, different scope/ownership, independent rollback value, or creates a dependency required by later work.",
     "Do not create one task per helper, file move, module extraction, or similarly mechanical edit when those edits share one risk profile and one validation command. Group them into the smallest coherent verification slice.",
     "Keep tasks independently verifiable, but reject orchestration-heavy plans where repeated validation is identical and task boundaries add no new proof.",
+    "For implementation work, produce exactly one primary slice (`sliceRole: primary`). You may add one prerequisite (`sliceRole: prerequisite`) only when the primary depends on it, its validation proves a distinct seam, and `splitReason` is `distinct-proof`, `true-prerequisite`, or `independent-rollback`.",
+    "Do not add standalone discovery/investigation before implementation. Keep discovery inside the primary task unless the goal itself asks for an investigation or artifact.",
+    "Include required source-of-truth documentation in the implementation scope and acceptance criteria. Executor owns documentation before verification; no finalizer will repair omissions.",
     "Always set `scope` to the forward-slash glob list of files the task may change. Keep scope tight (5 globs or fewer), but include every file implied by acceptance criteria, including new focused test files when direct helper-level proof requires them.",
-    "Set complexity to low, medium, or high and give concrete complexityReasons. Architecture, broad cross-module, assumption-heavy, or costly-to-reverse work should be high. Split high-complexity work only at genuine verification seams; do not multiply model calls merely to reduce changed-file count.",
+    "Set complexity to low, medium, or high and give concrete complexityReasons. Use high only for concrete behavioral uncertainty, public-contract or persisted-state impact, or costly-to-reverse changes. File count and architecture/refactor workflow names alone are not high complexity. Split high-complexity work only at genuine verification seams; do not multiply model calls merely to reduce changed-file count.",
     "Task-size budget (enforced by the harness): at most 7 acceptanceCriteria, at most 5 scope globs, implementation/architecture tasks must have at least one acceptanceCriterion.",
     "",
     ...(lite ? [
@@ -443,7 +449,7 @@ export function writePlannerPrompt(promptFile: string, opts: PlannerPromptOption
     "",
     "Planner result schema (write valid JSON only):",
     `{"verdict":"planned|needs_human|blocked","summary":"...","decisions":[{"question":"...","whyItMatters":"...","optionsConsidered":[{"label":"...","evidence":"repo path / command / doc inspected","recommended":true}],"chosen":"...","selfAnswer":"...","confidence":"high|medium|low","escalate":false}],"assumptions":[],"openQuestions":[],"blockers":[],"tasks":[],"artifacts":${lite ? "[]" : `["${grillTranscriptFile}"]`}}`,
-    `Each task object: {"id":"...","title":"...","kind":"discovery|investigation|implementation|architecture|maintenance|handoff","workflow":"...","status":"pending","priority":1,"acceptanceCriteria":[],"validation":[],"dependsOn":[],"failureHistory":[],"artifacts":[],"scope":["path/**"],"complexity":"low|medium|high","complexityReasons":[]}`,
+    `Each task object: {"id":"...","title":"...","kind":"discovery|investigation|implementation|architecture|maintenance|handoff","workflow":"...","status":"pending","priority":1,"acceptanceCriteria":[],"validation":[],"dependsOn":[],"failureHistory":[],"artifacts":[],"scope":["path/**"],"complexity":"low|medium|high","complexityReasons":[],"sliceRole":"primary|prerequisite","splitReason":"distinct-proof|true-prerequisite|independent-rollback (prerequisite only)"}`,
     priorFailureBlock,
     "",
     `Goal: ${state.goal ?? ""}`,
@@ -512,12 +518,13 @@ interface ExecutorPromptOptions {
   codeGraphFile?: string;
   policy: WorkflowPolicy;
   approvedStance?: unknown;
+  directResultFile?: string;
 }
 
 export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOptions): void {
   const {
     repoRoot, worktreePath, compact = false, runsRoot, stateFile, budget, state, task, iteration, runDir,
-    eventLogPath: evLogPath, codeGraphFile = "", policy, approvedStance,
+    eventLogPath: evLogPath, codeGraphFile = "", policy, approvedStance, directResultFile = "",
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
@@ -527,6 +534,7 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
   const recentHistory = compact
     ? "Compact low-risk task: no failure or drift history was admitted."
     : getDistilledHistoryText(repoRoot, runsRoot, "executor", budget);
+  const direct = task.origin === "direct";
 
   const content = [
     "You are executing one task inside an agentic harness worktree.",
@@ -536,12 +544,22 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     "- Read AGENTS.md / CLAUDE.md and follow repository rules.",
     ...(!compact ? ["- Read and follow the canonical SKILL.md for the selected workflow."] : []),
     "- The harness owns task status, verification, commits, and merges.",
+    "- For behavior changes, reproduce or add a focused failing assertion, implement the smallest fix, then rerun it.",
+    "- For mechanical refactors, preserve behavior and run existing focused checks; do not invent a failing test or a new design merely to satisfy a workflow label.",
+    "- Complete required source-of-truth documentation in this task before verification. There is no later documentation agent. Stay within scope; if required documentation lies outside scope, stop and identify the missing path.",
     "- Do not mark the task passed yourself.",
     "- Do not edit upstream-derived files unless explicit permission is present.",
     `- Your active repository worktree is ${worktreePath} (your process working directory).`,
     "- For repository files, use paths relative to the active worktree and never edit the parent repo via an absolute path.",
     "- Absolute paths under the parent repo may be used only for harness artifacts explicitly named below, such as the run directory.",
-    ...(compact ? ["- Compact low-risk task: read only directly named files and make the smallest scoped edit."] : []),
+    ...(compact ? ["- Compact low-risk task: inspect scoped files and directly relevant callers/tests; make the smallest scoped edit."] : []),
+    ...(direct ? [
+      "- Direct route: make a short inline plan, inspect only necessary scoped evidence, then edit.",
+      "- If scope or intent is insufficient, make no repository edits and return needs_planner.",
+      "- If human authority is required, make no repository edits and return needs_human.",
+      `- Write direct execution JSON only to: ${directResultFile}`,
+      '- Schema: {"verdict":"completed|needs_planner|needs_human","summary":"...","validation":["1-3 focused commands when completed"],"assumptions":[]}',
+    ] : []),
     `- Keep task artifacts under this run directory when useful: ${runDir}`,
     "- For discovery/investigation tasks, useful artifact files may be the main output; code changes are not required unless the task asks for them.",
     "- For implementation/architecture/maintenance tasks, prefer tracked repo changes plus validation unless the task is explicitly artifact-only.",
@@ -563,13 +581,13 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
     `Execution worktree: ${worktreePath}`,
     ...(!compact ? [`CodeGraph context: ${codeGraphFile}`] : []),
     "",
-    ...(compact ? [] : getOperatorContextBlock(state)),
-    ...(!compact ? ["Use CodeGraph context for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions by reading source files. If CodeGraph is unavailable, run `codegraph init -i` in the working directory to initialize it before proceeding."] : []),
+    ...getOperatorContextBlock(state),
+    ...(!compact ? ["Use CodeGraph context for orientation before broad manual search, especially for dependency/call relationship questions. Verify conclusions by reading source files. If unavailable, use focused source inspection; do not initialize an index during this run."] : []),
     "",
     `Recent harness history (verdicts, failures, assumption changes; source of truth is ${evLogPath}):`,
     recentHistory,
     "",
-    ...(compact ? [] : [getWorkflowBlock(workflow, policy, repoRoot)]),
+    ...(compact || direct ? [] : [getWorkflowBlock(workflow, policy, repoRoot)]),
     "",
     "Task JSON:",
     taskJson,
@@ -625,6 +643,7 @@ interface VerifierPromptOptions {
   policy: WorkflowPolicy;
   adversarial?: boolean;
   suppressEvent?: boolean;
+  reviewFocus?: string;
 }
 
 export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOptions): void {
@@ -635,6 +654,7 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
 
   const limits = getPromptBudgetLimits(budget);
   const taskJson = JSON.stringify(projectTaskForPhase(task, "verifier"), null, 2);
+  const candidate = captureCheckoutSnapshot(worktreePath);
   const diffStat = git(["diff", "--stat", "HEAD"], worktreePath);
   const rawDiff  = git(["diff", "HEAD"], worktreePath);
   const rawDiffBytes = Buffer.byteLength(rawDiff, "utf-8");
@@ -660,12 +680,19 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
 
   const content = [
     "You are the verifier for one agentic task.",
+    `Candidate HEAD: ${candidate.head}; content fingerprint: ${candidate.fingerprint}.`,
+    ...(opts.reviewFocus ? [`Review focus: ${opts.reviewFocus}`] : []),
+    `The candidate repository is ${worktreePath}. Inspect repository files only there, never in the parent checkout.`,
+    "Read-only review: do not edit, commit, format, install dependencies or otherwise mutate candidate files. Write only the named result artifact.",
+    "Check whether validation actually proves each acceptance criterion. Exit success from true, echo, plain git diff or an unrelated check is not proof. Fail with the missing proof if necessary.",
+    "Reuse supplied check results. Run another read-only check only to resolve a specific missing assertion; do not repeat checks by habit.",
+    "Report concrete defects with file/location, triggering scenario and consequence. Unresolved human gates always require needs_human.",
     "",
     adversarialBlock,
     `Review the task, acceptance criteria, workflow, git diff, checks, and human gates. Write JSON only to this path: ${resultFile}`,
     "",
     "Allowed verdicts: pass, fail, needs_human.",
-    `Schema: { "verdict": "pass|fail|needs_human", "summary": "...", "issues": [], "humanGates": [], "recommendedStatus": "passed|failed|needs_retry|needs_human|blocked", "artifacts": [] }`,
+    `Schema: { "verdict": "pass|fail|needs_human", "summary": "...", "issues": [], "humanGates": [], "recommendedStatus": "passed|failed|needs_retry|needs_human|blocked", "artifacts": [], "validationEvidence": [{"criterion":"exact acceptance criterion", "command":"exact passed check command", "proves":"what this check proves for that criterion"}] }`,
     "",
     "Task-kind guidance:",
     "- discovery/investigation tasks may pass with artifact evidence and no git diff.",
@@ -696,10 +723,35 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
     writeFileSync(promptFile, content, "utf-8");
   } else writePromptWithEvent(promptFile, content, "verifier", repoRoot, runsRoot, stateFile, budget, {
     task: task.id,
+    candidateHead: candidate.head,
+    candidateFingerprint: candidate.fingerprint,
     diffBytes: rawDiffBytes,
     diffInlined,
     checkBytes: Buffer.byteLength(checkOutput, "utf-8"),
   });
+}
+
+export function validateVerifierResult(value: unknown, task: Task, checks: string[]): string[] {
+  if (!value || typeof value !== "object") return ["Verifier result must be an object"];
+  const result = value as Record<string, unknown>;
+  const errors: string[] = [];
+  if (!["pass", "fail", "needs_human"].includes(String(result.verdict))) errors.push("Invalid verifier verdict");
+  for (const field of ["issues", "humanGates"]) {
+    if (!Array.isArray(result[field]) || (result[field] as unknown[]).some((v) => typeof v !== "string")) errors.push(`Verifier ${field} must be a string array`);
+  }
+  if (errors.length || result.verdict !== "pass" || (result.humanGates as string[]).length) return errors;
+  if ((result.issues as string[]).length) errors.push("Passing verifier has unresolved issues");
+  if (!["discovery", "investigation", "handoff"].includes(task.kind ?? "implementation")) {
+    const proof = Array.isArray(result.validationEvidence) ? result.validationEvidence as Array<Record<string, unknown>> : [];
+    const criteria = task.acceptanceCriteria ?? [];
+    if (criteria.length === 0) errors.push("Task has no acceptance criteria to verify");
+    for (const criterion of criteria) {
+      if (!proof.some((item) => item && item.criterion === criterion && checks.includes(String(item.command)) && typeof item.proves === "string" && item.proves.trim().length > 0)) {
+        errors.push(`Missing acceptance proof from a passed check: ${criterion}`);
+      }
+    }
+  }
+  return errors;
 }
 
 interface FailureAnalysis {
@@ -725,6 +777,7 @@ interface WriteFailureAnalysisOptions {
 // Consumed by planner prompts to break blind-retry loops.
 export function writeFailureAnalysis(opts: WriteFailureAnalysisOptions): FailureAnalysis {
   const { taskId, phase, attempt, rawOutput, worktreePath, outputFile } = opts;
+  const candidate = captureCheckoutSnapshot(worktreePath);
   const diffStat = git(["diff", "--stat", "HEAD"], worktreePath);
   const truncatedReason = limitTextForPrompt(rawOutput, 8_000, 100);
   const analysis: FailureAnalysis = {
@@ -800,66 +853,10 @@ export function validateDecisions(records: unknown): string[] {
   return errors;
 }
 
-interface FinalizeDocsPromptOptions {
-  repoRoot: string;
-  worktreePath: string;
-  runsRoot: string;
-  stateFile: string;
-  budget: PromptBudget;
-  state: AgenticState;
-}
-
-export function writeFinalizeDocsPrompt(promptFile: string, opts: FinalizeDocsPromptOptions): void {
-  const { repoRoot, worktreePath, runsRoot, stateFile, budget, state } = opts;
-
-  const stateJson = JSON.stringify(state, null, 2);
-  const recentHistory = getRecentHistoryText(repoRoot, runsRoot, 30, budget);
-  const diffStat = git(["diff", "--stat", "HEAD"], worktreePath);
-  const projectState = existsSync(join(worktreePath, "PROJECT.md")) ? "PROJECT.md exists" : "PROJECT.md missing";
-  const contextState = existsSync(join(worktreePath, "CONTEXT.md"))
-    ? "CONTEXT.md exists (planning-stage grill-with-docs ownership)"
-    : "CONTEXT.md missing";
-
-  const skillBlock = skillInstruction(
-    "update-project-md",
-    worktreePath,
-    "Update PROJECT.md with durable technical facts: commands, architecture, module roles, validation, constraints. Keep edits concise and factual. Do not add transient run state."
-  );
-
-  const content = [
-    "You are finalizing a completed agentic loop run.",
-    "",
-    "Goal: update PROJECT.md with durable technical facts discovered or changed during this run.",
-    "",
-    skillBlock,
-    "",
-    "Additional rules for this phase:",
-    "- Do not edit CONTEXT.md here; it belongs to the planning grill-with-docs stage. Only touch it if execution discovered a durable domain/product fact that could not have been known during planning.",
-    "- Do not edit AGENTS.md or CLAUDE.md unless the run explicitly changed agent policy.",
-    "- If no durable facts changed, leave PROJECT.md unchanged.",
-    "",
-    "Docs available:",
-    `- ${projectState}`,
-    `- ${contextState}`,
-    "",
-    "Agentic state:",
-    stateJson,
-    "",
-    "Recent harness events:",
-    recentHistory,
-    "",
-    "Uncommitted diff stat (what the run changed):",
-    diffStat,
-  ].join("\n");
-
-  mkdirSync(dirname(promptFile), { recursive: true });
-  writeFileSync(promptFile, content, "utf-8");
-}
-
-// Validate a raw planner result object, returning an array of error strings (empty = valid).
 export function validatePlannerResult(
   result: Record<string, unknown> | null,
-  policy: WorkflowPolicy
+  policy: WorkflowPolicy,
+  options: { goal?: string; enforceCoherentSlices?: boolean } = {},
 ): string[] {
   const errors: string[] = [];
   if (!result) return ["planner result is empty"];
@@ -912,6 +909,44 @@ export function validatePlannerResult(
       const depStr = String(dep);
       if (!ids.has(depStr)) errors.push(`${id} depends on unknown task: ${depStr}`);
       if (depStr === id) errors.push(`${id} depends on itself`);
+    }
+  }
+
+  if (result["verdict"] === "planned" && (options.enforceCoherentSlices ?? true)) {
+    const goal = options.goal ?? "";
+    const artifactGoal = /\b(investigat(?:e|ion)|discover|evidence|artifact|report|analysis)\b/i.test(goal);
+    const implementationTasks = tasks.filter((task) => ["implementation", "architecture", "maintenance"].includes(String(task["kind"] ?? "")));
+    const discoveryTasks = tasks.filter((task) => ["discovery", "investigation"].includes(String(task["kind"] ?? "")));
+
+    if (!artifactGoal || implementationTasks.length > 0) {
+      const primaries = implementationTasks.filter((task) => task["sliceRole"] === "primary");
+      const prerequisites = implementationTasks.filter((task) => task["sliceRole"] === "prerequisite");
+      if (primaries.length !== 1) errors.push(`implementation plan must contain exactly one primary slice (found ${primaries.length})`);
+      if (implementationTasks.some((task) => !["primary", "prerequisite"].includes(String(task["sliceRole"] ?? "")))) {
+        errors.push("every implementation/architecture/maintenance task must declare sliceRole primary or prerequisite");
+      }
+      if (prerequisites.length > 1) errors.push(`implementation plan may contain at most one prerequisite (found ${prerequisites.length})`);
+      if (discoveryTasks.length > 0) errors.push("standalone discovery/investigation is not allowed before an implementation slice");
+
+      if (primaries.length === 1 && prerequisites.length === 1) {
+        const prerequisite = prerequisites[0];
+        const primary = primaries[0];
+        const prerequisiteId = String(prerequisite["id"] ?? "");
+        const primaryDependencies = ((primary["dependsOn"] as unknown[] | undefined) ?? []).map(String);
+        if (!primaryDependencies.includes(prerequisiteId)) errors.push("primary slice must depend on prerequisite slice");
+        const splitReason = String(prerequisite["splitReason"] ?? "");
+        if (!["distinct-proof", "true-prerequisite", "independent-rollback"].includes(splitReason)) {
+          errors.push("prerequisite slice must declare an allowed splitReason");
+        }
+        const normalizedValidation = (task: Record<string, unknown>): string =>
+          ((task["validation"] as unknown[] | undefined) ?? []).map((command) => String(command).trim()).filter(Boolean).sort().join("\n");
+        if (!normalizedValidation(prerequisite) || normalizedValidation(prerequisite) === normalizedValidation(primary)) {
+          errors.push("primary and prerequisite slices require distinct validation proof");
+        }
+      }
+      if (implementationTasks.length > 2) errors.push(`implementation plan has too many slices (${implementationTasks.length} > 2)`);
+    } else if (discoveryTasks.length !== 1 || tasks.length !== 1) {
+      errors.push("artifact/investigation goal must remain one focused discovery or investigation task");
     }
   }
 

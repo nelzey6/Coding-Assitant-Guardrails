@@ -30,6 +30,24 @@ Verification slice with id, title, workflow, acceptance criteria, scope, validat
 **Planner**:
 Owns understanding, questions, decisions, assumptions, task slicing, scope, and validation design. Fresh planner revisions authorize execution.
 
+**Impact route**:
+Deterministic first decision for an empty goal. A bounded concrete goal naming one to four files becomes one Direct task; ambiguity, risk, missing paths, or human gates enter full Planner.
+
+**Direct task**:
+Synthetic low-complexity primary task whose acceptance criterion is Goal and whose scope is exactly the named files.
+
+**Direct execution result**:
+Executor JSON verdict: `completed`, `needs_planner`, or `needs_human`, with summary, assumptions, and one to three focused validation commands for completion.
+
+**Primary slice**:
+Single coherent implementation unit produced by full Planner. It owns goal delivery and main acceptance proof.
+
+**Prerequisite slice**:
+Optional single task required by Primary slice. Valid only with a real dependency, distinct validation, and explicit split reason.
+
+**Soft latency target**:
+Traceable performance objective, not cancellation. Direct targets 60 seconds, planned 180 seconds, complex 300 seconds; phase targets annotate measured durations; no forecasts or latency-triggered phases.
+
 **Replan admission**:
 Deterministic check before execution. Stale/manual tasks, changed planning context, unresolved ambiguity, and understanding-sensitive failures return to Planner. Check failures retry directly.
 
@@ -40,7 +58,7 @@ Stable identity of goal, decisions, assumptions, open questions, and blockers wh
 One pre-edit self-challenge for high-complexity tasks. Produces an approved technical stance or stops for human input.
 
 **Executor**:
-Edits exactly one task inside Run worktree.
+Owns task inspection, edits, local validation and required scoped documentation inside Run worktree.
 
 **Checks**:
 Deterministic validation commands from state, task, and operator.
@@ -54,8 +72,11 @@ Single risk decision from task complexity, meaningful scope, actual changed path
 **Verifier**:
 Independent review after checks. Low-risk bounded documentation changes skip it; normal changes use one vote; high-risk changes use three adversarial votes.
 
-**Finalize docs**:
-Single documentation pass, admitted only when source-of-truth documentation changed. README-only edits do not trigger it. No second finalizer-verifier ceremony.
+**Acceptance proof**:
+A passed targeted check plus a Verifier explanation mapping each acceptance criterion to the exact check command. Diagnostic-only commands are insufficient.
+
+**Candidate guard**:
+Content/HEAD snapshots around Verifier invocation detect mutation of the checked worktree and stop before commit. Review artifacts live outside that worktree.
 
 **Parent checkout guard**:
 One protected invocation seam around every model phase. It detects parent HEAD or content changes, records evidence, and stops without restoring or hiding mutations.
@@ -63,12 +84,14 @@ One protected invocation seam around every model phase. It detects parent HEAD o
 ## Escalation rules
 
 - Ambiguity → Planner returns `needs_human`
+- Bounded concrete one/two-file goal → Direct task
 - Stale revision or changed planning context → replan
-- High complexity → stance reflection
+- High complexity from concrete uncertainty/impact → stance reflection
 - Failed checks → retry
 - Changed assumptions or understanding-sensitive failure → replan
 - High risk → adversarial verification
-- Source-of-truth docs changed → finalize docs
+- Required documentation → scoped Executor work before checks
+- Candidate mutation or unresolved human gate → stop before commit
 
 ## Key artifacts
 
@@ -80,14 +103,16 @@ One protected invocation seam around every model phase. It detects parent HEAD o
 - `approved-stance.json` — high-complexity stance
 - `failure-analysis.json` — failed phase, reason, attempt, diff stat
 - `.agent-runs/events.jsonl` — append-only trace
+- `direct-execution-result.json` — Direct Executor verdict, checks, and assumptions
 
 Routine handover, progress, and final-summary Markdown are intentionally omitted. State, events, checks, diffs, and phase result JSON own traceability.
 
 ## Relationships
 
-- Goal has one task graph.
+- Goal has one impact route and one task graph.
+- Direct route bypasses Planner but not checks, scope, verification, commit, or apply.
 - Planner owns understanding; no parallel task-grill contract exists.
 - Run processes tasks in one Run worktree.
 - Each fresh task follows: replan admission → optional stance → Executor → Checks → Scope rail → adaptive Verifier.
-- Every model phase crosses Parent checkout guard; only Executor and Finalize docs may mutate Run worktree.
+- Every model phase crosses Parent checkout guard; only Executor may edit candidate repository files; bootstrap owns its declared artifacts.
 - Failure evidence flows into retries or Planner.

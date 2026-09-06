@@ -179,15 +179,15 @@
     }
   },
   "humanGates": [
-    { "label": "schema migration", "all": ["schema migration"] },
-    { "label": "auth or permission changes", "all": ["change"], "any": ["auth", "permission"] },
-    { "label": "payment or billing logic", "any": ["payment logic", "billing logic"] },
-    { "label": "public API breaking change", "all": ["public API", "breaking change"] },
-    { "label": "dependency upgrade", "all": ["dependency", "upgrade"] },
-    { "label": "large rewrite", "all": ["large rewrite"] },
-    { "label": "data deletion or destructive migration", "any": ["data deletion", "destructive migration"] },
-    { "label": "editing upstream-derived files", "all": ["edit", "upstream derived file"] },
-    { "label": "changes outside declared task scope", "all": ["outside", "declared task scope"] }
+    {"label": "schema migration", "all": ["schema migration"]},
+    {"label": "auth or permission changes", "all": ["change"], "any": ["auth", "permission"]},
+    {"label": "payment or billing logic", "any": ["payment logic", "billing logic"]},
+    {"label": "public API breaking change", "all": ["public API", "breaking change"]},
+    {"label": "dependency upgrade", "all": ["dependency", "upgrade"]},
+    {"label": "large rewrite", "all": ["large rewrite"]},
+    {"label": "data deletion or destructive migration", "any": ["data deletion", "destructive migration"]},
+    {"label": "editing upstream-derived files", "all": ["edit", "upstream derived file"]},
+    {"label": "changes outside declared task scope", "all": ["outside", "declared task scope"]}
   ],
   "autonomousLoop": {
     "plannerMode": "auto",
@@ -201,8 +201,19 @@
     ],
     "checkEnvFile": "",
     "phaseAdmission": {
-      "verifier": "auto",
-      "finalizeDocs": "on-change"
+      "verifier": "auto"
+    },
+    "latency": {
+      "directTargetSeconds": 60,
+      "plannedTargetSeconds": 180,
+      "complexTargetSeconds": 300,
+      "phaseTargetsSeconds": {
+        "planner": 40,
+        "stance": 35,
+        "executor": 140,
+        "checks": 25,
+        "verifier": 45
+      }
     }
   },
   "verifierRules": [

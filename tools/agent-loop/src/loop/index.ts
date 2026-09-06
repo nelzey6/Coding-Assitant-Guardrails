@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { mkdirSync, copyFileSync, writeFileSync, readFileSync, existsSync, appendFileSync } from "fs";
 import { join, resolve, dirname } from "path";
 import { execFileSync } from "child_process";
@@ -15,6 +16,8 @@ import {
   getFailureStatusForTask,
   getLastFailureAnalysisFile,
   mergePlannerResult,
+  installDirectTask,
+  computePlanContextFingerprint,
   type AgenticState,
   type Task,
   type PlannerResult,
@@ -24,7 +27,7 @@ import { appendEvent } from "../events/index.js";
 import { safeSlug, createWorktree, worktreeExists, removeWorktree, git as gitTool, GitError } from "../tools/index.js";
 import { getTaskChecks, type AgentConfig, type AgentInvocationResult } from "../agent/index.js";
 import { AgentPhaseMutationError, invokeAgentPhase } from "./agent-phase.js";
-import { invokeChecks, parseMetricLines } from "../checks/index.js";
+import { invokeChecks, parseMetricLines, validateAcceptanceChecks } from "../checks/index.js";
 import { getTaskScope, getOutOfScopeFiles, isTaskUnscoped, resolveTaskComplexity, testPathInScope, testPathsAreDocumentation } from "../scope/index.js";
 import {
   syncCodeGraph,
@@ -33,18 +36,20 @@ import {
   writePlannerPrompt,
   writeExecutorPrompt,
   writeVerifierPrompt,
-  writeFinalizeDocsPrompt,
   writeStanceReflectionPrompt,
   validatePlannerResult,
+  validateVerifierResult,
   validateDecisions,
   writeFailureAnalysis,
 } from "../prompts/index.js";
 import { loadPolicy, resolveEffectivePlannerMode, type WorkflowPolicy } from "../policy/index.js";
+import { selectExecutionRoute, validateDirectExecutionResult, type DirectExecutionResult } from "../routing/index.js";
+import { phaseLatencyDecision, resolveLatencyPolicy, type LatencyRoute } from "../latency/index.js";
 import { runShellScript } from "../tools/shell.js";
 import {
   shouldReplanBeforeTask,
-  shouldRunFinalizeDocs,
   shouldRunVerifier,
+  shouldUseCompactExecutor,
 } from "../admission/index.js";
 
 export interface LoopConfig {
@@ -52,7 +57,7 @@ export interface LoopConfig {
   stateFile?: string;
   runsRoot?: string;
   worktreeRoot?: string;
-  /** One agent adapter for planning, stance, execution, verification, and docs. */
+  /** One agent adapter for planning, stance, execution, and verification. */
   agent: AgentConfig;
   maxRuntimeSeconds?: number;
   /** Timeout in seconds for each check command (0 = no timeout). */
@@ -67,7 +72,6 @@ export interface LoopConfig {
   checkEnvFile?: string;
   /** After all tasks pass, copy changed files from the run worktree into the main tree as unstaged changes. Default: true. */
   apply?: boolean;
-  finalizeDocs?: boolean;
   allowDirty?: boolean;
 }
 
@@ -100,6 +104,7 @@ export function emitTokenUsage(cfg: Required<LoopConfig>, invocation: AgentInvoc
     toolCalls: invocation.toolCalls,
     logBytes: invocation.logBytes,
   }, cfg.runsRoot, cfg.stateFile);
+  recordPhaseLatency(cfg, invocation.phase, invocation.durationMs, taskId);
   const usage = invocation.usage;
   if (!usage) return;
   appendEvent(cfg.repoRoot, "token_usage", {
@@ -115,8 +120,29 @@ export function emitTokenUsage(cfg: Required<LoopConfig>, invocation: AgentInvoc
   }, cfg.runsRoot, cfg.stateFile);
 }
 
+function recordPhaseLatency(cfg: Required<LoopConfig>, phase: string, durationMs: number, taskId?: string): void {
+  const decision = phaseLatencyDecision(phase, durationMs, resolveLatencyPolicy(loadPolicy(cfg.repoRoot)));
+  appendEvent(cfg.repoRoot, "phase_latency", {
+    ...(taskId ? { task: taskId } : {}),
+    phase,
+    category: decision.phase,
+    durationMs,
+    targetSeconds: decision.targetSeconds,
+    exceeded: decision.exceeded,
+  }, cfg.runsRoot, cfg.stateFile);
+  if (decision.exceeded) {
+    appendEvent(cfg.repoRoot, "latency_target_exceeded", {
+      ...(taskId ? { task: taskId } : {}),
+      scope: "phase",
+      phase,
+      durationMs,
+      targetSeconds: decision.targetSeconds,
+    }, cfg.runsRoot, cfg.stateFile);
+  }
+}
+
 function timestamp(): string {
-  return new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+  return new Date().toISOString().replace(/[-:.]/g, "").replace("T", "-").replace("Z", "");
 }
 
 function pathspecExcludes(paths: string[]): string[] {
@@ -339,7 +365,7 @@ async function runPlannerPhase(
 
   let plannerResult = JSON.parse(readFileSync(resultFile, "utf-8")) as Record<string, unknown>;
   let errors = [
-    ...validatePlannerResult(plannerResult, policy),
+    ...validatePlannerResult(plannerResult, policy, { goal: state.goal, enforceCoherentSlices: plannerMode.mode === "full" }),
     ...validateDecisions(plannerResult["decisions"] ?? []),
   ];
 
@@ -364,7 +390,7 @@ async function runPlannerPhase(
     if (!existsSync(resultFile)) throw new LoopError(`Planner repair did not write ${resultFile}`);
     plannerResult = JSON.parse(readFileSync(resultFile, "utf-8")) as Record<string, unknown>;
     errors = [
-      ...validatePlannerResult(plannerResult, policy),
+      ...validatePlannerResult(plannerResult, policy, { goal: state.goal, enforceCoherentSlices: plannerMode.mode === "full" }),
       ...validateDecisions(plannerResult["decisions"] ?? []),
     ];
     if (errors.length > 0) throw new LoopError(`Planner result invalid after repair:\n${errors.join("\n")}`);
@@ -384,61 +410,6 @@ async function runPlannerPhase(
     throw new LoopError(`Goal intake stopped before execution: ${reason}`);
   }
   return stateAfterPlan.lastReplanTaskIds ?? [];
-}
-
-// Update durable repository docs once, only when changed paths admit this phase.
-async function runFinalizeDocsPhase(cfg: Required<LoopConfig>, agentCallCounter: { count: number }, runWorktreePath: string): Promise<void> {
-  const ts = timestamp();
-  const runDir = join(cfg.repoRoot, cfg.runsRoot, `agentic-${ts}-finalize-docs`);
-  mkdirSync(runDir, { recursive: true });
-
-  const promptFile    = join(runDir, "finalize-docs.md");
-  const executorLog   = join(runDir, "finalize-docs.log");
-
-  const state = loadState(cfg.repoRoot, cfg.stateFile)!;
-  writeFinalizeDocsPrompt(promptFile, {
-    repoRoot: cfg.repoRoot,
-    worktreePath: runWorktreePath,
-    runsRoot: cfg.runsRoot,
-    stateFile: cfg.stateFile,
-    budget: "medium",
-    state,
-  });
-
-  appendEvent(cfg.repoRoot, "finalize_docs_started", { runDir, prompt: promptFile }, cfg.runsRoot, cfg.stateFile);
-  console.log("=== Agentic finalize-docs ===");
-  agentCallCounter.count++;
-  emitTokenUsage(cfg, await invokeAgentPhase({ ...cfg, promptFile, workingDirectory: runWorktreePath, logFile: executorLog, phase: "finalize-docs" }));
-
-  const changedPaths = uncommittedPaths(runWorktreePath, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
-  if (changedPaths.length > 0 && !testPathsAreDocumentation(changedPaths)) {
-    throw new LoopError(`Finalize-docs changed non-documentation files: ${changedPaths.join(", ")}. Worktree retained at ${runWorktreePath}.`);
-  }
-  if (changedPaths.length > 0) {
-    git(["add", "-A", "--", ...changedPaths], runWorktreePath);
-    git(["commit", "-m", "agentic: finalize docs"], runWorktreePath);
-  }
-
-  appendEvent(cfg.repoRoot, "finalize_docs_finished", {
-    runDir, changedPaths,
-  }, cfg.runsRoot, cfg.stateFile);
-}
-
-async function runFinalizeDocsIfNeeded(
-  cfg: Required<LoopConfig>,
-  policy: WorkflowPolicy,
-  agentCallCounter: { count: number },
-  runWorktreePath: string,
-  loopBaseRef: string
-): Promise<void> {
-  const changedPaths = changedPathsSince(runWorktreePath, loopBaseRef, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
-  const decision = shouldRunFinalizeDocs(changedPaths, policy, cfg.finalizeDocs);
-  appendPhaseAdmission(cfg, "finalize-docs", decision);
-  if (!decision.run) {
-    console.log(`Skipping finalize-docs: ${decision.reason}`);
-    return;
-  }
-  await runFinalizeDocsPhase(cfg, agentCallCounter, runWorktreePath);
 }
 
 function enforceReplanBudget(
@@ -537,6 +508,17 @@ function blockRemainingPlanForReplan(
 import { runStanceReflectionPhase, type StanceReflectionResult } from "./stance-reflection-phase.js";
 export { runStanceReflectionPhase, type StanceReflectionResult };
 
+function bootstrapFingerprint(worktree: string, commands: string[], ignoredPaths: string[]): string {
+  const files = [...new Set(git(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], worktree).split("\0"))]
+    .filter((path) => /(?:^|\/)(?:package(?:-lock)?\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|pnpm-workspace\.yaml|bun\.lockb?|\.npmrc|\.yarnrc(?:\.yml)?|\.node-version|\.nvmrc)$/.test(path))
+    .filter((path) => !testPathInScope(path, ignoredPaths)).sort();
+  const hash = createHash("sha256").update(JSON.stringify([commands, process.version, process.platform, process.arch]));
+  for (const path of files) {
+    hash.update(path).update(existsSync(join(worktree, path)) ? readFileSync(join(worktree, path)) : "deleted");
+  }
+  return hash.digest("hex");
+}
+
 // Main entry point. Throws LoopError with an appropriate exitCode on terminal failures.
 export async function runAgenticLoop(config: LoopConfig): Promise<void> {
   const policy = loadPolicy(config.repoRoot);
@@ -551,7 +533,6 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     worktreeBootstrapIgnore: config.worktreeBootstrapIgnore ?? policy.autonomousLoop.worktreeBootstrapIgnore ?? [],
     checkEnvFile:       config.checkEnvFile       ?? policy.autonomousLoop.checkEnvFile ?? "",
     apply:              config.apply              ?? true,
-    finalizeDocs:                config.finalizeDocs                ?? true,
     allowDirty:                  config.allowDirty                  ?? false,
     repoRoot:           config.repoRoot,
     agent:              config.agent,
@@ -565,8 +546,20 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
   const runStartTime = Date.now();
   const agentCallCounter = { count: 0 };
   const eventLogPath = join(cfg.repoRoot, cfg.runsRoot, "events.jsonl");
-  // Capture HEAD at loop start for cumulative diff and finalization admission.
-  const loopBaseRef = (() => { try { return git(["rev-parse", "HEAD"], cfg.repoRoot); } catch { return ""; } })();
+  let runLatencyRoute: LatencyRoute = "planned";
+  const recordRunLatency = (): void => {
+    const latency = resolveLatencyPolicy(policy);
+    const targetSeconds = runLatencyRoute === "direct"
+      ? latency.directTargetSeconds
+      : runLatencyRoute === "complex"
+        ? latency.complexTargetSeconds
+        : latency.plannedTargetSeconds;
+    const durationMs = Date.now() - runStartTime;
+    appendEvent(cfg.repoRoot, "run_latency", { route: runLatencyRoute, durationMs, targetSeconds, exceeded: durationMs > targetSeconds * 1000 }, cfg.runsRoot, cfg.stateFile);
+    if (durationMs > targetSeconds * 1000) {
+      appendEvent(cfg.repoRoot, "latency_target_exceeded", { scope: "run", route: runLatencyRoute, durationMs, targetSeconds }, cfg.runsRoot, cfg.stateFile);
+    }
+  };
 
   if (policy.autonomousLoop.requireCleanMainWorktree && !cfg.allowDirty && git(["status", "--porcelain"], cfg.repoRoot).length > 0) {
     throw new LoopError("Main worktree is dirty. Commit/stash first, or pass --allow-dirty.", 2);
@@ -576,7 +569,15 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
   {
     const state = loadState(cfg.repoRoot, cfg.stateFile)!;
     if (getTasks(state).length === 0) {
-      await runPlannerPhase(cfg, policy, agentCallCounter);
+      const route = selectExecutionRoute(state, policy, cfg.repoRoot);
+      appendEvent(cfg.repoRoot, "execution_route_selected", {
+        route: route.route,
+        reason: route.reason,
+        paths: route.paths,
+      }, cfg.runsRoot, cfg.stateFile);
+      if (route.route === "direct") installDirectTask(cfg.repoRoot, cfg.stateFile, route.task);
+      else await runPlannerPhase(cfg, policy, agentCallCounter);
+      runLatencyRoute = route.route === "direct" ? "direct" : "planned";
     }
   }
   // Track replans across the session.
@@ -589,6 +590,8 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
   createWorktree(runBranch, runWorktreePath, "HEAD", cfg.repoRoot);
   writeWorktreeExclude(runWorktreePath, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
   appendEvent(cfg.repoRoot, "run_worktree_created", { branch: runBranch, worktree: runWorktreePath }, cfg.runsRoot, cfg.stateFile);
+
+  let bootstrappedFingerprint: string | undefined;
 
   // ── Execution loop ────────────────────────────────────────────────────────
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
@@ -613,8 +616,8 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       if (hasUnfinishedTasks(state)) {
         throw new LoopError(`No runnable task available. Blocked by dependencies:\n${getBlockedDependencySummary(state)}`);
       }
-      await runFinalizeDocsIfNeeded(cfg, policy, agentCallCounter, runWorktreePath, loopBaseRef);
       applyRunWorktree(cfg, runBranch, runWorktreePath);
+      recordRunLatency();
       console.log("<promise>COMPLETE</promise>");
       return;
     }
@@ -631,6 +634,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     const verifierResult  = join(runDir, "verifier-result.json");
     const codeGraphFile   = join(runDir, "codegraph.md");
     const executorLog     = join(runDir, "executor.log");
+    const directResultFile = join(runDir, "direct-execution-result.json");
     const checksLog       = join(runDir, "checks.log");
     const verifierLog     = join(runDir, "verifier.log");
     const failureAnalysisFile  = join(runDir, "failure-analysis.json");
@@ -649,12 +653,16 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     writeWorktreeExclude(worktreePath, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
 
     try {
-      if (cfg.worktreeBootstrap.length > 0) {
+      const ensureBootstrap = (): void => {
+        if (cfg.worktreeBootstrap.length === 0) return;
+        const fingerprint = bootstrapFingerprint(worktreePath, cfg.worktreeBootstrap, cfg.worktreeBootstrapIgnore);
+        if (fingerprint === bootstrappedFingerprint) return;
         const bootstrapLog = join(runDir, "bootstrap.log");
         appendEvent(cfg.repoRoot, "worktree_bootstrap_started", { task: taskId, commands: cfg.worktreeBootstrap, ignored: cfg.worktreeBootstrapIgnore, log: bootstrapLog }, cfg.runsRoot, cfg.stateFile);
         try {
           const bootstrapOutput = runWorktreeBootstrap(worktreePath, cfg.worktreeBootstrap, cfg.checkTimeoutSeconds || 120);
           writeFileSync(bootstrapLog, bootstrapOutput, "utf-8");
+          bootstrappedFingerprint = bootstrapFingerprint(worktreePath, cfg.worktreeBootstrap, cfg.worktreeBootstrapIgnore);
           appendEvent(cfg.repoRoot, "worktree_bootstrap_passed", { task: taskId, log: bootstrapLog }, cfg.runsRoot, cfg.stateFile);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -664,7 +672,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
           throw new LoopError(`Worktree bootstrap failed for ${taskId}. Worktree retained at ${worktreePath}.\n${msg}`);
         }
-      }
+      };
       // Planner owns task understanding. Stale/manual tasks and failures that may
       // invalidate that understanding re-enter the planner instead of paying for a
       // Planner revision is the single source of task understanding.
@@ -684,8 +692,10 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         continue;
       }
 
+      ensureBootstrap();
       const complexity = resolveTaskComplexity(task as any, policy);
       task.complexity = complexity.level;
+      if (complexity.level === "high") runLatencyRoute = "complex";
       task.complexityReasons = complexity.reasons;
       {
         const complexityState = loadState(cfg.repoRoot, cfg.stateFile)!;
@@ -698,11 +708,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
       }
       appendEvent(cfg.repoRoot, "task_complexity_resolved", { task: taskId, level: complexity.level, reasons: complexity.reasons }, cfg.runsRoot, cfg.stateFile);
 
-      const declaredScope = getTaskScope(task as any);
-      const compactExecutor = complexity.level === "low"
-        && !isTaskUnscoped(task as any)
-        && (["maintenance", "discovery", "investigation"].includes(task.kind ?? "")
-          || testPathsAreDocumentation(declaredScope));
+      const compactExecutor = shouldUseCompactExecutor(task, policy);
       if (!compactExecutor) {
         syncCodeGraph(worktreePath);
         writeCodeGraphContext(codeGraphFile, worktreePath);
@@ -746,6 +752,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         codeGraphFile,
         policy,
         approvedStance,
+        directResultFile: task.origin === "direct" ? directResultFile : undefined,
       });
 
       appendEvent(cfg.repoRoot, "executor_started", { task: taskId, prompt: executorPrompt, log: executorLog }, cfg.runsRoot, cfg.stateFile);
@@ -778,6 +785,74 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         throw new LoopError(`Executor failed for ${taskId}. Worktree retained at ${worktreePath}. ${msg}`);
       }
 
+      if (task.origin === "direct") {
+        let directResult: DirectExecutionResult | null = null;
+        let directErrors: string[] = [];
+        if (!existsSync(directResultFile)) directErrors = [`Executor did not write ${directResultFile}`];
+        else {
+          try {
+            directResult = JSON.parse(readFileSync(directResultFile, "utf-8")) as DirectExecutionResult;
+            directErrors = validateDirectExecutionResult(directResult);
+          } catch (err) {
+            directErrors = [`Direct execution result is invalid JSON: ${err instanceof Error ? err.message : String(err)}`];
+          }
+        }
+        if (directErrors.length > 0) {
+          const reason = directErrors.join("; ");
+          const failureStatus = getFailureStatusForTask(task, "direct_result", maxRetries);
+          appendEvent(cfg.repoRoot, "direct_execution_result_invalid", { task: taskId, status: failureStatus, reason, resultFile: directResultFile }, cfg.runsRoot, cfg.stateFile);
+          writeFailureAnalysis({ taskId, phase: "direct_result", attempt: task.attempts ?? 1, rawOutput: reason, worktreePath, outputFile: failureAnalysisFile });
+          setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, failureStatus, { at: new Date().toISOString(), phase: "direct_result", reason, resultFile: directResultFile, failureAnalysisFile });
+          writeDiffArtifacts(worktreePath, runDir, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
+          copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+          if (failureStatus === "needs_retry") continue;
+          throw new LoopError(`Direct execution result invalid for ${taskId}: ${reason}`);
+        }
+
+        if (directResult!.verdict === "needs_human") {
+          setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "direct_execution", reason: directResult!.summary, resultFile: directResultFile });
+          writeChecksLog(checksLog, "Checks not run because Direct Executor requested human input.");
+          writeDiffArtifacts(worktreePath, runDir, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
+          copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+          throw new LoopError(`Direct Executor needs human input for ${taskId}: ${directResult!.summary}`);
+        }
+        if (directResult!.verdict === "needs_planner") {
+          const changed = uncommittedPaths(worktreePath, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
+          if (changed.length > 0) {
+            const reason = `Direct Executor returned needs_planner after changing: ${changed.join(", ")}`;
+            setTaskStatus(cfg.repoRoot, cfg.stateFile, cfg.runsRoot, taskId, "needs_human", { at: new Date().toISOString(), phase: "direct_execution", reason, resultFile: directResultFile });
+            writeChecksLog(checksLog, "Checks not run because Direct Executor requested planning after editing the worktree.");
+            writeDiffArtifacts(worktreePath, runDir, harnessIgnoredPaths(cfg.worktreeBootstrapIgnore));
+            copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+            throw new LoopError(reason);
+          }
+          runLatencyRoute = "planned";
+          appendEvent(cfg.repoRoot, "direct_execution_needs_planner", { task: taskId, reason: directResult!.summary, resultFile: directResultFile }, cfg.runsRoot, cfg.stateFile);
+          await invalidatePlanAndReplan({
+            cfg, policy, agentCallCounter, sessionReplanCountRef,
+            phase: "direct_execution",
+            reason: directResult!.summary,
+            resultFile: directResultFile,
+            currentTaskId: taskId,
+          });
+          copyFileSync(join(cfg.repoRoot, cfg.stateFile), stateAfter);
+          continue;
+        }
+
+        task.validation = directResult!.validation;
+        const directState = loadState(cfg.repoRoot, cfg.stateFile)!;
+        const directTask = getTasks(directState).find((candidate) => candidate.id === taskId);
+        if (directTask) directTask.validation = directResult!.validation;
+        if (directResult!.assumptions.length > 0) {
+          directState.assumptions = [...new Set([...(directState.assumptions ?? []), ...directResult!.assumptions])];
+        }
+        // Direct execution owns its accepted assumptions; check retries keep that understanding.
+        if (directTask) directTask.plannedContextFingerprint = computePlanContextFingerprint(directState);
+        writeState(cfg.repoRoot, directState, cfg.stateFile);
+        appendEvent(cfg.repoRoot, "direct_execution_completed", { task: taskId, summary: directResult!.summary, validation: directResult!.validation, assumptions: directResult!.assumptions }, cfg.runsRoot, cfg.stateFile);
+      }
+
+      ensureBootstrap();
       // Checks
       const baseChecks = getTaskChecks(task, loadState(cfg.repoRoot, cfg.stateFile)!);
       const taskChecks = isArtifactOnlyTask(task) && cfg.extraChecks.length === 0
@@ -785,12 +860,19 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         : [...new Set([...baseChecks, ...cfg.extraChecks])];
       appendEvent(cfg.repoRoot, "checks_started", { task: taskId, commands: taskChecks, log: checksLog }, cfg.runsRoot, cfg.stateFile);
       let checkOutput: string;
+      const checksStartedAt = Date.now();
       try {
+        if (!["discovery", "investigation", "handoff"].includes(task.kind ?? "implementation")) {
+          const proofErrors = validateAcceptanceChecks(taskChecks);
+          if (proofErrors.length > 0) throw new Error(proofErrors.join("; "));
+        }
         checkOutput = invokeChecks(worktreePath, taskChecks, cfg.checkTimeoutSeconds || 120, cfg.checkEnvFile);
+        recordPhaseLatency(cfg, "checks", Date.now() - checksStartedAt, taskId);
         writeChecksLog(checksLog, checkOutput);
         const metrics = parseMetricLines(checkOutput);
         appendEvent(cfg.repoRoot, "checks_passed", { task: taskId, log: checksLog, metrics }, cfg.runsRoot, cfg.stateFile);
       } catch (err) {
+        recordPhaseLatency(cfg, "checks", Date.now() - checksStartedAt, taskId);
         checkOutput = err instanceof Error ? err.message : String(err);
         writeChecksLog(checksLog, checkOutput);
         const failureStatus = getFailureStatusForTask(task, "checks", maxRetries);
@@ -848,13 +930,15 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         const adversarial = votes > 1;
 
         if (votes <= 1) {
-          const verifierOptions = { repoRoot: cfg.repoRoot, runsRoot: cfg.runsRoot, stateFile: cfg.stateFile, budget: "medium" as const, task, worktreePath, checkOutput, resultFile: verifierResult, eventLogPath, policy, adversarial: false };
+          const verifierOptions = { repoRoot: cfg.repoRoot, runsRoot: cfg.runsRoot, stateFile: cfg.stateFile, budget: "medium" as const, task: { ...task, validation: taskChecks }, worktreePath, checkOutput, resultFile: verifierResult, eventLogPath, policy, adversarial: false };
           writeVerifierPrompt(verifierPrompt, verifierOptions);
           appendEvent(cfg.repoRoot, "verifier_started", { task: taskId, prompt: verifierPrompt, resultFile: verifierResult, log: verifierLog, votes: 1 }, cfg.runsRoot, cfg.stateFile);
           agentCallCounter.count++;
           emitTokenUsage(cfg, await invokeAgentPhase({ ...cfg, promptFile: verifierPrompt, workingDirectory: worktreePath, logFile: verifierLog, phase: "verifier", taskId }), taskId);
           if (!existsSync(verifierResult)) throw new LoopError(`Verifier did not write ${verifierResult}`);
           verifierResultObj = JSON.parse(readFileSync(verifierResult, "utf-8")) as VerifierResult;
+          const errors = validateVerifierResult(verifierResultObj, task, taskChecks);
+          if (errors.length) throw new LoopError(errors.join("; "));
         } else {
           appendEvent(cfg.repoRoot, "verifier_votes_started", { task: taskId, votes, adversarial: true }, cfg.runsRoot, cfg.stateFile);
           const voteSlots = Array.from({ length: votes }, (_, i) => i + 1).map((v) => ({
@@ -864,33 +948,39 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
             v,
           }));
           for (const { prompt: vPrompt, result: vResult, log: vLog, v } of voteSlots) {
-            writeVerifierPrompt(vPrompt, { repoRoot: cfg.repoRoot, runsRoot: cfg.runsRoot, stateFile: cfg.stateFile, budget: "medium", task, worktreePath, checkOutput, resultFile: vResult, eventLogPath, policy, adversarial });
+            writeVerifierPrompt(vPrompt, { repoRoot: cfg.repoRoot, runsRoot: cfg.runsRoot, stateFile: cfg.stateFile, budget: "medium", task: { ...task, validation: taskChecks }, worktreePath, checkOutput, resultFile: vResult, eventLogPath, policy, adversarial, reviewFocus: ["Behavioral correctness and edge cases", "Compatibility, ownership and public contracts", "Acceptance proof, scope and unresolved human gates"][v - 1] });
             appendEvent(cfg.repoRoot, "verifier_started", { task: taskId, prompt: vPrompt, resultFile: vResult, log: vLog, vote: v, votes }, cfg.runsRoot, cfg.stateFile);
             agentCallCounter.count++;
           }
-          const voteUsages = await Promise.all(voteSlots.map(({ prompt: vPrompt, log: vLog, v }) =>
+          const voteOutcomes = await Promise.allSettled(voteSlots.map(({ prompt: vPrompt, log: vLog, v }) =>
             invokeAgentPhase({ ...cfg, promptFile: vPrompt, workingDirectory: worktreePath, logFile: vLog, phase: `verifier-vote-${v}`, taskId })
           ));
-          voteUsages.forEach((u) => emitTokenUsage(cfg, u, taskId));
+          for (const outcome of voteOutcomes) {
+            if (outcome.status === "fulfilled") emitTokenUsage(cfg, outcome.value, taskId);
+          }
+          const failedVote = voteOutcomes.find((outcome) => outcome.status === "rejected");
+          if (failedVote?.status === "rejected") throw failedVote.reason;
           const voteResults: VerifierResult[] = voteSlots.map(({ result: vResult, v }) => {
             if (!existsSync(vResult)) throw new LoopError(`Verifier vote ${v} did not write ${vResult}`);
             const vr = JSON.parse(readFileSync(vResult, "utf-8")) as VerifierResult;
+            const errors = validateVerifierResult(vr, task, taskChecks);
+            if (errors.length) throw new LoopError(`Verifier ${v}: ${errors.join("; ")}`);
             appendEvent(cfg.repoRoot, "verifier_vote", { task: taskId, vote: v, verdict: vr.verdict, summary: vr.summary }, cfg.runsRoot, cfg.stateFile);
             return vr;
           });
           const passCount      = voteResults.filter((r) => r.verdict === "pass").length;
           const needsHumanCount = voteResults.filter((r) => r.verdict === "needs_human").length;
-          const majority = Math.floor(votes / 2) + 1;
           const finalVerdict: VerifierResult["verdict"] =
-            needsHumanCount > 0 && passCount < majority ? "needs_human"
-            : passCount >= majority ? "pass"
+            needsHumanCount > 0 || voteResults.some((r) => (r.humanGates ?? []).length > 0) ? "needs_human"
+            : passCount === votes ? "pass"
             : "fail";
           const issues = voteResults.flatMap((r) => r.issues ?? []).filter(Boolean);
           verifierResultObj = {
             verdict: finalVerdict,
-            summary: `adversarial ${votes}-vote verdict: ${passCount} pass / ${votes - passCount - needsHumanCount} fail / ${needsHumanCount} needs_human (majority=${majority}) -> ${finalVerdict}`,
+            summary: `adversarial ${votes}-vote verdict: ${passCount} pass / ${votes - passCount - needsHumanCount} fail / ${needsHumanCount} needs_human (all reviewers must pass) -> ${finalVerdict}`,
             issues,
-            humanGates: [],
+            validationEvidence: voteResults.flatMap((r) => r.validationEvidence ?? []),
+            humanGates: [...new Set(voteResults.flatMap((r) => r.humanGates ?? []))],
             recommendedStatus: finalVerdict === "pass" ? "passed" : finalVerdict === "needs_human" ? "needs_human" : "needs_retry",
             artifacts: [],
           };
@@ -900,6 +990,11 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         }
       }
 
+      if ((verifierResultObj.humanGates ?? []).length > 0) {
+        verifierResultObj.verdict = "needs_human";
+        verifierResultObj.recommendedStatus = "needs_human";
+        writeFileSync(verifierResult, JSON.stringify(verifierResultObj, null, 2), "utf-8");
+      }
       appendEvent(cfg.repoRoot, "verifier_finished", { task: taskId, verdict: verifierResultObj.verdict, summary: verifierResultObj.summary, resultFile: verifierResult }, cfg.runsRoot, cfg.stateFile);
 
       // Handle verdict
@@ -948,8 +1043,8 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
     if (hasUnfinishedTasks(finalState)) {
       throw new LoopError(`Reached max iterations or no runnable task. Blocked by dependencies:\n${getBlockedDependencySummary(finalState)}`);
     }
-    await runFinalizeDocsIfNeeded(cfg, policy, agentCallCounter, runWorktreePath, loopBaseRef);
     applyRunWorktree(cfg, runBranch, runWorktreePath);
+    recordRunLatency();
     console.log("<promise>COMPLETE</promise>");
     return;
   }

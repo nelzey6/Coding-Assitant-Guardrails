@@ -39,6 +39,9 @@ export interface Task {
   approvedStanceFile?: string;
   plannedRevision?: number;
   plannedContextFingerprint?: string;
+  origin?: "planner" | "direct";
+  sliceRole?: "primary" | "prerequisite";
+  splitReason?: "distinct-proof" | "true-prerequisite" | "independent-rollback";
 }
 
 export interface AgenticState {
@@ -73,6 +76,7 @@ export interface PlannerResult {
 }
 
 export interface VerifierResult {
+  validationEvidence?: Array<{ criterion: string; command: string; proves: string }>;
   verdict: "pass" | "fail" | "needs_human";
   summary?: string;
   issues?: string[];
@@ -296,6 +300,23 @@ export function mergePlannerResult(
   } else {
     state.phase = "blocked";
   }
+  writeState(repoRoot, state, stateFile);
+  return state;
+}
+
+export function installDirectTask(
+  repoRoot: string,
+  stateFile: string,
+  task: Task
+): AgenticState {
+  const state = loadState(repoRoot, stateFile)!;
+  const planRevision = (state.planRevision ?? 0) + 1;
+  state.planRevision = planRevision;
+  const plannedContextFingerprint = computePlanContextFingerprint(state);
+  const installed = { ...task, origin: "direct" as const, plannedRevision: planRevision, plannedContextFingerprint };
+  state.tasks = [...(state.tasks ?? []), installed];
+  state.phase = "execution";
+  state.lastReplanTaskIds = [installed.id];
   writeState(repoRoot, state, stateFile);
   return state;
 }
