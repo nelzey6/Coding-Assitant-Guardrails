@@ -12,6 +12,8 @@ export interface AgentConfig {
   commandTemplate?: string;
   /** Seconds before the agent invocation is killed. 0 = no timeout. */
   timeoutSeconds?: number;
+  /** Native Pi effort hint for a bounded first attempt; custom commands own their settings. */
+  thinking?: "medium";
 }
 
 export class AgentError extends Error {
@@ -300,7 +302,10 @@ export async function invokeAgentWithLog(
     command = `claude -p '${prompt}' --output-format json`;
     effectiveTool = "claude";
   } else if (config.tool === "pi") {
-    command = `pi -p "@${resolvedPrompt}" --mode json`;
+    // Each role starts independently. Ordinary review is a focused evidence
+    // decision; phases without a bounded-execution hint retain operator effort.
+    command = `pi -p "@${resolvedPrompt}" --mode json --no-session${config.thinking || phase === "verifier" ? " --thinking medium" : ""}`;
+    if (phase === "verifier") command += " --tools read,grep,find,ls,write";
     effectiveTool = "pi";
   } else {
     throw new AgentError(`--tool custom requires --command`);

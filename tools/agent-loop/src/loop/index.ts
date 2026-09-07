@@ -823,7 +823,10 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         appendEvent(cfg.repoRoot, "executor_started", { task: taskId, prompt: executorPrompt, log: executorLog }, cfg.runsRoot, cfg.stateFile);
         try {
           agentCallCounter.count++;
-          const invocation = await invokeAgentPhase({ ...cfg, promptFile: executorPrompt, workingDirectory: worktreePath, logFile: executorLog, phase: "executor", taskId });
+          const agent = task.origin === "direct" && compactExecutor
+            ? { ...cfg.agent, thinking: "medium" as const }
+            : cfg.agent;
+          const invocation = await invokeAgentPhase({ ...cfg, agent, promptFile: executorPrompt, workingDirectory: worktreePath, logFile: executorLog, phase: "executor", taskId });
           emitTokenUsage(cfg, invocation, taskId);
           appendEvent(cfg.repoRoot, "executor_passed", { task: taskId, log: executorLog }, cfg.runsRoot, cfg.stateFile);
         } catch (err) {

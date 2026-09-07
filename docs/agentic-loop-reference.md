@@ -26,6 +26,8 @@ npm run agent -- run --checks "targeted validation command"
 
 `{prompt}` in a custom command receives the prompt file path. Without `--command`, harness detects Pi then Claude.
 
+Each role starts a clean session. Native Pi explicitly uses `--no-session`; ordinary single review uses medium reasoning, and so does a first bounded Direct Executor attempt. Planned execution, retries, Planner and adversarial review retain configured effort. Custom commands own their session and reasoning settings. No Executor conversation is passed into review; candidate evidence carries continuity. Ordinary native Pi review enables read, grep, find, ls and write only: the harness owns shell checks, and the reviewer inspects assertions and writes its result. High-risk review and explicit command templates retain their tools. Candidate/parent guards still apply.
+
 ## Other commands
 
 ```bash

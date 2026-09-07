@@ -13,6 +13,9 @@ Plain-English outcome stored in `agentic.json`. Created with `agent init "<goal>
 **Run**:
 One `agent run` invocation. It plans when necessary, executes runnable tasks, escalates only from evidence, and either applies changes or stops with traceable state.
 
+**Fresh session**:
+Independent model invocation with no prior role conversation. Goal, scoped task and candidate evidence provide continuity; conversation history does not. Executor and Verifier remain separate sessions.
+
 **Run worktree**:
 Single isolated worktree at `.worktrees/run-<timestamp>/` on `agentic/run-<timestamp>`. All task commits stay there until completion.
 

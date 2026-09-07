@@ -30,6 +30,12 @@ cd ../..
 # Replay captured real model contract failures
 AGENTIC_SMOKE_FILTER=captured ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/agent-loop-ts-smoke.ts
 
+# Fresh native sessions and ordinary-review effort
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/fresh-session-smoke.ts
+
+# Opt-in live reviewer quality/latency evaluation (real provider usage)
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/live-review-benchmark.ts --live
+
 # Parent-checkout identity/content guard
 ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/checkout-integrity-smoke.ts
 
@@ -115,6 +121,10 @@ Canonical state types live only in `state/index.ts`. Context, scope, agent, prom
 14. Executor completes required scoped documentation before checks and verification. No finalizer edits the verified result.
 15. Apply run branch to parent checkout as unstaged changes unless `--no-apply`.
 16. Record `lastRun` and `run_finished`/`run_latency` on success and handled failure. Stopped tasks cannot remain `running`. Abrupt process death is not covered by this finalizer; automatic resume is not implemented.
+
+The live review evaluator accepts an optional `--command` template for controlled adapter comparisons. It records every result, contract failure, latency and retained fixture under `.agent-runs/live-review-*/`; its five extraction cases are a focused regression sample, not a general quality benchmark. See [measured performance and limits](docs/agentic-loop-performance.md).
+
+By default every model phase starts a separate clean session; no conversation is resumed or handed from Executor to Verifier. Native Pi uses ephemeral sessions (`--no-session`) and medium reasoning for ordinary single review. A first bounded Direct Executor attempt also uses medium; planned execution, retries, Planner and high-risk adversarial votes retain the operator's configured effort. Explicit `--command` templates remain operator-owned, including session and effort settings; Claude effort is unchanged. Review starts from candidate evidence and batches source reads around unresolved correctness questions. Ordinary native Pi review enables read, grep, find, ls and write only: the harness owns shell checks, and the reviewer inspects assertions and writes its result. High-risk review and explicit command templates retain their tools. Candidate/parent guards still apply. It must still reject defects, inadequate behavioral proof and human gates.
 
 Soft run targets are 60 seconds direct, 180 seconds planned, and 300 seconds complex. `phase_latency`, `run_latency`, and `latency_target_exceeded` expose measured durations and overruns. No predictive forecasts or latency-triggered Planner calls. Targets never terminate active work or bypass safety phases. High-risk reviewers run concurrently with distinct review focuses.
 
