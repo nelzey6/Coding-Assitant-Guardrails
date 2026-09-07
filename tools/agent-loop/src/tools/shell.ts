@@ -79,3 +79,13 @@ export function runShellScript(
     try { unlinkSync(scriptPath); } catch { /* ignore */ }
   }
 }
+
+/** Parse with the same shell used for execution, without executing the command. */
+export function validateShellSyntax(command: string): string | undefined {
+  const windows = process.platform === "win32";
+  const result = windows
+    ? spawnSync("powershell.exe", ["-NoProfile", "-Command", "$e=$null; $t=$null; [System.Management.Automation.Language.Parser]::ParseInput([Console]::In.ReadToEnd(),[ref]$t,[ref]$e) | Out-Null; if ($e.Count) { $e | Out-String | Write-Error; exit 1 }"], { input: psScript(command), encoding: "utf-8" })
+    : spawnSync("sh", ["-n"], { input: command, encoding: "utf-8" });
+  if (result.error) throw result.error;
+  return result.status === 0 ? undefined : (result.stderr || "Invalid shell syntax").trim();
+}

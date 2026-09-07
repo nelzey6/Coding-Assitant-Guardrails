@@ -44,11 +44,11 @@ npm run agent -- run
 
 Before Planner, impact routing admits only concrete goals up to 1000 characters naming one to four repository-relative files, with no ambiguity, elevated-risk language, open questions, blockers, or human gates. It installs one Direct task. Everything else enters full Planner.
 
-Direct Executor writes `direct-execution-result.json`. Completion requires one to three focused commands, rerun by harness. Clean `needs_planner` starts a fresh full Planner; dirty `needs_planner` stops. Missing/invalid result uses bounded retry policy.
+Direct Executor receives the resolved operator/state/task checks and writes `direct-execution-result.json`. It may propose zero to three additional executable commands; no additions are required when known checks suffice. Proposed shell syntax is parsed before execution. Clean `needs_planner` starts a fresh full Planner; dirty `needs_planner` stops. Missing/invalid results get one guarded artifact-only repair without another code attempt.
 
 Full Planner emits exactly one Primary slice. It may add one Prerequisite only when Primary depends on it, validation differs, and split reason states distinct proof, true prerequisite, or independent rollback. Discovery stays inside Primary unless goal itself is investigation/artifact work.
 
-A task executes only when its revision and planning context still match and no ambiguity remains. Changed goal, decisions, assumptions, questions, or blockers invalidate it before execution. Check failures keep the same planner revision and retry directly.
+A task executes only when its revision and planning context still match and no ambiguity remains. Changed goal, decisions, assumptions, questions, or blockers invalidate it before execution. Code assertion failures keep the same planner revision and retry directly. Configuration/environment failures and candidate mutation stop with retained evidence. `lastRun`, `run_finished` and `run_latency` record terminal outcome, failed stage, retained worktree and elapsed time on success and handled failure; stopped tasks do not remain running. This does not provide automatic crash recovery or cross-run resume.
 
 ## Risk and verification
 
@@ -73,13 +73,13 @@ Catch-all and single-root recursive scopes such as `src/**` never qualify as bou
 
 Mechanical extract/move/split/refactor routing requires explicit behavior preservation. Unique existing path aliases are normalized. File count and workflow names alone do not trigger high complexity. Compact code tasks use existing checks without forcing TDD ceremony.
 
-Empty and diagnostic-only proof is rejected. Passing code Verifier results require `validationEvidence: [{criterion, command, proves}]`, covering every exact acceptance criterion with an actual passed command. The reviewer assesses semantic relevance; syntactic screening is not a correctness proof. All high-risk reviewers must pass; unresolved defects cannot be outvoted, and human gates take precedence. Candidate HEAD/content is guarded throughout each review, including failed reviews, and all launched reviews settle before stopping.
+Empty and diagnostic-only behavioral proof is rejected. Checks records candidate-bound results in `check-evidence.json`. Review uses `coverage: [{criterionId, kind, evidenceIds, proves}]` against harness-owned requirements and evidence in `review-evidence.json`; kind is behavior, structure or documentation. Behavior requires passed assertion evidence, documentation requires the diff, and the reviewer judges semantic coverage. Prose is not an identifier. Invalid review artifacts get one read-only repair; existing defects/gates cannot be repaired away. Syntax and ID checks are not correctness proofs. All high-risk reviewers must pass; unresolved defects cannot be outvoted, and human gates take precedence. Candidate HEAD/content is guarded throughout each review, including failed reviews, and all launched reviews settle before stopping.
 
 ## Worktree safety
 
 Harness creates one worktree per run. Every agent invocation snapshots protected parent HEAD and content before and after execution. Planner, stance, executor, and verifier mutations to parent checkout stop the run and write forensic evidence. Guard detects tracked, untracked, already-dirty, error-exit, and HEAD-only mutations; it never auto-restores them.
 
-Bootstrap commands run inside worktree once per dependency fingerprint, and again after dependency input changes before checks. CLI omission inherits policy. Declared artifacts stay excluded from diff, scope and commits.
+Bootstrap commands run inside worktree once per dependency fingerprint, and again after dependency input changes before checks. CLI omission inherits policy. Declared artifacts stay excluded from diff, scope and commits. Commit staging uses the validated changed-file list rather than negative pathspecs for ignored dependency directories.
 
 ## Failure behavior
 

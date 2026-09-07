@@ -1,8 +1,9 @@
+import { validateAcceptanceChecks } from "../checks/index.js";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { execFileSync } from "child_process";
 import { homedir } from "os";
-import type { AgenticState, Task } from "../state/index.js";
+import type { AgenticState, Task, CheckDefinition, ReviewEvidence } from "../state/index.js";
 import type { WorkflowPolicy } from "../policy/index.js";
 import { appendEvent, getRecentEvents, formatEventLine, loadEvents } from "../events/index.js";
 import { git as gitTool, captureCheckoutSnapshot } from "../tools/index.js";
@@ -519,6 +520,7 @@ interface ExecutorPromptOptions {
   policy: WorkflowPolicy;
   approvedStance?: unknown;
   directResultFile?: string;
+  checks?: CheckDefinition[];
 }
 
 export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOptions): void {
@@ -558,7 +560,9 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
       "- If scope or intent is insufficient, make no repository edits and return needs_planner.",
       "- If human authority is required, make no repository edits and return needs_human.",
       `- Write direct execution JSON only to: ${directResultFile}`,
-      '- Schema: {"verdict":"completed|needs_planner|needs_human","summary":"...","validation":["1-3 focused commands when completed"],"assumptions":[]}',
+      '- Schema: {"verdict":"completed|needs_planner|needs_human","summary":"...","validation":[],"assumptions":[]}',
+      '- Configured checks below are mandatory and will run after execution. Leave validation empty when they suffice. Add at most three missing focused commands only; command strings contain executable shell text, never descriptions.',
+      '- Prefer the existing checks; do not create temporary checks merely to repeat their coverage.',
     ] : []),
     `- Keep task artifacts under this run directory when useful: ${runDir}`,
     "- For discovery/investigation tasks, useful artifact files may be the main output; code changes are not required unless the task asks for them.",
@@ -573,6 +577,7 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
       "If repository evidence invalidates it, stop and record the conflict; do not silently choose a different architecture.",
       "",
     ] : []),
+    `Configured checks (harness-owned): ${JSON.stringify(opts.checks ?? [])}`,
     `Iteration: ${iteration}`,
     `State file: ${stateFile}`,
     `Selected workflow: ${workflow}`,
@@ -638,6 +643,7 @@ interface VerifierPromptOptions {
   task: Task;
   worktreePath: string;
   checkOutput: string;
+  evidence: ReviewEvidence;
   resultFile: string;
   eventLogPath: string;
   policy: WorkflowPolicy;
@@ -653,9 +659,10 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
   } = opts;
 
   const limits = getPromptBudgetLimits(budget);
-  const taskJson = JSON.stringify(projectTaskForPhase(task, "verifier"), null, 2);
+  // Requirements and commands appear once, in the evidence packet below.
+  const taskJson = JSON.stringify({ id: task.id, ...(task.origin !== "direct" ? { title: task.title } : {}),
+    kind: task.kind, workflow: task.workflow, scope: task.scope }, null, 2);
   const candidate = captureCheckoutSnapshot(worktreePath);
-  const diffStat = git(["diff", "--stat", "HEAD"], worktreePath);
   const rawDiff  = git(["diff", "HEAD"], worktreePath);
   const rawDiffBytes = Buffer.byteLength(rawDiff, "utf-8");
   const diffPath = join(dirname(promptFile), "diff.patch");
@@ -666,7 +673,6 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
 
   const checkOutputForPrompt = limitTextForPrompt(checkOutput, limits.checkBytes, 80);
   const gates = JSON.stringify(policy.humanGates ?? [], null, 2);
-  const recentHistory = getDistilledHistoryText(repoRoot, runsRoot, "verifier", budget);
 
   const adversarialBlock = adversarial
     ? [
@@ -679,40 +685,32 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
     : "";
 
   const content = [
-    "You are the verifier for one agentic task.",
+    "You are the independent verifier for one agentic task. Follow applicable repository guidance.",
     `Candidate HEAD: ${candidate.head}; content fingerprint: ${candidate.fingerprint}.`,
+    `Candidate repository: ${worktreePath}. Inspect repository files only there.`,
+    "Read-only review: do not edit, commit, format or install. Write only the named result artifact.",
     ...(opts.reviewFocus ? [`Review focus: ${opts.reviewFocus}`] : []),
-    `The candidate repository is ${worktreePath}. Inspect repository files only there, never in the parent checkout.`,
-    "Read-only review: do not edit, commit, format, install dependencies or otherwise mutate candidate files. Write only the named result artifact.",
-    "Check whether validation actually proves each acceptance criterion. Exit success from true, echo, plain git diff or an unrelated check is not proof. Fail with the missing proof if necessary.",
-    "Reuse supplied check results. Run another read-only check only to resolve a specific missing assertion; do not repeat checks by habit.",
-    "Report concrete defects with file/location, triggering scenario and consequence. Unresolved human gates always require needs_human.",
-    "",
     adversarialBlock,
-    `Review the task, acceptance criteria, workflow, git diff, checks, and human gates. Write JSON only to this path: ${resultFile}`,
-    "",
-    "Allowed verdicts: pass, fail, needs_human.",
-    `Schema: { "verdict": "pass|fail|needs_human", "summary": "...", "issues": [], "humanGates": [], "recommendedStatus": "passed|failed|needs_retry|needs_human|blocked", "artifacts": [], "validationEvidence": [{"criterion":"exact acceptance criterion", "command":"exact passed check command", "proves":"what this check proves for that criterion"}] }`,
-    "",
-    "Task-kind guidance:",
-    "- discovery/investigation tasks may pass with artifact evidence and no git diff.",
-    "- implementation/architecture/maintenance tasks normally need tracked changes or a clear no-diff explanation.",
-    "- handoff tasks should produce a handoff artifact and usually recommend needs_human or blocked unless the task explicitly only asks for a handoff note.",
-    "",
+    `Write JSON only to this path: ${resultFile}`,
+    'Schema: {"verdict":"pass|fail|needs_human","summary":"short conclusion","issues":[],"humanGates":[],"coverage":[{"criterionId":"copy requirement ID","kind":"behavior|structure|documentation","evidenceIds":["copy evidence IDs"],"proves":"why this evidence covers the requirement"}]}',
+    'issues may contain strings or objects {"file":"...","triggeringCase":"...","consequence":"...","detail":"optional"}. Keep summary brief; do not repeat detailed coverage there.',
+    "Cover every requirement ID, including all clauses of compound requirements; several coverage entries may reference the same ID. Never rewrite IDs or substitute criterion text.",
+    "Behavior claims need passed check evidence. A diff, typecheck alone, or unrelated test does not establish behavior. Fail if behavioral assertions are missing.",
+    "Structure claims may cite the diff plus relevant checks; inspect imports/exports and callers as needed. Documentation claims cite the diff and must agree with implementation.",
+    "Use only supplied evidence IDs. Inspect additional source to judge relevance; missing executable proof requires fail, not invented evidence. Report concrete defects with file, triggering case and consequence.",
+    "Reuse recorded checks; do not repeat them by habit. A passed check is a fact, not proof of every requirement. Any unresolved human gate requires needs_human.",
     "Task JSON:",
     taskJson,
     "",
     "Human gates:",
     gates,
     "",
-    `Recent harness history (verdicts, failures, assumption changes; source of truth is ${evLogPath}):`,
-    recentHistory,
+    "Evidence JSON:",
+    JSON.stringify({ requirements: opts.evidence.requirements, diff: opts.evidence.diff,
+      checks: opts.evidence.checks.map(({ command, sources, status, evidenceId }) => ({ command, sources, status, evidenceId })) }, null, 2),
     "",
-    "Check output (capped; full output is in checks.log):",
+    "Check output (full output in checks.log):",
     checkOutputForPrompt,
-    "",
-    "Git diff stat:",
-    diffStat,
     "",
     "Git diff:",
     diff,
@@ -731,26 +729,36 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
   });
 }
 
-export function validateVerifierResult(value: unknown, task: Task, checks: string[]): string[] {
+export function validateVerifierResult(value: unknown, task: Task, evidence: ReviewEvidence): string[] {
   if (!value || typeof value !== "object") return ["Verifier result must be an object"];
   const result = value as Record<string, unknown>;
   const errors: string[] = [];
   if (!["pass", "fail", "needs_human"].includes(String(result.verdict))) errors.push("Invalid verifier verdict");
-  for (const field of ["issues", "humanGates"]) {
-    if (!Array.isArray(result[field]) || (result[field] as unknown[]).some((v) => typeof v !== "string")) errors.push(`Verifier ${field} must be a string array`);
-  }
+  if (!Array.isArray(result.humanGates) || result.humanGates.some((gate) => typeof gate !== "string")) errors.push("Verifier humanGates must be a string array");
+  if (!Array.isArray(result.issues) || result.issues.some((issue) => {
+    if (typeof issue === "string") return false;
+    if (!issue || typeof issue !== "object") return true;
+    return ["file", "triggeringCase", "consequence"].some((key) => typeof issue[key] !== "string" || !issue[key].trim());
+  })) errors.push("Verifier issues must contain strings or findings with file, triggeringCase and consequence");
   if (errors.length || result.verdict !== "pass" || (result.humanGates as string[]).length) return errors;
   if ((result.issues as string[]).length) errors.push("Passing verifier has unresolved issues");
-  if (!["discovery", "investigation", "handoff"].includes(task.kind ?? "implementation")) {
-    const proof = Array.isArray(result.validationEvidence) ? result.validationEvidence as Array<Record<string, unknown>> : [];
-    const criteria = task.acceptanceCriteria ?? [];
-    if (criteria.length === 0) errors.push("Task has no acceptance criteria to verify");
-    for (const criterion of criteria) {
-      if (!proof.some((item) => item && item.criterion === criterion && checks.includes(String(item.command)) && typeof item.proves === "string" && item.proves.trim().length > 0)) {
-        errors.push(`Missing acceptance proof from a passed check: ${criterion}`);
-      }
-    }
+  if (["discovery", "investigation", "handoff"].includes(task.kind ?? "implementation")) return errors;
+  const coverage = Array.isArray(result.coverage) ? result.coverage as Array<Record<string, unknown>> : [];
+  const checks = new Set(evidence.checks.filter((check) => check.status === "passed" && check.evidenceId && validateAcceptanceChecks([check.command]).length === 0).map((check) => check.evidenceId));
+  const requirements = new Set(evidence.requirements.map((requirement) => requirement.id));
+  if (!requirements.size) errors.push("Task has no requirements to verify");
+  for (const item of coverage) {
+    if (!item || typeof item !== "object") { errors.push("Invalid coverage entry"); continue; }
+    if (!requirements.has(String(item.criterionId))) errors.push("Unknown criterionId; copy an ID from evidence requirements");
+    if (!["behavior", "structure", "documentation"].includes(String(item.kind))) errors.push("Invalid coverage kind");
+    const ids = Array.isArray(item.evidenceIds) ? item.evidenceIds : [];
+    if (!ids.length || ids.some((id) => id !== evidence.diff.id && !checks.has(id))) errors.push("Unknown or missing evidence ID");
+    if (item.kind === "behavior" && !ids.some((id) => checks.has(id))) errors.push("Behavior requires a passed assertion check");
+    if (item.kind === "documentation" && !ids.includes(evidence.diff.id)) errors.push("Documentation requires diff evidence");
+    if (typeof item.proves !== "string" || !item.proves.trim()) errors.push("Coverage explanation is required");
   }
+  for (const id of requirements) if (!coverage.some((item) => item?.criterionId === id)) errors.push(`Missing coverage for ${id}`);
+  if (evidence.diff.hasCode && !coverage.some((item) => item?.kind === "behavior" && Array.isArray(item.evidenceIds) && item.evidenceIds.some((id) => checks.has(id)))) errors.push("Code change needs behavioral check coverage");
   return errors;
 }
 
@@ -777,7 +785,6 @@ interface WriteFailureAnalysisOptions {
 // Consumed by planner prompts to break blind-retry loops.
 export function writeFailureAnalysis(opts: WriteFailureAnalysisOptions): FailureAnalysis {
   const { taskId, phase, attempt, rawOutput, worktreePath, outputFile } = opts;
-  const candidate = captureCheckoutSnapshot(worktreePath);
   const diffStat = git(["diff", "--stat", "HEAD"], worktreePath);
   const truncatedReason = limitTextForPrompt(rawOutput, 8_000, 100);
   const analysis: FailureAnalysis = {

@@ -45,6 +45,7 @@ export interface Task {
 }
 
 export interface AgenticState {
+  lastRun?: { outcome: "completed" | "stopped"; failedStage?: string; reason?: string; durationMs: number; worktree?: string; at: string };
   version?: number;
   goal?: string;
   phase?: string;
@@ -75,11 +76,54 @@ export interface PlannerResult {
   artifacts?: string[];
 }
 
+export interface CheckDefinition {
+  id: string;
+  command: string;
+  cwd: string;
+  sources: Array<"operator" | "state" | "task">;
+}
+export interface CheckResult extends CheckDefinition {
+  status: "passed" | "failed" | "invalid";
+  output: string;
+  durationMs: number;
+  evidenceId?: string;
+}
+export interface CheckBatch {
+  candidate: { head: string; fingerprint: string };
+  results: CheckResult[];
+  log: string;
+  failureKind?: "configuration" | "environment" | "code" | "candidate_mutation";
+}
+export interface ReviewEvidence {
+  candidate: { head: string; fingerprint: string };
+  requirements: Array<{ id: string; text: string }>;
+  checks: CheckResult[];
+  diff: { id: string; files: string[]; hasCode: boolean };
+}
+export interface Coverage {
+  criterionId: string;
+  evidenceIds: string[];
+  kind: "behavior" | "structure" | "documentation";
+  proves: string;
+}
+
+export interface ReviewIssue {
+  file: string;
+  triggeringCase: string;
+  consequence: string;
+  detail?: string;
+}
+export function formatReviewIssue(issue: string | ReviewIssue): string {
+  return typeof issue === "string" ? issue : `${issue.file}: ${issue.triggeringCase} — ${issue.consequence}${issue.detail ? ` (${issue.detail})` : ""}`;
+}
+
 export interface VerifierResult {
+  coverage?: Coverage[];
+  /** Legacy artifacts are retained for diagnosis, never accepted as new proof. */
   validationEvidence?: Array<{ criterion: string; command: string; proves: string }>;
   verdict: "pass" | "fail" | "needs_human";
   summary?: string;
-  issues?: string[];
+  issues?: Array<string | ReviewIssue>;
   humanGates?: string[];
   recommendedStatus?: string;
   artifacts?: string[];

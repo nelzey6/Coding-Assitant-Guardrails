@@ -1,4 +1,7 @@
-import { runShellScript } from "../tools/shell.js";
+import { createHash } from "crypto";
+import { captureCheckoutSnapshot, git } from "../tools/index.js";
+import type { CheckDefinition, CheckBatch, ReviewEvidence, Task } from "../state/index.js";
+import { runShellScript, validateShellSyntax } from "../tools/shell.js";
 import { existsSync, readFileSync } from "fs";
 import { join, isAbsolute } from "path";
 
@@ -56,43 +59,75 @@ function runCommand(command: string, cwd: string, timeoutSeconds: number, env: N
   return runShellScript(command, cwd, timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined, "pipe", env);
 }
 
-export function invokeChecks(
-  workingDirectory: string,
-  checksToRun: string[],
-  timeoutSeconds = DEFAULT_CHECK_TIMEOUT_SECONDS,
-  envFile = ""
-): string {
-  const log: string[] = [];
-  const allMetrics: MetricMap = {};
-  const effectiveChecks = [...new Set(checksToRun.filter((c) => c && c.trim().length > 0))];
-  const envPath = envFile ? (isAbsolute(envFile) ? envFile : join(workingDirectory, envFile)) : "";
-  const checkEnv = envPath ? { ...process.env, ...parseEnvFile(envPath) } : process.env;
-
-  if (effectiveChecks.length === 0) {
-    return "No checks configured; agent exit success is the only external validation.\n\nStructured metrics:\nNo structured METRIC lines were emitted.";
-  }
-
-  for (const check of effectiveChecks) {
-    console.log(`Running check in ${workingDirectory}: ${check}`);
-    try {
-      const output = runCommand(check, workingDirectory, timeoutSeconds, checkEnv);
-      if (output) console.log(output);
-      mergeMetrics(allMetrics, parseMetricLines(output));
-      log.push(`PASS: ${check}`);
-      if (output) log.push(output);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      mergeMetrics(allMetrics, parseMetricLines(msg));
-      log.push(`FAIL: ${check}\n${msg}`);
-      if (Object.keys(allMetrics).length > 0) {
-        log.push(`Structured metrics:\n${formatMetricsForPrompt(allMetrics)}`);
-      }
-      throw new Error(log.join("\n"));
+/** Resolve once before execution; operator checks cannot be displaced by proposals. */
+export function resolveChecks(cwd: string, state: string[] = [], task: string[] = [], operator: string[] = []): CheckDefinition[] {
+  const checks = new Map<string, CheckDefinition>();
+  for (const [source, commands] of [["operator", operator], ["state", state], ["task", task]] as const) {
+    for (const raw of commands) {
+      const command = raw.trim();
+      if (!command) continue;
+      const existing = checks.get(command);
+      if (existing) { if (!existing.sources.includes(source)) existing.sources.push(source); }
+      else checks.set(command, { id: `check-${digest([cwd, command])}`, command, cwd, sources: [source] });
     }
   }
+  return [...checks.values()];
+}
 
-  log.push(`Structured metrics:\n${formatMetricsForPrompt(allMetrics)}`);
-  return log.join("\n");
+function digest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 20);
+}
+
+export function runChecks(cwd: string, definitions: CheckDefinition[], timeoutSeconds = DEFAULT_CHECK_TIMEOUT_SECONDS, envFile = ""): CheckBatch {
+  const snapshot = captureCheckoutSnapshot(cwd);
+  const candidate = { head: snapshot.head, fingerprint: snapshot.fingerprint };
+  const batch: CheckBatch = { candidate, results: [], log: "" };
+  const envPath = envFile ? (isAbsolute(envFile) ? envFile : join(cwd, envFile)) : "";
+  const env = envPath ? { ...process.env, ...parseEnvFile(envPath) } : process.env;
+  const metrics: MetricMap = {};
+  for (const check of definitions) {
+    const start = Date.now();
+    let output = "";
+    let status: "passed" | "failed" | "invalid" = "passed";
+    try {
+      const syntaxError = validateShellSyntax(check.command);
+      if (syntaxError) { status = "invalid"; batch.failureKind = "configuration"; output = syntaxError; }
+      else {
+        console.log(`Running check in ${check.cwd}: ${check.command}`);
+        output = runCommand(check.command, check.cwd, timeoutSeconds, env);
+        if (output) console.log(output);
+      }
+    } catch (error) {
+      output = error instanceof Error ? error.message : String(error);
+      status = "failed";
+      batch.failureKind = /timed out|ENOENT|failed with code (?:126|127)\b/.test(output) ? "environment" : "code";
+    }
+    mergeMetrics(metrics, parseMetricLines(output));
+    const after = captureCheckoutSnapshot(cwd);
+    if (after.head !== candidate.head || after.fingerprint !== candidate.fingerprint) {
+      status = "failed"; batch.failureKind = "candidate_mutation";
+      output += "\nCheck changed the candidate; evidence invalidated.";
+      for (const result of batch.results) delete result.evidenceId;
+    }
+    batch.results.push({ ...check, status, output, durationMs: Date.now() - start,
+      ...(status === "passed" ? { evidenceId: `passed-${digest([candidate, check])}` } : {}) });
+    if (batch.failureKind) break;
+  }
+  batch.log = batch.results.map((r) => `${r.status === "passed" ? "PASS" : "FAIL"}: ${r.command}${r.output ? `\n${r.output}` : ""}`).join("\n")
+    + `\nStructured metrics:\n${formatMetricsForPrompt(metrics)}`;
+  return batch;
+}
+
+export function buildReviewEvidence(task: Task, batch: CheckBatch, cwd: string): ReviewEvidence {
+  const current = captureCheckoutSnapshot(cwd);
+  if (batch.failureKind || current.head !== batch.candidate.head || current.fingerprint !== batch.candidate.fingerprint) throw new Error("Candidate no longer matches passed check evidence");
+  const files = git(["diff", "HEAD", "--name-only"], cwd).split("\n").filter(Boolean);
+  return {
+    candidate: batch.candidate,
+    requirements: (task.acceptanceCriteria ?? []).map((text, index) => ({ id: `criterion-${digest([task.id, index, text])}`, text })),
+    checks: batch.results,
+    diff: { id: `diff-${digest(batch.candidate)}`, files, hasCode: files.some((file) => !/\.md$/i.test(file)) },
+  };
 }
 
 /** Reject empty or diagnostic-only proof. Semantic relevance is judged by the verifier. */

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; proof representation and bounded artifact repair partially superseded by [ADR-0008](./0008-structured-evidence-and-local-recovery.md).
 
 ## Context
 

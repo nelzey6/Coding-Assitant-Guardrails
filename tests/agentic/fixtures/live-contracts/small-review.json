@@ -1,0 +1,30 @@
+{
+  "verdict": "pass",
+  "summary": "parseMetricLines and its private constants (METRIC_RE, FORBIDDEN_METRIC_KEYS) were moved verbatim from src/metrics.js into new file src/parse-metric-lines.js, and src/metrics.js now re-exports parseMetricLines from './parse-metric-lines.js' while keeping formatMetricsForPrompt untouched. test/metrics.test.js imports parseMetricLines from '../src/metrics.js' unchanged, confirming the re-export preserves the existing import surface. Function body, regex, and constant set are byte-identical to the originals in the diff, so parsing edge cases and formatting behavior are preserved. node --test passes: 11/11 tests, covering noise lines, negative numbers, duplicate keys, non-numeric values, forbidden keys (__proto__/constructor/prototype), suffix values, Infinity, dotted names, prefix/trailing text, repeated invocations, and formatting. Only the two declared in-scope files changed (M src/metrics.js, A src/parse-metric-lines.js); no out-of-scope changes. No human gates apply: no migration, auth, payment, dependency, rewrite, deletion, upstream-derived, or public API break (re-export keeps the public import path intact).",
+  "issues": [],
+  "humanGates": [],
+  "recommendedStatus": "passed",
+  "artifacts": [],
+  "validationEvidence": [
+    {
+      "criterion": "Extract parseMetricLines and its private constants from src/metrics.js into src/parse-metric-lines.js. Re-export parseMetricLines from src/metrics.js so existing imports remain unchanged.",
+      "command": "git diff HEAD -- src/metrics.js src/parse-metric-lines.js",
+      "proves": "The diff shows METRIC_RE, FORBIDDEN_METRIC_KEYS, and the parseMetricLines function body removed from src/metrics.js and added byte-identically in the new src/parse-metric-lines.js; src/metrics.js line 1 now reads 'export { parseMetricLines } from \"./parse-metric-lines.js\"'. The only consumer, test/metrics.test.js, still imports from '../src/metrics.js' (confirmed by grep), so the re-export keeps existing imports working unchanged."
+    },
+    {
+      "criterion": "Preserve behavior exactly, including parsing edge cases; leave formatting unchanged. No behavior changes.",
+      "command": "node --test",
+      "proves": "All 11 tests pass (11 pass, 0 fail), including edge cases: 'METRIC a=1suffix', 'METRIC a=Infinity', forbidden keys __proto__/constructor/prototype, 'METRIC x=nope', duplicate keys, negative numbers, dotted/underscore names, and noise/prefix/trailing lines; the formatting test still passes. Since the moved code is identical and formatMetricsForPrompt is untouched in the diff, behavior and formatting are preserved."
+    },
+    {
+      "criterion": "Validation: node --test must pass.",
+      "command": "node --test",
+      "proves": "Supplied check output shows tests 11, pass 11, fail 0, duration 144.85ms. This directly satisfies the stated validation requirement."
+    },
+    {
+      "criterion": "Changes are limited to declared scope (src/metrics.js, src/parse-metric-lines.js).",
+      "command": "git status --porcelain && git diff HEAD --stat",
+      "proves": "Only two files changed: M src/metrics.js and A src/parse-metric-lines.js, both within the declared scope. No changes outside task scope."
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+cd tools/agent-loop && npx tsx /tmp/metric-behavior-check.mts (asserts identical parse results via both index.ts re-export and metric-parser.ts direct import, including forbidden-key and non-numeric filtering)

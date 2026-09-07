@@ -23,6 +23,13 @@ cd ../..
 ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/latency-policy-smoke.ts
 ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/acceptance-proof-smoke.ts
 
+# Structured checks and reviewer evidence
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/check-evidence-smoke.ts
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/review-evidence-smoke.ts
+
+# Replay captured real model contract failures
+AGENTIC_SMOKE_FILTER=captured ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/agent-loop-ts-smoke.ts
+
 # Parent-checkout identity/content guard
 ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/checkout-integrity-smoke.ts
 
@@ -74,7 +81,7 @@ Policy owns planner mode, retries, phase admission, verification intensity, boot
 | `tools/agent-loop/src/prompts/index.ts` | Private prompt implementation; exports only phase entry points and validators |
 | `tools/agent-loop/src/agent/index.ts` | Real adapters for Pi, Claude, and custom commands |
 | `tools/agent-loop/src/tools/index.ts` | Git worktrees and parent-checkout mutation guard |
-| `tools/agent-loop/src/checks/index.ts` | Validation execution, env loading, timeout, metrics |
+| `tools/agent-loop/src/checks/index.ts` | Command resolution/provenance, shell syntax validation, candidate-bound check results, review evidence, metrics |
 | `tools/agent-loop/src/scope/index.ts` | Scope matching, documentation facts, complexity escalation |
 | `tools/agent-loop/src/events/index.ts` | Append-only lifecycle trace |
 | `tools/agent-loop/src/reporting/index.ts` | Status, summary, failure, stuck diagnostics |
@@ -96,9 +103,9 @@ Canonical state types live only in `state/index.ts`. Context, scope, agent, prom
    - stale/manual task or non-check understanding failure → block stale task and replan;
    - check failure → retry directly.
 7. Resolve complexity from declared uncertainty and protected behavior. File count and workflow label do not raise it. High complexity runs stance reflection.
-8. Executor runs in a fresh session. Direct Executor writes a compact verdict plus one to three focused checks; clean `needs_planner` escalates to a fresh full Planner, while dirty escalation stops.
+8. Resolve operator/state/task checks before a fresh Executor session and show those same records in its prompt. Direct Executor returns a verdict and zero to three additional checks; zero is valid when configured checks suffice. Clean `needs_planner` escalates; dirty escalation stops.
 9. Every agent phase protects parent HEAD/content. Verifier also guards candidate HEAD/content and records candidate identity. Any mutation stops before commit; any unresolved human gate stops regardless of vote count.
-10. Run targeted acceptance checks. Reject empty/diagnostic-only proof; reviewers map acceptance criteria to passed commands.
+10. Parse proposed commands with the execution shell. Run targeted checks and record structured results bound to candidate HEAD/content. Check mutation invalidates evidence. Reviewers reference stable requirement/evidence IDs and distinguish behavioral, structural and documentation coverage; empty/diagnostic-only behavioral proof is rejected.
 11. Enforce declared scope.
 12. Resolve one verification profile:
     - bounded low-complexity documentation diff → skip verifier;
@@ -107,12 +114,17 @@ Canonical state types live only in `state/index.ts`. Context, scope, agent, prom
 13. Commit passed task inside run worktree. Events, phase logs, state snapshots, checks, diffs, and verifier JSON are canonical evidence; no routine handover, progress Markdown, or duplicate top-level run log is generated.
 14. Executor completes required scoped documentation before checks and verification. No finalizer edits the verified result.
 15. Apply run branch to parent checkout as unstaged changes unless `--no-apply`.
+16. Record `lastRun` and `run_finished`/`run_latency` on success and handled failure. Stopped tasks cannot remain `running`. Abrupt process death is not covered by this finalizer; automatic resume is not implemented.
 
 Soft run targets are 60 seconds direct, 180 seconds planned, and 300 seconds complex. `phase_latency`, `run_latency`, and `latency_target_exceeded` expose measured durations and overruns. No predictive forecasts or latency-triggered Planner calls. Targets never terminate active work or bypass safety phases. High-risk reviewers run concurrently with distinct review focuses.
 
 Bootstrap inherits policy unless overridden. It runs once per dependency fingerprint and reruns after dependency changes before checks. Fingerprint covers package manifests, common lockfiles/package-manager config, commands, Node version, platform and architecture. Bootstrap artifacts stay excluded from commits and scope checks.
 
 Direct routing accepts up to 1000 characters. Mechanical extract/move/split/refactor goals require explicit behavior preservation. Short aliases resolve only to unique existing repository files. Bounded code uses compact context and existing focused validation; no fabricated red tests or incidental CodeGraph initialization.
+
+Protocol errors use at most one fresh artifact-only repair per Direct/Verifier result. Parent and candidate guards apply; repair does not consume a code attempt or rerun implementation. Existing defects/gates are outcomes rather than repairable formatting. Code assertion failures retry within the task budget. Invalid configured checks, environment failure, and candidate mutation stop with evidence.
+
+`check-evidence-smoke.ts` covers provenance/deduplication, syntax errors, partial results and candidate mutation. `review-evidence-smoke.ts` covers stable IDs, mixed evidence kinds and rejection of stale/missing evidence. `fixtures/live-contracts/` preserves real malformed model outputs; CLI replay requires repair without another executor and verifies terminal state.
 
 `acceptance-proof-smoke.ts` tests rejection of vacuous commands. CLI smoke coverage includes runtime-preserving extraction with two invocations, candidate tampering, evidence-free review rejection, human-gate precedence, bootstrap reuse and dependency invalidation. These are deterministic adapter fixtures, not model quality or latency benchmarks.
 

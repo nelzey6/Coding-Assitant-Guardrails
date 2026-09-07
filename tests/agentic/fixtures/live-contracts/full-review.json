@@ -1,0 +1,44 @@
+{
+  "verdict": "pass",
+  "summary": "The extraction was performed correctly and is fully verified. tools/agent-loop/src/checks/metric-parser.ts now owns parseMetricLines, MetricMap, METRIC_RE, and FORBIDDEN_METRIC_KEYS with a byte-identical function body; tools/agent-loop/src/checks/index.ts imports and re-exports both names (`export { parseMetricLines, type MetricMap };`), so the only consumer (tools/agent-loop/src/loop/index.ts) keeps its unchanged import from ../checks/index.js. PROJECT.md gained the new ownership row for metric-parser.ts and the index.ts row was updated. Both configured typechecks pass, the behavior check (asserting identical parse results via the index re-export vs direct import, including forbidden-key filtering, non-numeric skipping, and empty input) passes, and the full check reports 252 metric equivalence cases with unchanged formatting and the same function re-export. Diff touches exactly the three in-scope files; no human gates are triggered (tools/agent-loop is local harness code, not upstream-derived skill content; the re-export avoids any public API break).",
+  "issues": [],
+  "humanGates": [],
+  "recommendedStatus": "passed",
+  "artifacts": [
+    "tools/agent-loop/src/checks/metric-parser.ts",
+    "tools/agent-loop/src/checks/index.ts",
+    "PROJECT.md"
+  ],
+  "validationEvidence": [
+    {
+      "criterion": "Extract parseMetricLines, its private constants, and MetricMap into tools/agent-loop/src/checks/metric-parser.ts",
+      "command": "read tools/agent-loop/src/checks/metric-parser.ts && read tools/agent-loop/src/checks/index.ts",
+      "proves": "metric-parser.ts defines MetricMap, METRIC_RE, FORBIDDEN_METRIC_KEYS, and parseMetricLines (body identical to the pre-change index.ts version); index.ts no longer defines any of them and instead imports from ./metric-parser.js."
+    },
+    {
+      "criterion": "Re-export the function and type from the original module and import them where needed so existing imports remain unchanged",
+      "command": "cd tools/agent-loop && npm exec -- tsc --noEmit",
+      "proves": "index.ts contains `export { parseMetricLines, type MetricMap };`; tools/agent-loop/src/loop/index.ts still imports parseMetricLines from ../checks/index.js unchanged, and the full project typecheck passes, proving the re-export satisfies all existing consumers with zero import-site changes."
+    },
+    {
+      "criterion": "Preserve behavior exactly; no behavior changes",
+      "command": "cd tools/agent-loop && npx tsx /tmp/metric-behavior-check.mts",
+      "proves": "Prints METRIC_BEHAVIOR_OK: asserts via-index re-export and direct import return deep-equal results for a sample exercising preamble/noise lines, float parsing, forbidden keys (__proto__), non-numeric values, and empty input \u2014 behavior is provably identical on both import paths."
+    },
+    {
+      "criterion": "Preserve behavior exactly (broad equivalence)",
+      "command": "./tools/agent-loop/node_modules/.bin/tsx /Users/zeynelarslan/Documents/Projects/Coding-Assitant-Guardrails/.agent-runs/20260907-live-benchmark/full-check.mts",
+      "proves": "Reports 252 metric equivalence cases passing, unchanged formatting output, and same function re-export, confirming no behavioral drift across the extraction."
+    },
+    {
+      "criterion": "Update PROJECT.md with the new ownership",
+      "command": "git diff -- PROJECT.md",
+      "proves": "PROJECT.md adds the row `tools/agent-loop/src/checks/metric-parser.ts | METRIC line parsing and the metric map type` and updates the checks/index.ts row to `Validation execution, env loading, timeout, metric formatting`, matching the new module ownership."
+    },
+    {
+      "criterion": "Changes confined to declared scope",
+      "command": "git status --porcelain && git diff --stat",
+      "proves": "Only PROJECT.md, tools/agent-loop/src/checks/index.ts (modified), and tools/agent-loop/src/checks/metric-parser.ts (new) are changed \u2014 exactly the three paths in task.scope; no out-of-scope or upstream-derived files were touched."
+    }
+  ]
+}

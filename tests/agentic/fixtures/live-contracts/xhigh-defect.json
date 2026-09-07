@@ -1,0 +1,31 @@
+{
+  "verdict": "fail",
+  "summary": "The extraction re-export works (both src/main.js and src/helper.js export the same helper function), but the helper now returns 41 instead of the original 42, so invoking it no longer returns 42. The recorded check (node check.cjs) passed only because it asserts typeof helper === 'function' and never verifies the return value, so it does not establish the required behavior.",
+  "issues": [
+    {
+      "file": "src/helper.js",
+      "triggeringCase": "Calling require('./src/helper.js').helper() or require('./src/main.js').helper() after this change",
+      "consequence": "The helper returns 41 instead of the original 42, violating the acceptance criterion 'invoking it still returns 42'. The recorded check passes because check.cjs only asserts helper is a function (typeof check) and never compares the return value, so the behavior change is undetected."
+    }
+  ],
+  "humanGates": [],
+  "coverage": [
+    {
+      "criterionId": "criterion-278587d255cc63e38649",
+      "kind": "structure",
+      "evidenceIds": [
+        "diff-19a32e4496f3f34be3a2"
+      ],
+      "proves": "Both modules export the same helper: src/main.js was changed to `exports.helper = require('./helper.js').helper`, re-exporting the identical function object defined in src/helper.js, so the 'both modules export the same helper' clause is structurally satisfied and confirmed by source inspection of both files."
+    },
+    {
+      "criterionId": "criterion-278587d255cc63e38649",
+      "kind": "behavior",
+      "evidenceIds": [
+        "diff-19a32e4496f3f34be3a2",
+        "passed-5f2c8ec47f637f63f007"
+      ],
+      "proves": "The 'invoking it still returns 42' clause is not established. The diff shows src/helper.js implements `exports.helper = () => 41;` (the original main.js implementation returned 42), so the extracted helper returns 41, not 42. The passed check evidence is not proof of this clause: check.cjs only asserts `typeof require('./src/main.js').helper === 'function'` and never invokes the helper or compares its result, so the behavioral assertion is missing and the requirement fails."
+    }
+  ]
+}

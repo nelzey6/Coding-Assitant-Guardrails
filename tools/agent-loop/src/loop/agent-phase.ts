@@ -16,6 +16,7 @@ export interface AgentPhaseOptions {
   logFile: string;
   phase: string;
   taskId?: string;
+  readOnlyCandidate?: boolean;
 }
 
 export class AgentPhaseMutationError extends CheckoutMutationError {
@@ -41,7 +42,7 @@ export async function invokeAgentPhase(options: AgentPhaseOptions): Promise<Agen
       options.repoRoot,
       async () => {
         const invoke = () => invokeAgentWithLog(options.promptFile, options.agent, options.workingDirectory, options.logFile, options.phase);
-        if (!options.phase.startsWith("verifier")) return invoke();
+        if (!options.readOnlyCandidate && !options.phase.startsWith("verifier")) return invoke();
         try {
           return await withUnchangedCheckout(options.workingDirectory, invoke);
         } catch (error) {
@@ -49,7 +50,7 @@ export async function invokeAgentPhase(options: AgentPhaseOptions): Promise<Agen
           const evidenceFile = join(dirname(options.logFile), `candidate-mutation-${options.phase}.txt`);
           writeFileSync(evidenceFile, JSON.stringify({ before: error.before, after: error.after }, null, 2), "utf-8");
           appendEvent(options.repoRoot, "candidate_mutated", { task: options.taskId, phase: options.phase, evidenceFile }, options.runsRoot, options.stateFile);
-          throw new Error(`Reviewer changed the checked candidate. Worktree retained; evidence: ${evidenceFile}`);
+          throw new Error(`Read-only agent changed the checked candidate. Worktree retained; evidence: ${evidenceFile}`);
         }
       },
       ignoredPaths,

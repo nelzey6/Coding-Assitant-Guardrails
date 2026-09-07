@@ -71,6 +71,12 @@ const mutatePhase = ${JSON.stringify(mutatePhase)};
 const mutateParent = (phase) => {
   if (mutatePhase === phase) writeFileSync(${JSON.stringify(join(dir, "PARENT-MUTATION.txt"))}, phase);
 };
+if (prompt.includes("Repair result JSON only to:") && !prompt.includes("You are the independent verifier")) {
+  const result=prompt.match(/Repair result JSON only to: (.+)/)[1].trim();
+  if (prompt.includes("Add tampered result")) writeFileSync("output.txt","tampered");
+  json(result,{verdict:"completed",summary:"artifact repaired",validation:["node check.mjs"],assumptions:[]});
+  process.exit(0);
+}
 if (prompt.includes("Write planner JSON only to:")) {
   mutateParent("planner");
   const result = prompt.match(/Write planner JSON only to: (.+)/)[1].trim();
@@ -95,15 +101,34 @@ if (prompt.includes("Write JSON only to this path:")) {
   mutateParent("verifier");
   const result = prompt.match(/Write JSON only to this path: (.+)/)[1].trim();
   if (prompt.includes('"title": "Reviewer mutation"')) writeFileSync("output.txt", "tampered");
+  if (prompt.includes('"title": "Captured live review"') && !prompt.includes("Repair result JSON only to:")) {
+    json(result,JSON.parse(readFileSync("captured-review.json","utf8")));process.exit(0);
+  }
+  if (prompt.includes('"title": "Captured live defect"')) {
+    json(result,JSON.parse(readFileSync("captured-review.json","utf8")));process.exit(0);
+  }
   const reviewedTask = JSON.parse(prompt.split("Task JSON:\\n")[1].split("\\n\\nHuman gates:")[0]);
-  const validationEvidence = prompt.includes('"title": "Review without proof"') ? [] : reviewedTask.acceptanceCriteria.map((criterion) => ({criterion, command:reviewedTask.validation[0], proves:"fixture check asserts requested output"}));
+  const evidence = JSON.parse(prompt.split("Evidence JSON:\\n")[1].split("\\n\\nCheck output")[0]);
+  const coverage = prompt.includes('"title": "Review without proof"') ? [] : evidence.requirements.map(({id}) => ({criterionId:id,kind:evidence.diff.hasCode?"behavior":"documentation", evidenceIds:[evidence.diff.hasCode?evidence.checks.find((c)=>c.status==='passed').evidenceId:evidence.diff.id],proves:"fixture check asserts requested output"}));
   const defect = prompt.includes('"title": "Unresolved review defect"') && result.includes("vote-3");
   const human = prompt.includes('"title": "Unresolved review gate"') && result.includes("vote-3");
-  json(result, { verdict:human?"needs_human":defect?"fail":"pass", summary:"verified", validationEvidence, issues:defect?["output.txt: missing edge case"]:[], humanGates:human?["approval needed"]:[], recommendedStatus:human?"needs_human":"passed", artifacts:[] });
+  json(result, { verdict:human?"needs_human":defect?"fail":"pass", summary:"verified", coverage, issues:defect?["output.txt: missing edge case"]:[], humanGates:human?["approval needed"]:[], recommendedStatus:human?"needs_human":"passed", artifacts:[] });
   process.exit(0);
 }
 if (prompt.includes("Task JSON:")) {
   mutateParent("executor");
+  if (prompt.includes('"title": "Add malformed check in output.txt"')) {
+    writeFileSync("output.txt","done");
+    const result=prompt.match(/Write direct execution JSON only to: (.+)/)[1].trim();
+    json(result,{verdict:"completed",summary:"code done",validation:[readFileSync("malformed-check.txt","utf8").trim()],assumptions:[]});process.exit(0);
+  }
+  if (prompt.includes('"title": "Add configured result in output.txt"')) {
+    if (!prompt.includes("node check.mjs")) throw new Error("operator checks hidden from executor");
+    writeFileSync("output.txt","done");
+    const result=prompt.match(/Write direct execution JSON only to: (.+)/)[1].trim();
+    json(result,{verdict:"completed",summary:"known checks suffice",validation:[],assumptions:[]});process.exit(0);
+  }
+  if (prompt.includes('"title": "Add tampered result in output.txt"')) {writeFileSync("output.txt","done");process.exit(0);}
   if (prompt.includes('"title": "Slow output"')) await new Promise((resolve) => setTimeout(resolve, 1100));
   const directResult = prompt.match(/Write direct execution JSON only to: (.+)/)?.[1]?.trim();
   if (prompt.includes('"title": "Update README.md but escalate cleanly"')) {
@@ -116,6 +141,7 @@ if (prompt.includes("Task JSON:")) {
     process.exit(0);
   }
   if (prompt.includes('"title": "Add retry result in output.txt"') && !prompt.includes('"attempts": 2')) {
+    writeFileSync("output.txt", "done");
     process.exit(0);
   }
   if (prompt.includes('"title": "Add assumed retry result in retry.txt"')) {
@@ -171,6 +197,85 @@ function test(name: string, body: (dir: string) => void): void {
   catch (e) { failed++; console.error(`  FAIL  ${name}\n        ${e instanceof Error ? e.message : String(e)}`); }
   finally { if (!KEEP) rmSync(dir, { recursive: true, force: true }); }
 }
+
+test("ignored dependency directories do not break commit staging", (dir) => {
+  writeFileSync(join(dir,".gitignore"),"tools/deps/\n");
+  git(["add",".gitignore"],dir);git(["commit","-m","ignored dependency directory"],dir);
+  writeState(dir,[task()]);
+  const result=run(dir,fakeAgent(dir),false,["--worktree-bootstrap","node -e \"require('fs').mkdirSync('tools/deps',{recursive:true}); require('fs').writeFileSync('tools/deps/generated','dependency')\"","--worktree-bootstrap-ignore","tools/deps"]);
+  assert(result.status===0,result.stderr);
+  assert(state(dir).tasks[0].status==="passed","candidate not committed");
+});
+
+test("invalid configured shell stops before executor", (dir) => {
+  writeState(dir,[task()]);
+  const result=run(dir,fakeAgent(dir),false,["--checks","node check.mjs (explanation)"]);
+  assert(result.status!==0,"invalid configured command accepted");
+  assert(!events(dir).some((e)=>e.type==="executor_started"),"configuration error paid for executor");
+  assert(state(dir).lastRun.failedStage==="check_configuration","wrong stopped stage");
+});
+
+test("environment check failure does not retry code", (dir) => {
+  writeState(dir,[task({validation:['node -e "process.exit(127)"']})]);
+  const result=run(dir,fakeAgent(dir));
+  assert(result.status!==0,"environment failure passed");
+  assert(events(dir).filter((e)=>e.type==="executor_started").length===1,"environment failure retried code");
+  assert(events(dir).find((e)=>e.type==="checks_failed")?.failureKind==="environment","failure classification lost");
+  assert(state(dir).lastRun.outcome==="stopped","no terminal state");
+});
+
+test("operator checks visible and sufficient without new commands", (dir) => {
+  writeState(dir, [], {goal:"Add configured result in output.txt",phase:"planning",planRevision:0});
+  const result=run(dir,fakeAgent(dir),false,["--checks","node check.mjs"]);
+  assert(result.status===0, result.stderr);
+  assert(events(dir).filter((e)=>e.type==="executor_started").length===1,"extra execution");
+  assert(state(dir).lastRun.outcome==="completed","missing terminal outcome");
+});
+
+for (const fixture of ["small-review", "full-review"]) test(`captured ${fixture} repairs proof without code retry`, (dir) => {
+  copyFileSync(join(ROOT,"tests/agentic/fixtures/live-contracts",fixture+".json"),join(dir,"captured-review.json"));
+  git(["add","captured-review.json"],dir);git(["commit","-m","captured model response"],dir);
+  writeState(dir,[task({title:"Captured live review"})]);
+  const result=run(dir,fakeAgent(dir));
+  assert(result.status===0,result.stderr);
+  const log=events(dir);
+  assert(log.filter((e)=>e.type==="executor_started").length===1,"proof repair repeated code");
+  assert(log.filter((e)=>e.type==="artifact_repair_started").length===1,"proof was silently accepted or repair unbounded");
+  assert(state(dir).tasks[0].attempts===1,"artifact repair consumed code attempt");
+});
+
+for (const effort of ["medium", "xhigh"]) test(`captured ${effort} defect is an outcome not artifact repair`, (dir) => {
+  copyFileSync(join(ROOT,"tests/agentic/fixtures/live-contracts",effort+"-defect.json"),join(dir,"captured-review.json"));
+  git(["add","captured-review.json"],dir);git(["commit","-m","captured structured finding"],dir);
+  writeState(dir,[task({title:"Captured live defect"})],{maxIterations:1});
+  const result=run(dir,fakeAgent(dir));
+  assert(result.status!==0,"concrete defect accepted");
+  assert(events(dir).find((e)=>e.type==="verifier_finished")?.verdict==="fail","defect lost");
+  assert(!events(dir).some((e)=>e.type==="artifact_repair_started"),"useful finding paid for reformatting");
+  assert(!events(dir).some((e)=>e.type==="task_passed"),"defective candidate committed");
+});
+
+test("captured malformed command repairs metadata before checks", (dir) => {
+  copyFileSync(join(ROOT,"tests/agentic/fixtures/live-contracts/malformed-check.txt"),join(dir,"malformed-check.txt"));
+  git(["add","malformed-check.txt"],dir);git(["commit","-m","captured command"],dir);
+  writeState(dir,[],{goal:"Add malformed check in output.txt",phase:"planning",planRevision:0});
+  const result=run(dir,fakeAgent(dir),false,["--checks","node check.mjs"]);
+  assert(result.status===0,result.stderr);
+  const log=events(dir);
+  assert(log.filter((e)=>e.type==="executor_started").length===1,"syntax error triggered coding");
+  assert(log.filter((e)=>e.type==="artifact_repair_started").length===1,"missing repair");
+  assert(!log.some((e)=>e.type==="checks_failed"),"invalid syntax reached execution");
+});
+
+test("artifact repair mutation stops with terminal state", (dir) => {
+  writeState(dir,[],{goal:"Add tampered result in output.txt",phase:"planning",planRevision:0});
+  const result=run(dir,fakeAgent(dir));
+  assert(result.status!==0,"repair mutated repository and passed");
+  assert(events(dir).some((e)=>e.type==="candidate_mutated"),"missing mutation evidence");
+  assert(!state(dir).tasks.some((t:any)=>t.status==="running"),"dead task left running");
+  assert(state(dir).lastRun.outcome==="stopped","missing terminal stop");
+  assert(events(dir).filter((e)=>e.type==="run_latency").length===1,"terminal time not recorded once");
+});
 
 test("planner from empty state plans then executes", (dir) => {
   writeState(dir, [], { phase:"planning", planRevision:0 });
@@ -241,13 +346,13 @@ test("dirty direct escalation fails instead of planning over edits", (dir) => {
   assert(!events(dir).some((e) => e.type === "planner_started"), "planner ran over dirty direct changes");
 });
 
-test("missing direct result uses bounded retry policy", (dir) => {
+test("missing direct result repairs artifact without code retry", (dir) => {
   writeState(dir, [], { goal:"Add retry result in output.txt", phase:"planning", planRevision:0 });
   const result = run(dir, fakeAgent(dir));
   assert(result.status === 0, `CLI exited ${result.status}: ${result.stderr}`);
   const log = events(dir);
-  assert(log.filter((e) => e.type === "executor_started").length === 2, "missing result did not retry once");
-  assert(log.some((e) => e.type === "direct_execution_result_invalid" && e.status === "needs_retry"), "invalid result retry event missing");
+  assert(log.filter((e) => e.type === "executor_started").length === 1, "artifact repair repeated execution");
+  assert(log.some((e) => e.type === "artifact_repair_started"), "artifact repair event missing");
   assert(!log.some((e) => e.type === "planner_started"), "missing result should not force planner");
 });
 
@@ -391,6 +496,9 @@ test("passing review must explain acceptance proof", (dir) => {
   const result = run(dir, fakeAgent(dir));
   assert(result.status !== 0, "unsupported pass verdict accepted");
   assert(!events(dir).some((e) => e.type === "task_passed"), "unsupported pass committed");
+  assert(state(dir).tasks[0].status === "failed", "rejected result left task running");
+  assert(state(dir).lastRun.failedStage === "verifier", "failed stage lost");
+  assert(events(dir).filter((e)=>e.type==="run_latency").length===1, "failed run omitted terminal time");
 });
 
 test("one unresolved defect cannot be outvoted", (dir) => {

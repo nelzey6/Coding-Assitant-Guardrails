@@ -1,3 +1,4 @@
+import { validateShellSyntax } from "../tools/shell.js";
 import { validateAcceptanceChecks } from "../checks/index.js";
 import { execFileSync } from "child_process";
 import { matchPolicyHumanGates, type WorkflowPolicy } from "../policy/index.js";
@@ -90,7 +91,7 @@ export function selectExecutionRoute(state: AgenticState, policy: WorkflowPolicy
   };
 }
 
-export function validateDirectExecutionResult(value: unknown): string[] {
+export function validateDirectExecutionResult(value: unknown, knownChecks: string[] = []): string[] {
   const result = value as Partial<DirectExecutionResult> | null;
   if (!result || typeof result !== "object") return ["direct execution result must be an object"];
   const errors: string[] = [];
@@ -104,10 +105,15 @@ export function validateDirectExecutionResult(value: unknown): string[] {
   if (!Array.isArray(result.assumptions) || result.assumptions.some((assumption) => typeof assumption !== "string")) {
     errors.push("assumptions must be a string array");
   }
-  if (result.verdict === "completed" && (result.validation?.length ?? 0) < 1) {
+  if (result.verdict === "completed" && (result.validation?.length ?? 0) + knownChecks.length < 1) {
     errors.push("completed direct execution requires at least one validation command");
   }
   if ((result.validation?.length ?? 0) > 3) errors.push("direct execution may return at most three validation commands");
-  if (result.verdict === "completed" && Array.isArray(result.validation) && result.validation.every((c) => typeof c === "string")) errors.push(...validateAcceptanceChecks(result.validation));
+  if (result.verdict === "completed" && Array.isArray(result.validation) && result.validation.every((c) => typeof c === "string")) errors.push(...validateAcceptanceChecks([...knownChecks, ...result.validation]));
+  if (Array.isArray(result.validation)) for (const command of result.validation) {
+    if (typeof command !== "string") continue;
+    const error = validateShellSyntax(command);
+    if (error) errors.push(`Invalid proposed check syntax: ${error}`);
+  }
   return errors;
 }

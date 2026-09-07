@@ -3,7 +3,6 @@ import { mkdirSync, readFileSync, appendFileSync, createWriteStream, writeFileSy
 import { dirname, resolve, join } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
-import type { Task as AgenticTask, AgenticState } from "../state/index.js";
 
 export type AgentTool = "claude" | "pi" | "custom";
 
@@ -330,14 +329,4 @@ export async function invokeAgentWithLog(
     durationMs: Math.round(performance.now() - started),
     ...shape,
   };
-}
-
-/**
- * Merge state-level checks with the task's own validation commands,
- * deduplicating and stripping blanks — mirrors Get-TaskChecks in the PS1.
- */
-export function getTaskChecks(task: AgenticTask, state: AgenticState): string[] {
-  const stateChecks: string[] = (state.checks ?? []).filter((c) => c && c.trim().length > 0);
-  const taskChecks: string[] = (task.validation ?? []).filter((c) => c && c.trim().length > 0);
-  return [...new Set([...stateChecks, ...taskChecks])];
 }

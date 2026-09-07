@@ -37,7 +37,7 @@ Deterministic first decision for an empty goal. A bounded concrete goal naming o
 Synthetic low-complexity primary task whose acceptance criterion is Goal and whose scope is exactly the named files.
 
 **Direct execution result**:
-Executor JSON verdict: `completed`, `needs_planner`, or `needs_human`, with summary, assumptions, and one to three focused validation commands for completion.
+Executor JSON verdict: `completed`, `needs_planner`, or `needs_human`, with summary, assumptions, and zero to three additional executable validation commands. Existing configured checks may satisfy completion without additions.
 
 **Primary slice**:
 Single coherent implementation unit produced by full Planner. It owns goal delivery and main acceptance proof.
@@ -61,7 +61,7 @@ One pre-edit self-challenge for high-complexity tasks. Produces an approved tech
 Owns task inspection, edits, local validation and required scoped documentation inside Run worktree.
 
 **Checks**:
-Deterministic validation commands from state, task, and operator.
+Deterministic validation commands resolved before execution from operator, state and task, with provenance, working directory, identity and candidate-bound results.
 
 **Scope rail**:
 Compares changed files with task scope. Out-of-scope changes fail before verification.
@@ -73,7 +73,7 @@ Single risk decision from task complexity, meaningful scope, actual changed path
 Independent review after checks. Low-risk bounded documentation changes skip it; normal changes use one vote; high-risk changes use three adversarial votes.
 
 **Acceptance proof**:
-A passed targeted check plus a Verifier explanation mapping each acceptance criterion to the exact check command. Diagnostic-only commands are insufficient.
+Coverage mapping stable requirement IDs to candidate-bound evidence IDs. Behavioral claims require passed assertion checks; structure and documentation can reference the diff with appropriate inspection. Verifier judges relevance and compound-requirement coverage; diagnostic-only commands are insufficient for behavior.
 
 **Candidate guard**:
 Content/HEAD snapshots around Verifier invocation detect mutation of the checked worktree and stop before commit. Review artifacts live outside that worktree.
@@ -84,10 +84,12 @@ One protected invocation seam around every model phase. It detects parent HEAD o
 ## Escalation rules
 
 - Ambiguity → Planner returns `needs_human`
-- Bounded concrete one/two-file goal → Direct task
+- Bounded concrete one-to-four-file goal → Direct task
 - Stale revision or changed planning context → replan
 - High complexity from concrete uncertainty/impact → stance reflection
-- Failed checks → retry
+- Invalid model result or proposed command → one guarded artifact repair
+- Real code assertion failure → bounded code retry
+- Invalid configured command, environment failure or candidate mutation → stop with evidence
 - Changed assumptions or understanding-sensitive failure → replan
 - High risk → adversarial verification
 - Required documentation → scoped Executor work before checks
@@ -98,7 +100,10 @@ One protected invocation seam around every model phase. It detects parent HEAD o
 - `agentic.json` — goal, task graph, decisions, assumptions, statuses
 - `grill-transcript.md` — full-Planner evidence and resolved goal decisions; omitted in Planner-lite
 - `executor.md` / `executor.log` — execution contract and output
-- `checks.log` — deterministic validation evidence
+- `checks.log` — formatted deterministic validation output
+- `check-evidence.json` — structured per-check outcomes and candidate identity
+- `review-evidence.json` — stable requirement references, passed checks and diff identity
+- `lastRun` in agentic.json — terminal outcome, failed stage, retained worktree and elapsed time
 - `verifier-result.json` — verification verdict when admitted
 - `approved-stance.json` — high-complexity stance
 - `failure-analysis.json` — failed phase, reason, attempt, diff stat

@@ -1,0 +1,33 @@
+{
+  "verdict": "fail",
+  "summary": "The extraction re-exports correctly, but the extracted helper returns 41 instead of 42, so the required behavior 'invoking it still returns 42' is violated. The recorded check only asserts that the export is a function and does not verify the return value.",
+  "issues": [
+    {
+      "file": "src/helper.js",
+      "triggeringCase": "Invoking the helper exported by src/main.js (or src/helper.js) returns 41, not 42.",
+      "consequence": "The acceptance criterion 'invoking it still returns 42' is not met; the refactor introduced a behavior change (42 -> 41).",
+      "detail": "src/helper.js defines `exports.helper = () => 41;` and src/main.js re-exports it via `exports.helper = require('./helper.js').helper;`. Running `node -e \"console.log(require('./src/main.js').helper())\"` prints 41. The recorded check (check.cjs) only asserts `typeof require('./src/main.js').helper === 'function'`, so its pass does not establish the required return value of 42."
+    }
+  ],
+  "humanGates": [],
+  "coverage": [
+    {
+      "criterionId": "criterion-278587d255cc63e38649",
+      "kind": "behavior",
+      "evidenceIds": [
+        "diff-19a32e4496f3f34be3a2",
+        "passed-5f2c8ec47f637f63f007"
+      ],
+      "proves": "Both modules export the same helper: the diff shows src/main.js replacing its inline helper with `require('./helper.js').helper`, so main.js and helper.js share one function object (confirmed at runtime: `m.helper === h.helper` is true). This clause is satisfied."
+    },
+    {
+      "criterionId": "criterion-278587d255cc63e38649",
+      "kind": "behavior",
+      "evidenceIds": [
+        "diff-19a32e4496f3f34be3a2",
+        "passed-5f2c8ec47f637f63f007"
+      ],
+      "proves": "The 'invoking it still returns 42' clause fails: the diff shows the extracted helper body returns 41, and the passed check (node check.cjs) only verifies the export is a function, not its return value. Direct execution of the exported helper returns 41, not 42."
+    }
+  ]
+}
