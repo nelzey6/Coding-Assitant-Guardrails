@@ -1,0 +1,32 @@
+{
+  "verdict": "pass",
+  "summary": "The extraction to metric-parser.ts is byte-identical, the re-export preserves the only consumer's unchanged import, and the behavioral check proves 252 metric equivalence cases plus identical formatting.",
+  "issues": [],
+  "humanGates": [],
+  "coverage": [
+    {
+      "criterionId": "criterion-dc0822e69e713cd10c5b",
+      "kind": "structure",
+      "evidenceIds": [
+        "passed-554f643fc0099d032930"
+      ],
+      "proves": "The diff shows MetricMap, METRIC_RE, FORBIDDEN_METRIC_KEYS, and the parseMetricLines body removed from index.ts and added byte-identically to metric-parser.ts, with index.ts now importing and re-exporting both names; the passing typecheck confirms the re-export satisfies the unchanged loop/index.ts consumer."
+    },
+    {
+      "criterionId": "criterion-dc0822e69e713cd10c5b",
+      "kind": "behavior",
+      "evidenceIds": [
+        "passed-59cf174fae24a9efdca3"
+      ],
+      "proves": "The check asserts the re-exported function is reference-identical to the extracted one and compares before/after output across 252 name/value/prefix combinations covering edge cases, plus identical formatMetricsForPrompt for empty and populated inputs."
+    },
+    {
+      "criterionId": "criterion-dc0822e69e713cd10c5b",
+      "kind": "documentation",
+      "evidenceIds": [
+        "passed-554f643fc0099d032930"
+      ],
+      "proves": "PROJECT.md's architecture table gained a new metric-parser.ts ownership row and the existing checks/index.ts row was updated to describe metric formatting plus the re-export, matching the implemented module split."
+    }
+  ]
+}

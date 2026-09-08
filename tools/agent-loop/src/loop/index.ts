@@ -45,7 +45,7 @@ import {
   writeFailureAnalysis,
 } from "../prompts/index.js";
 import { loadPolicy, resolveEffectivePlannerMode, type WorkflowPolicy } from "../policy/index.js";
-import { selectExecutionRoute, validateDirectExecutionResult, type DirectExecutionResult } from "../routing/index.js";
+import { DIRECT_RESULT_CONTRACT, getDirectCheckCommands, selectExecutionRoute, validateDirectExecutionResult, type DirectExecutionResult } from "../routing/index.js";
 import { phaseLatencyDecision, resolveLatencyPolicy, type LatencyRoute } from "../latency/index.js";
 import { runShellScript, validateShellSyntax } from "../tools/shell.js";
 import {
@@ -824,7 +824,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
         try {
           agentCallCounter.count++;
           const agent = task.origin === "direct" && compactExecutor
-            ? { ...cfg.agent, thinking: "medium" as const }
+            ? { ...cfg.agent, thinking: "off" as const }
             : cfg.agent;
           const invocation = await invokeAgentPhase({ ...cfg, agent, promptFile: executorPrompt, workingDirectory: worktreePath, logFile: executorLog, phase: "executor", taskId });
           emitTokenUsage(cfg, invocation, taskId);
@@ -857,8 +857,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           failedStage = "direct_result";
           const directResult = await readPhaseResult<DirectExecutionResult>(cfg, taskId, "direct-result", directResultFile,
             worktreePath, [
-              'Schema: {"verdict":"completed|needs_planner|needs_human","summary":"...","validation":[],"assumptions":[]}',
-              "validation contains only executable additional shell commands, no descriptions. Empty is valid when configured checks suffice. Do not remove needed assertions.",
+              DIRECT_RESULT_CONTRACT,
               `Task: ${JSON.stringify(task)}`, `Configured checks: ${JSON.stringify(knownChecks)}`,
             ].join("\n"), (value) => validateDirectExecutionResult(value, knownChecks.map((check) => check.command)), beforeRepair);
 
@@ -893,7 +892,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
             continue;
           }
 
-          task.validation = [...new Set([...(task.validation ?? []), ...directResult.validation])];
+          task.validation = [...new Set([...(task.validation ?? []), ...getDirectCheckCommands(directResult)])];
           const directState = loadState(cfg.repoRoot, cfg.stateFile)!;
           const directTask = getTasks(directState).find((candidate) => candidate.id === taskId);
           if (directTask) directTask.validation = task.validation;
@@ -903,7 +902,7 @@ export async function runAgenticLoop(config: LoopConfig): Promise<void> {
           // Direct execution owns its accepted assumptions; check retries keep that understanding.
           if (directTask) directTask.plannedContextFingerprint = computePlanContextFingerprint(directState);
           writeState(cfg.repoRoot, directState, cfg.stateFile);
-          appendEvent(cfg.repoRoot, "direct_execution_completed", { task: taskId, summary: directResult.summary, validation: directResult.validation, assumptions: directResult.assumptions }, cfg.runsRoot, cfg.stateFile);
+          appendEvent(cfg.repoRoot, "direct_execution_completed", { task: taskId, summary: directResult.summary, validation: getDirectCheckCommands(directResult), assumptions: directResult.assumptions }, cfg.runsRoot, cfg.stateFile);
         }
 
         ensureBootstrap();

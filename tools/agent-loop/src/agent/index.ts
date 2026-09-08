@@ -13,7 +13,7 @@ export interface AgentConfig {
   /** Seconds before the agent invocation is killed. 0 = no timeout. */
   timeoutSeconds?: number;
   /** Native Pi effort hint for a bounded first attempt; custom commands own their settings. */
-  thinking?: "medium";
+  thinking?: "medium" | "off";
 }
 
 export class AgentError extends Error {
@@ -302,9 +302,13 @@ export async function invokeAgentWithLog(
     command = `claude -p '${prompt}' --output-format json`;
     effectiveTool = "claude";
   } else if (config.tool === "pi") {
-    // Each role starts independently. Ordinary review is a focused evidence
-    // decision; phases without a bounded-execution hint retain operator effort.
-    command = `pi -p "@${resolvedPrompt}" --mode json --no-session${config.thinking || phase === "verifier" ? " --thinking medium" : ""}`;
+    // Each role starts independently. Only bounded execution and ordinary
+    // inspection reduce thinking; other phases retain operator settings.
+    // "Low"/"medium" can silently clamp upward (e.g. DeepSeek v4 Pro).
+    // Ordinary inspection requests no extended thinking; high-risk votes
+    // continue to inherit operator settings.
+    const thinking = config.thinking ?? (phase === "verifier" ? "off" : undefined);
+    command = `pi -p "@${resolvedPrompt}" --mode json --no-session${thinking ? ` --thinking ${thinking}` : ""}`;
     if (phase === "verifier") command += " --tools read,grep,find,ls,write";
     effectiveTool = "pi";
   } else {

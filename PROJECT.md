@@ -24,6 +24,7 @@ cd ../..
 ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/acceptance-proof-smoke.ts
 
 # Structured checks and reviewer evidence
+./tools/agent-loop/node_modules/.bin/tsx tests/agentic/direct-check-contract-smoke.ts
 ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/check-evidence-smoke.ts
 ./tools/agent-loop/node_modules/.bin/tsx tests/agentic/review-evidence-smoke.ts
 
@@ -122,9 +123,9 @@ Canonical state types live only in `state/index.ts`. Context, scope, agent, prom
 15. Apply run branch to parent checkout as unstaged changes unless `--no-apply`.
 16. Record `lastRun` and `run_finished`/`run_latency` on success and handled failure. Stopped tasks cannot remain `running`. Abrupt process death is not covered by this finalizer; automatic resume is not implemented.
 
-The live review evaluator accepts an optional `--command` template for controlled adapter comparisons. It records every result, contract failure, latency and retained fixture under `.agent-runs/live-review-*/`; its five extraction cases are a focused regression sample, not a general quality benchmark. See [measured performance and limits](docs/agentic-loop-performance.md).
+The live review evaluator accepts an optional `--command` template for controlled adapter comparisons. It records every result, contract failure, latency and retained fixture under `.agent-runs/live-review-*/`; its ten extraction, documentation and concurrency cases are a focused regression sample, not a general quality benchmark. See [measured performance and limits](docs/agentic-loop-performance.md).
 
-By default every model phase starts a separate clean session; no conversation is resumed or handed from Executor to Verifier. Native Pi uses ephemeral sessions (`--no-session`) and medium reasoning for ordinary single review. A first bounded Direct Executor attempt also uses medium; planned execution, retries, Planner and high-risk adversarial votes retain the operator's configured effort. Explicit `--command` templates remain operator-owned, including session and effort settings; Claude effort is unchanged. Review starts from candidate evidence and batches source reads around unresolved correctness questions. Ordinary native Pi review enables read, grep, find, ls and write only: the harness owns shell checks, and the reviewer inspects assertions and writes its result. High-risk review and explicit command templates retain their tools. Candidate/parent guards still apply. It must still reject defects, inadequate behavioral proof and human gates.
+By default every model phase starts a separate clean session; no conversation is resumed or handed from Executor to Verifier. Native Pi uses ephemeral sessions (`--no-session`) and `off` extended thinking for ordinary single review. A first bounded Direct Executor attempt also requests off; planned execution, retries, Planner and high-risk adversarial votes retain the operator's configured effort. Explicit `--command` templates remain operator-owned, including session and effort settings; Claude effort is unchanged. Requested levels may be clamped by the provider adapter: installed Pi 0.79.9 maps DeepSeek v4 Pro low/medium to high, while off is supported. Review starts from candidate evidence and batches source reads around unresolved correctness questions. Ordinary native Pi review enables read, grep, find, ls and write only: the harness owns shell checks, and the reviewer inspects assertions and writes its result. High-risk review and explicit command templates retain their tools. Candidate/parent guards still apply. It must still reject defects, inadequate behavioral proof and human gates.
 
 Soft run targets are 60 seconds direct, 180 seconds planned, and 300 seconds complex. `phase_latency`, `run_latency`, and `latency_target_exceeded` expose measured durations and overruns. No predictive forecasts or latency-triggered Planner calls. Targets never terminate active work or bypass safety phases. High-risk reviewers run concurrently with distinct review focuses.
 
@@ -209,3 +210,5 @@ Pi JSON logs retain only session metadata, assistant/tool completion summaries, 
 4. Root `adrs/`
 5. `docs/agentic-loop-reference.md`
 6. Legacy PowerShell docs and smokes
+
+Direct Executor artifacts use `additionalChecks: [{command, reason?}]`; only command is executable, and configured checks remain mandatory. The routing module owns this shared prompt/repair contract and legacy `validation` decoding. Documentation coverage binds directly to the candidate diff; behavioral/structural evidence references stay explicit.

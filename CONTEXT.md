@@ -40,7 +40,7 @@ Deterministic first decision for an empty goal. A bounded concrete goal naming o
 Synthetic low-complexity primary task whose acceptance criterion is Goal and whose scope is exactly the named files.
 
 **Direct execution result**:
-Executor JSON verdict: `completed`, `needs_planner`, or `needs_human`, with summary, assumptions, and zero to three additional executable validation commands. Existing configured checks may satisfy completion without additions.
+Executor JSON verdict: `completed`, `needs_planner`, or `needs_human`, with summary, assumptions, and zero to three `additionalChecks: [{command, reason?}]`. Reports belong in summary; command contains executable shell only. Legacy `validation: string[]` artifacts remain readable. Existing configured checks may satisfy completion without additions.
 
 **Primary slice**:
 Single coherent implementation unit produced by full Planner. It owns goal delivery and main acceptance proof.

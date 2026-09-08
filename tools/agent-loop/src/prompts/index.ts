@@ -1,3 +1,4 @@
+import { DIRECT_RESULT_CONTRACT } from "../routing/index.js";
 import { validateAcceptanceChecks } from "../checks/index.js";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "fs";
 import { join, dirname, resolve } from "path";
@@ -560,8 +561,7 @@ export function writeExecutorPrompt(promptFile: string, opts: ExecutorPromptOpti
       "- If scope or intent is insufficient, make no repository edits and return needs_planner.",
       "- If human authority is required, make no repository edits and return needs_human.",
       `- Write direct execution JSON only to: ${directResultFile}`,
-      '- Schema: {"verdict":"completed|needs_planner|needs_human","summary":"...","validation":[],"assumptions":[]}',
-      '- Configured checks below are mandatory and will run after execution. Leave validation empty when they suffice. Add at most three missing focused commands only; command strings contain executable shell text, never descriptions.',
+      DIRECT_RESULT_CONTRACT,
       '- Prefer the existing checks; do not create temporary checks merely to repeat their coverage.',
     ] : []),
     `- Keep task artifacts under this run directory when useful: ${runDir}`,
@@ -695,6 +695,7 @@ export function writeVerifierPrompt(promptFile: string, opts: VerifierPromptOpti
     adversarialBlock,
     `Write JSON only to this path: ${resultFile}`,
     'Schema: {"verdict":"pass|fail|needs_human","summary":"short conclusion","issues":[],"humanGates":[],"coverage":[{"criterionId":"copy requirement ID","kind":"behavior|structure|documentation","evidenceIds":["copy evidence IDs"],"proves":"why this evidence covers the requirement"}]}',
+    'For documentation, omit evidenceIds: {"criterionId":"copy requirement ID","kind":"documentation","proves":"what the diff establishes"}. The harness binds documentation to this candidate diff; legacy references on documentation entries are ignored.',
     'issues may contain strings or objects {"file":"...","triggeringCase":"...","consequence":"...","detail":"optional"}. Summary: one short sentence. Each proves field: one short sentence describing the evidence, without repeating requirement text or code.',
     "Cover every requirement ID, including all clauses of compound requirements. Group clauses supported by the same evidence into one entry; use separate entries only for different evidence kinds. Never rewrite IDs or substitute criterion text. A fail verdict needs concrete issues, not a coverage essay.",
     "Behavior claims need passed check evidence. A diff, typecheck alone, or unrelated test does not establish behavior. Fail if behavioral assertions are missing.",
@@ -754,10 +755,13 @@ export function validateVerifierResult(value: unknown, task: Task, evidence: Rev
     if (!item || typeof item !== "object") { errors.push("Invalid coverage entry"); continue; }
     if (!requirements.has(String(item.criterionId))) errors.push("Unknown criterionId; copy an ID from evidence requirements");
     if (!["behavior", "structure", "documentation"].includes(String(item.kind))) errors.push("Invalid coverage kind");
-    const ids = Array.isArray(item.evidenceIds) ? item.evidenceIds : [];
+    // There is no evidence-selection decision for documentation: only this
+    // checked candidate's diff can support it. Keep meaningful choices explicit
+    // for behavior/structure, without a model round trip to retype a fixed ID.
+    const ids = item.kind === "documentation" ? [evidence.diff.id]
+      : Array.isArray(item.evidenceIds) ? item.evidenceIds : [];
     if (!ids.length || ids.some((id) => id !== evidence.diff.id && !checks.has(id))) errors.push("Unknown or missing evidence ID");
     if (item.kind === "behavior" && !ids.some((id) => checks.has(id))) errors.push("Behavior requires a passed assertion check");
-    if (item.kind === "documentation" && !ids.includes(evidence.diff.id)) errors.push("Documentation requires diff evidence");
     if (typeof item.proves !== "string" || !item.proves.trim()) errors.push("Coverage explanation is required");
   }
   for (const id of requirements) if (!coverage.some((item) => item?.criterionId === id)) errors.push(`Missing coverage for ${id}`);

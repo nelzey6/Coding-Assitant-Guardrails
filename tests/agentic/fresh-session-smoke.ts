@@ -20,18 +20,20 @@ async function main() {
       assert.ok(args.includes('--no-session'), `${phase} must use an ephemeral fresh session`);
       assert.equal(args.includes('--thinking'), phase === 'verifier', 'Only ordinary review overrides effort');
       if (phase === 'verifier') {
-        assert.equal(args[args.indexOf('--thinking') + 1], 'medium');
+        assert.equal(args[args.indexOf('--thinking') + 1], 'off');
         assert.equal(args[args.indexOf('--tools') + 1], 'read,grep,find,ls,write', 'Ordinary review inspects evidence without a shell');
       } else assert.ok(!args.includes('--tools'), 'Other phases retain their tools');
       assert.ok(!args.some(arg => ['--continue', '--resume', '--session'].includes(arg)));
     }
-    await invokeAgentWithLog(prompt, {tool: 'pi', thinking: 'medium'}, dir, join(dir, 'bounded.log'), 'executor');
-    const bounded = readFileSync(join(dir, 'arguments.txt'), 'utf8').trim().split('\n');
-    assert.equal(bounded[bounded.indexOf('--thinking') + 1], 'medium', 'Bounded execution uses requested native effort');
+    for (const thinking of ['medium', 'off'] as const) {
+      await invokeAgentWithLog(prompt, {tool: 'pi', thinking}, dir, join(dir, `bounded-${thinking}.log`), 'executor');
+      const bounded = readFileSync(join(dir, 'arguments.txt'), 'utf8').trim().split('\n');
+      assert.equal(bounded[bounded.indexOf('--thinking') + 1], thinking, 'Bounded execution uses requested native effort');
+    }
     await invokeAgentWithLog(prompt, {tool: 'pi', commandTemplate: 'pi -p "{prompt}" --thinking high'}, dir, join(dir, 'custom.log'), 'verifier');
     const custom = readFileSync(join(dir, 'arguments.txt'), 'utf8');
     assert.ok(custom.includes('high'));
-    assert.ok(!custom.includes('medium'), 'Explicit operator command owns its effort/session settings');
+    assert.deepEqual(custom.trim().split('\n'), ['-p', `@${prompt}`, '--thinking', 'high'], 'Explicit operator command owns effort, session and tool settings');
   } finally {
     process.env.PATH = oldPath;
     rmSync(dir, {recursive: true, force: true});

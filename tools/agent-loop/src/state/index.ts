@@ -102,7 +102,8 @@ export interface ReviewEvidence {
 }
 export interface Coverage {
   criterionId: string;
-  evidenceIds: string[];
+  /** Documentation always binds to the candidate diff; references are only selected for other kinds. */
+  evidenceIds?: string[];
   kind: "behavior" | "structure" | "documentation";
   proves: string;
 }

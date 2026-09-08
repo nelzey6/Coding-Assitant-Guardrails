@@ -11,8 +11,19 @@ export type ExecutionRoute =
 export interface DirectExecutionResult {
   verdict: "completed" | "needs_planner" | "needs_human";
   summary: string;
-  validation: string[];
+  additionalChecks?: Array<{ command: string; reason?: string }>;
+  /** Legacy artifact compatibility; new executors use additionalChecks. */
+  validation?: string[];
   assumptions: string[];
+}
+
+export const DIRECT_RESULT_CONTRACT = [
+  'Schema: {"verdict":"completed|needs_planner|needs_human","summary":"...","additionalChecks":[],"assumptions":[]}',
+  'Configured checks are mandatory and harness-owned. Leave additionalChecks empty when they suffice. Otherwise add at most three objects: {"command":"executable shell text only","reason":"why this additional check is needed"}. Put reports and pass/fail notes in summary, never in command. Do not remove needed assertions.',
+].join("\n");
+
+export function getDirectCheckCommands(result: Pick<DirectExecutionResult, "additionalChecks" | "validation">): string[] {
+  return result.additionalChecks?.map((check) => check.command) ?? result.validation ?? [];
 }
 
 const CONCRETE_ACTION = /\b(add|change|correct|document|edit|extract|move|split|refactor|fix|remove|rename|replace|update|write)\b/i;
@@ -99,21 +110,28 @@ export function validateDirectExecutionResult(value: unknown, knownChecks: strin
     errors.push("verdict must be completed, needs_planner, or needs_human");
   }
   if (!String(result.summary ?? "").trim()) errors.push("summary is required");
-  if (!Array.isArray(result.validation) || result.validation.some((command) => typeof command !== "string" || !command.trim())) {
-    errors.push("validation must be an array of non-empty command strings");
-  }
+  const structured = result.additionalChecks !== undefined;
+  const checks = structured ? result.additionalChecks : result.validation;
+  const validChecks = checks === undefined || (Array.isArray(checks) && checks.every((check) =>
+    structured
+      ? check !== null && typeof check === "object" && typeof check.command === "string" && !!check.command.trim()
+        && (check.reason === undefined || typeof check.reason === "string")
+      : typeof check === "string" && !!check.trim()));
+  if (!validChecks) errors.push("additionalChecks must contain command objects (legacy validation must contain command strings)");
   if (!Array.isArray(result.assumptions) || result.assumptions.some((assumption) => typeof assumption !== "string")) {
     errors.push("assumptions must be a string array");
   }
-  if (result.verdict === "completed" && (result.validation?.length ?? 0) + knownChecks.length < 1) {
-    errors.push("completed direct execution requires at least one validation command");
-  }
-  if ((result.validation?.length ?? 0) > 3) errors.push("direct execution may return at most three validation commands");
-  if (result.verdict === "completed" && Array.isArray(result.validation) && result.validation.every((c) => typeof c === "string")) errors.push(...validateAcceptanceChecks([...knownChecks, ...result.validation]));
-  if (Array.isArray(result.validation)) for (const command of result.validation) {
-    if (typeof command !== "string") continue;
-    const error = validateShellSyntax(command);
-    if (error) errors.push(`Invalid proposed check syntax: ${error}`);
+  if (validChecks) {
+    const commands = getDirectCheckCommands(result);
+    if (result.verdict === "completed") {
+      if (commands.length + knownChecks.length < 1) errors.push("completed direct execution requires at least one validation command");
+      errors.push(...validateAcceptanceChecks([...knownChecks, ...commands]));
+    }
+    if (commands.length > 3) errors.push("direct execution may return at most three validation commands");
+    for (const command of commands) {
+      const error = validateShellSyntax(command);
+      if (error) errors.push(`Invalid proposed check syntax: ${error}`);
+    }
   }
   return errors;
 }

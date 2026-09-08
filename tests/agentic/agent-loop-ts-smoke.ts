@@ -163,7 +163,7 @@ if (prompt.includes("Task JSON:")) {
   else if (prompt.includes('"title": "Architecture change"')) writeFileSync("architecture.txt", "done");
   else if (prompt.includes('"title": "Scope violation"')) writeFileSync("outside.txt", "bad");
   else writeFileSync("output.txt", "done");
-  if (directResult) json(directResult, { verdict:"completed", summary:"direct task complete", validation:["node check.mjs"], assumptions:[] });
+  if (directResult) json(directResult, { verdict:"completed", summary:"direct task complete", additionalChecks:[{command:"node check.mjs",reason:"Check output assertions (not executable commentary)"}], assumptions:[] });
   process.exit(0);
 }
 throw new Error("unknown prompt");
